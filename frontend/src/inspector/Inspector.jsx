@@ -18,6 +18,7 @@ import BindTab from './BindTab.jsx'
 import FieldsTab from './FieldsTab.jsx'
 import LinksTab from './LinksTab.jsx'
 import OverviewTab from './OverviewTab.jsx'
+import DataTab from './DataTab.jsx'
 import RulesTab from './RulesTab.jsx'
 import StyleTab from './StyleTab.jsx'
 import ZoneTab from './ZoneTab.jsx'
@@ -28,6 +29,7 @@ import {
   FIELDS,
   LINKS,
   OVERVIEW,
+  DATA,
   RULES,
   STYLE,
   TAB_LABELS,
@@ -174,6 +176,13 @@ export default function Inspector({
           <FieldsTab key={space.spaceId ?? 'none'} node={node} spaces={spaces} space={space} />
         )}
         {tab === RULES && <RulesTab node={node} onNotify={onNotify} />}
+        {tab === DATA && (
+          <DataTab
+            node={node}
+            onUpdate={(patch) => onUpdateNode(node.id, patch)}
+            onNotify={onNotify}
+          />
+        )}
         {tab === STYLE && (
           <StyleTab
             node={node}

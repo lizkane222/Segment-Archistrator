@@ -17,6 +17,7 @@ import {
   rulesSubject,
   spacesFromGraph,
   tabsFor,
+  DATA,
 } from './tabs.js'
 
 const node = (kind, data = {}) => ({ id: `${kind}:1`, data: { kind, ...data } })
@@ -273,5 +274,38 @@ describe('reconcileTab', () => {
         expect(available).toContain(reconcileTab(current, candidate))
       }
     }
+  })
+})
+
+/*
+ * The Data tab.
+ *
+ * It appears for exactly two kinds, and the test that matters is the negative one: a Data tab on a
+ * source would be an empty textarea claiming a source has a config, which is a wrong statement about
+ * Segment rather than a cosmetic slip.
+ */
+describe('the Data tab', () => {
+  const node = (kind) => ({ id: `n:${kind}`, type: 'segmentNode', data: { kind, name: kind } })
+
+  it('appears for a SQL Table and a Data Graph', () => {
+    expect(tabsFor(node('sql_table'))).toContain(DATA)
+    expect(tabsFor(node('data_graph'))).toContain(DATA)
+  })
+
+  it('appears for nothing else', () => {
+    for (const kind of ['source', 'destination', 'audience', 'linked_audience', 'space', 'warehouse']) {
+      expect(tabsFor(node(kind)), kind).not.toContain(DATA)
+    }
+  })
+
+  it('comes before Style, because for those two kinds it is the component', () => {
+    /* A Data Graph with no config and a SQL Table with no CSV are both empty boxes, so this is the
+       first thing anyone does after dropping one -- and tab order is what a panel opens on. */
+    const tabs = tabsFor(node('sql_table'))
+    expect(tabs.indexOf(DATA)).toBeLessThan(tabs.indexOf(STYLE))
+  })
+
+  it('never appears on a zone, which has no kind at all', () => {
+    expect(tabsFor({ id: 'zone-unify', type: 'zone', data: { id: 'unify' } })).not.toContain(DATA)
   })
 })

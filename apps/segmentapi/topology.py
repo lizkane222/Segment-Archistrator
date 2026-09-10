@@ -37,6 +37,11 @@ ZONE_IDENTITY_SETTINGS = "identity_settings"
 # Engage sub-zones
 ZONE_COMPUTATIONS = "computations"
 ZONE_DEBUGGER = "debugger"
+# Linked Audiences are their own region of Engage rather than more audiences in it. They are built by
+# traversing warehouse entities through a Data Graph instead of from event and trait history, so
+# nothing upstream of them is the same -- and a diagram that mixed the two would suggest an ordinary
+# audience could reference an entity, which is the commonest misunderstanding of the feature.
+ZONE_LINKED_AUDIENCES = "linked_audiences"
 
 ZONES = [
     {
@@ -150,6 +155,16 @@ ZONES = [
         "label": "Debugger",
         "description": "Events as they arrive. Populated by a walkthrough.",
         "order": 1,
+        "parent": ZONE_ENGAGE,
+        "subdivision": True,
+    },
+    {
+        "id": ZONE_LINKED_AUDIENCES,
+        "label": "Linked Audiences",
+        "description": (
+            "Audiences built by traversing warehouse entities, not event history."
+        ),
+        "order": 2,
         "parent": ZONE_ENGAGE,
         "subdivision": True,
     },
@@ -335,8 +350,25 @@ KINDS = {
     },
     # Engage
     "audience": {"label": "Audience", "zone": ZONE_ENGAGE, "api": True},
+    # Built by walking entity relationships rather than by matching event history, which is why it is
+    # its own kind and not a flag on `audience`: what may feed it, what it can be filtered on and
+    # where it is configured are all different. `api: False` because the Public API does not list
+    # them -- like a journey, these are transcribed by hand.
+    "linked_audience": {
+        "label": "Linked Audience",
+        "zone": ZONE_LINKED_AUDIENCES,
+        "api": False,
+    },
     # No Journeys Public API: these are always hand-authored.
     "journey": {"label": "Journey", "zone": ZONE_ENGAGE, "api": False},
+    # The entity model a Linked Audience traverses: which warehouse tables exist, and how they join.
+    # Unify's, not Engage's, because it is part of how profiles are understood rather than part of
+    # what is done with them -- and one Data Graph serves every Linked Audience in the space.
+    "data_graph": {"label": "Data Graph", "zone": ZONE_UNIFY, "api": False},
+    # A warehouse table as it appears in a diagram: columns, and a query someone ran to get them.
+    # Deliberately zoned to Unify rather than to Connections' warehouses: what makes a table worth
+    # drawing here is that a Data Graph or a Linked Audience refers to it.
+    "sql_table": {"label": "SQL Table", "zone": ZONE_UNIFY, "api": False},
     "identity_setting": {
         "label": "Identity Resolution Rule",
         "zone": ZONE_IDENTITY_SETTINGS,
@@ -399,8 +431,18 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # nothing else.
     "destination_mapping": {"destination", "destination_function"},
     "destination": set(),  # terminal
-    "warehouse": {"reverse_etl_model"},
+    "warehouse": {"reverse_etl_model", "sql_table", "data_graph"},
     "reverse_etl_model": {"destination"},
+    # A table feeds the entity model that describes it, and the audience that queries it. The arrow
+    # runs from the table outward because that is the direction the *data* is read in -- a Linked
+    # Audience pulls from the warehouse, it does not push.
+    "sql_table": {"data_graph", "linked_audience"},
+    # The entity model is what a Linked Audience traverses, so it points at them. It also feeds the
+    # space: the Data Graph is part of how profiles are understood, not a thing beside them.
+    "data_graph": {"linked_audience", "space"},
+    # Terminal in the same sense a destination is: it is the thing being built, and what happens to
+    # an audience afterwards -- a sync to a destination -- is drawn from the audience side.
+    "linked_audience": {"destination", "destination_function"},
     # Not an event path: a plan is a definition, and the arrow says "this source is
     # connected to this plan, and its schema controls enforce it". Drawn in the
     # direction of enforcement rather than of data, because the alternative is a
@@ -416,6 +458,12 @@ ALLOWED_EDGES: dict[str, set[str]] = {
         "audience",
         "profile_api",
         "profile_sync",
+        # A space is where a Data Graph and its Linked Audiences are configured, so both are
+        # reachable from it. Not the other way round for the audience: what a Linked Audience is
+        # *built from* is the entity model, and drawing space -> linked_audience as the only path
+        # would hide the Data Graph the feature depends on.
+        "data_graph",
+        "linked_audience",
     },
     "identity_resolution": {"computed_trait", "audience", "profile", "profile_sync"},
     "computed_trait": {"audience", "journey", "profile_sync"},

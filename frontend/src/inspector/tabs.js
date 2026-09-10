@@ -14,6 +14,10 @@ export const RULES = 'rules'
 export const STYLE = 'style'
 export const LINKS = 'links'
 export const ZONE = 'zone'
+/* Editing the data behind a component whose *content is a table or a config block*: a SQL Table's CSV
+   and query, a Data Graph's entity model. Its own tab rather than more of Overview, because a textarea
+   holding forty lines of CSV alongside a name field is a panel with two different jobs. */
+export const DATA = 'data'
 
 export const TAB_LABELS = {
   [BIND]: 'Bind',
@@ -23,6 +27,7 @@ export const TAB_LABELS = {
   [STYLE]: 'Style',
   [LINKS]: 'Links',
   [ZONE]: 'Zone',
+  [DATA]: 'Data',
 }
 
 /*
@@ -123,6 +128,10 @@ export function bindable(node) {
   return data.bound === false || Boolean(data.placeholder)
 }
 
+/* The kinds whose content is edited as free text rather than as fields. Both are hand-transcribed:
+   Segment publishes no API for a Data Graph, and a SQL Table is this tool's own idea. */
+export const DATA_KINDS = new Set(['sql_table', 'data_graph'])
+
 export function tabsFor(node) {
   if (!node) return []
 
@@ -139,6 +148,10 @@ export function tabsFor(node) {
   tabs.push(OVERVIEW)
   if (FIELD_KINDS.has(kind)) tabs.push(FIELDS)
   if (rulesSubject(node)) tabs.push(RULES)
+  /* Before Style and Links, because for these two kinds it *is* the component -- a Data Graph with no
+     config and a SQL Table with no CSV are both empty boxes, so this is the first thing anyone does
+     after dropping one. */
+  if (DATA_KINDS.has(kind)) tabs.push(DATA)
   tabs.push(STYLE, LINKS)
   return tabs
 }

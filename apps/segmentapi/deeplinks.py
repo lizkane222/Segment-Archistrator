@@ -53,6 +53,12 @@ DOCS_URL_TEMPLATES = {
     "computed_trait": f"{DOCS_BASE}/unify/traits/computed-traits",
     "audience": f"{DOCS_BASE}/engage/audiences",
     "journey": f"{DOCS_BASE}/engage/journeys",
+    "linked_audience": f"{DOCS_BASE}/engage/audiences/linked-audiences",
+    "data_graph": f"{DOCS_BASE}/unify/data-graph",
+    # No docs page for "a warehouse table as drawn on a diagram" -- it is this tool's own idea, not a
+    # Segment feature. The Data Graph page is where a reader who followed the link would want to end
+    # up, because that is what makes a table worth drawing here.
+    "sql_table": f"{DOCS_BASE}/unify/data-graph",
     "tracking_plan": f"{DOCS_BASE}/protocols/tracking-plan/create",
     # One page documents both library types, so both kinds point at it. Splitting
     # them across an #event-libraries / #property-libraries anchor was tried and

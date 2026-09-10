@@ -17,7 +17,9 @@ import { ChevronDown, ChevronRight, Link2, Lock, TriangleAlert } from 'lucide-re
 
 import AnchorTooltip from './AnchorTooltip.jsx'
 import ConnectionHandles from './ConnectionHandles.jsx'
+import DataGraphBlock from './DataGraphBlock.jsx'
 import IdentityRuleTable from './IdentityRuleTable.jsx'
+import SqlTableRows from './SqlTableRows.jsx'
 import { InternalSections } from './GroupStackNode.jsx'
 import { useChrome } from '../chrome.js'
 import {
@@ -384,6 +386,11 @@ function SegmentNode({ id, data, selected, dragging }) {
               inline rather than behind a chip like the sections above, because the rows
               are the whole content of the component and a popover would hide it. */}
           {data.kind === 'identity_setting' && <IdentityRuleTable data={data} />}
+          {/* Three more kinds whose *content is the component*, drawn inline for the same reason the
+              identity rules are: a labelled box saying "SQL Table" communicates none of what the reader
+              opened the diagram to check. */}
+          {data.kind === 'sql_table' && <SqlTableRows data={data} />}
+          {data.kind === 'data_graph' && <DataGraphBlock data={data} />}
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1">

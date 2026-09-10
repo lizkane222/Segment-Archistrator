@@ -22,12 +22,15 @@ import {
   Globe,
   Layers,
   ListChecks,
+  Network,
   RefreshCw,
   Route,
   Send,
+  Share2,
   ShieldCheck,
   Sigma,
   Split,
+  Table2,
   Tags,
   Target,
   User,
@@ -119,6 +122,35 @@ export const KIND_STYLES = {
   audience: { icon: Users, shape: 'rounded', bg: '#ffffff', border: '#db131a', text: '#121c2d' },
   /* Journeys are never API-discovered, so they are always hand-drawn. */
   journey: { icon: Route, shape: 'rounded', bg: '#fdeced', border: '#db131a', text: '#8f0d12' },
+  /* Engage's red, like an audience, because that is what it is -- but filled, since like a journey it
+     is always hand-drawn and never read from the API. The fill is what says "somebody asserted this"
+     across the whole canvas. */
+  linked_audience: {
+    icon: Network,
+    shape: 'rounded',
+    bg: '#fdeced',
+    border: '#db131a',
+    text: '#8f0d12',
+  },
+
+  /* Unify's violet, and both wider than the default: a Data Graph's content is a config block and a
+     SQL table's is columns, so neither is a label in a box. */
+  data_graph: {
+    icon: Share2,
+    shape: 'sharp',
+    bg: '#ffffff',
+    border: '#6f42c1',
+    text: '#4c2a91',
+    defaultWidth: 300,
+  },
+  sql_table: {
+    icon: Table2,
+    shape: 'sharp',
+    bg: '#ffffff',
+    border: '#6f42c1',
+    text: '#4c2a91',
+    defaultWidth: 320,
+  },
 
   /* --- Outside Segment ----------------------------------------------------- */
   /* Deliberately not a topology kind. It stands for something the customer runs
@@ -207,6 +239,7 @@ export const ZONE_STYLES = {
   engage: { bg: 'var(--color-zone-engage)', border: 'var(--color-zone-engage-border)' },
   computations: subZoneOf('engage'),
   debugger: subZoneOf('engage'),
+  linked_audiences: subZoneOf('engage'),
 }
 
 /* A custom zone gets the same grey as a custom component, so a region the

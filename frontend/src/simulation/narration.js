@@ -188,6 +188,27 @@ const NARRATION = {
     why: 'A journey is the multi-step version of an audience: wait, branch, and send over days rather than evaluate once.',
     caveat: 'Segment publishes no Journeys API, so this journey was drawn by hand and its entry conditions cannot be read or simulated.',
   },
+  linked_audience: {
+    what: (data) =>
+      `Membership is decided by walking entity relationships in the warehouse${
+        data.entity ? ` starting from ${data.entity}` : ''
+      } — not by matching this event. An event can change a profile's identity, and so which entities it reaches, but the audience is recomputed on its own schedule.`,
+    why: 'A Linked Audience asks a question an ordinary audience cannot: "accounts whose last order was over $500", where the order lives in a warehouse table and not in the profile.',
+    /* The distinction the whole kind exists to make. Conflating it with an audience is the commonest
+       misunderstanding of the feature, and a walkthrough that implied an event evaluated it would be
+       teaching exactly that. */
+    caveat: 'Not event-driven. It runs against the warehouse on a schedule, so no single event decides membership — and nothing here can read the entity data to guess at it.',
+  },
+  data_graph: {
+    what: 'Nothing passes through. It is the model that says which warehouse tables exist and how they join, which is what makes an entity reachable from a profile.',
+    why: 'Without it a Linked Audience has nothing to traverse: the Data Graph is where "an account has many orders" is written down.',
+    caveat: 'Its configuration is transcribed here rather than read — Segment publishes no API for it, so what this shows is what someone asserted.',
+  },
+  sql_table: {
+    what: 'A warehouse table, so nothing flows through it on an event path. It is read from, on the schedule of whatever reads it.',
+    why: 'Drawn when a Data Graph or a Linked Audience refers to a table and a reader needs to see its columns to follow the entity model.',
+    caveat: 'The rows shown are from a CSV pasted or uploaded here, filtered by a query run in the browser. They are an illustration, not a live read of the warehouse.',
+  },
   custom: {
     what: (data) =>
       data.description?.trim() ||
