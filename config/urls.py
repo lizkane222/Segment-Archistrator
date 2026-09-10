@@ -39,6 +39,7 @@ def spa_index(request):
 urlpatterns = [
     path("api/", include("apps.auth_workspace.urls")),
     path("api/", include("apps.catalog.urls")),
+    path("api/", include("apps.feedback.urls")),
     path("api/", include("apps.diagrams.urls")),
     path("api/", include("apps.nuances.urls")),
     # Catch-all for client-side routes. Must stay last, and must not shadow

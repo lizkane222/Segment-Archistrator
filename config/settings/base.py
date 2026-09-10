@@ -26,6 +26,7 @@ INSTALLED_APPS = [
     "apps.auth_workspace",
     "apps.catalog",
     "apps.diagrams",
+    "apps.feedback",
     "apps.nuances",
 ]
 
@@ -118,6 +119,27 @@ SEGMENT_PROFILE_API_BASE = "https://profiles.segment.com/v1"
 # it, sync_catalog falls back to borrowing an existing session's token.
 SEGMENT_CATALOG_TOKEN = env("SEGMENT_CATALOG_TOKEN", default="")
 SEGMENT_CATALOG_REGION = env("SEGMENT_CATALOG_REGION", default="us")
+
+# --- Airtable (the feedback form) -------------------------------------------
+#
+# A personal access token with `data.records:write` and `schema.bases:read`.
+#
+# It lives here and *only* here, server-side, and the form posts to this app rather than to Airtable.
+# That is the whole reason `apps/feedback` exists as a backend endpoint at all: a token with
+# `data.records:write` in a frontend bundle is a token anyone who opens the network tab can use to
+# write to -- and, with `schema.bases:read`, enumerate -- the base. There is no such thing as a
+# browser-safe write token.
+#
+# Empty is a supported state, not a misconfiguration: the feedback form is simply unavailable, and the
+# UI says so rather than offering a form whose submit fails.
+AIRTABLE_API_KEY = env("AIRTABLE_API_KEY", default="")
+# Which base and table. Discoverable with `manage.py airtable_schema`, which is also what confirms the
+# field names this app writes to.
+AIRTABLE_BASE_ID = env("AIRTABLE_BASE_ID", default="")
+AIRTABLE_TABLE = env("AIRTABLE_TABLE", default="Feedback")
+
+# What this app calls itself in the `App` field, so one base can collect feedback from several tools.
+AIRTABLE_APP_NAME = env("AIRTABLE_APP_NAME", default="Segment Archistrator")
 
 # Cache TTLs, in seconds. Space Schema is capped at 25 req/min, so it gets a
 # much longer TTL than the general workspace resources.

@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react'
-import { KeyRound, LogOut, RefreshCw, TriangleAlert, Workflow } from 'lucide-react'
+import { KeyRound, LogOut, MessageSquarePlus, RefreshCw, TriangleAlert, Workflow } from 'lucide-react'
 
 import Canvas from './canvas/Canvas.jsx'
 import ConnectDialog from './auth/ConnectDialog.jsx'
@@ -27,6 +27,7 @@ import NuancesDialog from './commands/NuancesDialog.jsx'
 import OpenDialog from './diagram/OpenDialog.jsx'
 import Palette from './palette/Palette.jsx'
 import EventPreview from './simulation/EventPreview.jsx'
+import FeedbackDialog from './feedback/FeedbackDialog.jsx'
 import WalkthroughDrawer from './simulation/WalkthroughDrawer.jsx'
 import { Toasts, useToasts } from './ui/Toasts.jsx'
 import { clearSchemaCache } from './inspector/useSpaceSchema.js'
@@ -81,7 +82,7 @@ import {
   serializeGraph,
 } from './diagram/serialize.js'
 import { exportPdf, exportPng, waitForRender } from './diagram/exportImage.js'
-import { meta } from './services/api.js'
+import { feedback as feedbackApi, meta } from './services/api.js'
 
 export default function AppShell({ workspace, onConnected, onSignOut }) {
   const [topology, setTopology] = useState(null)
@@ -322,6 +323,28 @@ function Workbench({
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [connectOpen, setConnectOpen] = useState(false)
+  /*
+   * The feedback form, and whether this deployment has one.
+   *
+   * Asked once, on mount. An unconfigured Airtable is a supported state -- someone running this locally
+   * has no token -- and the honest response is not to draw the button at all rather than to offer a form
+   * whose submit fails. `null` means "have not asked yet", which is distinct from `{available: false}`.
+   */
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [feedbackConfig, setFeedbackConfig] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    feedbackApi
+      .config()
+      .then((result) => !cancelled && setFeedbackConfig(result))
+      /* Swallowed: a missing feedback endpoint is not something to interrupt anyone about, and the
+         button simply does not appear. */
+      .catch(() => !cancelled && setFeedbackConfig({ available: false }))
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [drawing, setDrawing] = useState(false)
   /* Culling has to be off while the canvas is captured -- see exportImage.js. */
   const [exporting, setExporting] = useState(false)
@@ -1110,7 +1133,7 @@ function Workbench({
   useShortcuts({
     context: commandContext,
     onRefuse: (message) => notify({ tone: 'info', message }),
-    enabled: !dialogOpen && !connectOpen && !nuancesFor,
+    enabled: !dialogOpen && !connectOpen && !nuancesFor && !feedbackOpen,
   })
 
   /*
@@ -1358,6 +1381,10 @@ function Workbench({
               onNotify={notify}
             />
           )}
+          {feedbackOpen && (
+            <FeedbackDialog config={feedbackConfig} onClose={() => setFeedbackOpen(false)} />
+          )}
+
           <Toasts toasts={toasts} onDismiss={dismiss} />
 
           {/* Inside `main`, so it is positioned against the canvas and clears the

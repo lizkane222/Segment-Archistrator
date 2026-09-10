@@ -54,7 +54,17 @@ const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 async function request(path, { method = 'GET', body, signal } = {}) {
   const headers = { Accept: 'application/json' }
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  /*
+   * FormData is passed through untouched, and deliberately without a `Content-Type`.
+   *
+   * `JSON.stringify(formData)` is `"{}"` -- it has no enumerable own properties -- so a file upload
+   * would arrive as an empty object with a 200 and nothing anywhere to say the files had been dropped.
+   * And the header has to be *absent* rather than set: a multipart body needs a boundary parameter that
+   * only `fetch` knows, so setting `multipart/form-data` by hand produces a request the server cannot
+   * parse.
+   */
+  const multipart = typeof FormData !== 'undefined' && body instanceof FormData
+  if (body !== undefined && !multipart) headers['Content-Type'] = 'application/json'
 
   if (UNSAFE.has(method)) {
     const csrftoken = readCookie('csrftoken')
@@ -68,7 +78,7 @@ async function request(path, { method = 'GET', body, signal } = {}) {
     headers,
     signal,
     credentials: 'same-origin',
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined ? undefined : multipart ? body : JSON.stringify(body),
   })
 
   if (response.status === 204) return null
@@ -114,6 +124,35 @@ function errorMessage(error) {
 }
 
 /* --- Session ------------------------------------------------------------- */
+
+/*
+ * The feedback form.
+ *
+ * Posts to this app, never to Airtable. The token has `data.records:write`, and a token like that in a
+ * bundle is one anyone with the network tab open can use to write to the base -- so it stays server-side
+ * and this is the only way in. See apps/feedback/airtable.py.
+ */
+export const feedback = {
+  /** Whether the form is configured on this deployment, and its attachment limits. */
+  config: () => request('/api/feedback/config'),
+
+  /**
+   * One report.
+   *
+   * `FormData` rather than JSON, because attachments are files and base64-ing them here would double
+   * their size on the wire for no reason -- the server reads them as an upload and encodes once, on the
+   * way to Airtable. A submission with no files sends a FormData with no files, which is simpler than
+   * branching on two content types.
+   */
+  submit: ({ description, proposedFix, reporter, files }) => {
+    const body = new FormData()
+    body.append('description', description ?? '')
+    if (proposedFix) body.append('proposed_fix', proposedFix)
+    if (reporter) body.append('reporter', reporter)
+    for (const file of files ?? []) body.append('attachments', file, file.name)
+    return request('/api/feedback', { method: 'POST', body })
+  },
+}
 
 export const session = {
   /** Who am I. Also plants the csrftoken cookie -- call this first, on boot. */

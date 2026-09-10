@@ -53,6 +53,14 @@ services:
       # Set manually: our own token for reading the global catalog on deploy.
       - key: SEGMENT_CATALOG_TOKEN
         sync: false
+      # The feedback form. An Airtable personal access token with `data.records:write` and
+      # `schema.bases:read`, plus the base it writes to. Server-side only -- the form posts to this app,
+      # which then calls Airtable, because a write-scoped token in a frontend bundle is one anyone with
+      # the network tab open can use. Leave unset and the form simply does not appear.
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
 
 databases:
   - name: segment-archistrator-db
