@@ -145,13 +145,18 @@ export function isValidPlacement(topology, kind, zone) {
 /**
  * React Flow's `isValidConnection` callback.
  *
- * Rejects, in order: a missing endpoint, and duplicates. A self-connection is
- * allowed -- each node has exactly one fixed target handle and one fixed source
- * handle, so the only way to draw one is deliberate, and there is no rule left
- * that would say no to it. A zone backdrop is a legal endpoint too, so one zone
- * can be drawn feeding another. Returning false means the edge never renders and
- * the handle shows as invalid mid-drag, so the user gets the answer before
- * releasing the mouse.
+ * Rejects, in order: a missing endpoint, and duplicates. A self-connection is allowed -- a node has
+ * a handle on each of its four sides now, so a loop from one side back to another is a drawable and
+ * deliberate thing, and there is no rule left that would say no to it. A zone backdrop is a legal
+ * endpoint too, so one zone can be drawn feeding another. Returning false means the edge never
+ * renders and the handle shows as invalid mid-drag, so the user gets the answer before releasing the
+ * mouse.
+ *
+ * The duplicate check ignores *which* handle each end used, deliberately. Two components are either
+ * connected or they are not; which side the line meets, and whereabouts along that side, is a drawing
+ * decision rather than a second connection. So dragging a second line between an already-connected
+ * pair is still refused, and moving where an existing line lands is `onReconnect`'s job -- which
+ * excludes the edge being moved from this check for exactly that reason.
  */
 export function makeConnectionValidator({ topology, getNode, edges }) {
   return function isValidConnection(connection) {

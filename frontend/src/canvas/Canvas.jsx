@@ -866,6 +866,24 @@ export default function Canvas({
              * unaffected -- they are in rules.js and run through `isValidConnection`.
              */
             connectionMode={ConnectionMode.Loose}
+            /*
+             * Swallow one specific complaint, and only for the case it is wrong about.
+             *
+             * `008` is "couldn't create edge for handle id X". React Flow raises it whenever an edge
+             * names a handle that is not currently mounted -- which is *every* free border anchor a
+             * moment after the drag that made it, because that handle follows the cursor and then
+             * stops existing (see canvas/handles.js). The edge is fine: `FlowEdge` resolves the point
+             * from the node's own box. Left alone this logs on every render of every such edge, which
+             * on a diagram with a few of them is a console nobody can read -- and this app pipes its
+             * console into a drawer the user is meant to consult.
+             *
+             * Every other code, and an `008` about a handle that is *not* a free anchor, goes through
+             * to the default so a genuinely broken edge still says so.
+             */
+            onError={(code, message) => {
+              if (code === '008' && /free:/.test(message)) return
+              console.warn(`[React Flow] ${message}`)
+            }}
             onNodeDragStop={onNodeDragStop}
             onBeforeDelete={onBeforeDelete}
             isValidConnection={isValidConnection}

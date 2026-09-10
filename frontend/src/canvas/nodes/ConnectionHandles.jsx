@@ -19,15 +19,32 @@
  * untouched. The connection handle wins that overlap deliberately, via `zIndex` -- it is the
  * smaller target and the one with no alternative.
  *
- * An off-centre point on the border is a *different feature*: a custom connector the user
- * places by hovering an edge. That is stored per edge, not per node, and does not come through
- * here.
+ * ## And one that is not fixed at all
+ *
+ * A fifth handle follows the cursor along whichever border it is nearest, so a connector can be drawn
+ * from -- or dropped onto -- any point on the outline rather than only a midpoint. It matters as soon
+ * as three lines arrive at the same side of one component: at the midpoint they overlap for their
+ * last 20px and a reader cannot tell which goes where.
+ *
+ * That handle exists only while the pointer is near a border, which is why the *edge* resolves its
+ * geometry rather than React Flow: a moment after the drag the handle is gone, and React Flow's own
+ * lookup would put that end of the line at the node's origin. See canvas/handles.js and
+ * `anchorPoint` in edges/FlowEdge.jsx.
  */
 
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
 import { Handle } from '@xyflow/react'
 
-import { SIDES } from '../handles.js'
+import { SIDES, encodeFreeHandle, nearestBorder } from '../handles.js'
+
+/*
+ * How close to a border the pointer has to be before the free dot appears.
+ *
+ * Wide enough to be reachable without precision, narrow enough that moving across the middle of a
+ * card never summons it -- and narrower than half the shortest card, or the dot would be permanently
+ * visible on a 36px-high chip and there would be nowhere to click that was not "start a connection".
+ */
+const BORDER_REACH = 14
 
 /**
  * @param border  the node's border colour, so the dots read as belonging to it
@@ -38,7 +55,82 @@ import { SIDES } from '../handles.js'
  *   large backdrop the pointer crosses constantly, so `group-hover` would flicker its handles on
  *   and off across the whole region.
  */
-export default function ConnectionHandles({ border, dim = false }) {
+export default function ConnectionHandles({ border, dim = false, free = true }) {
+  /*
+   * A fifth handle that follows the cursor along whichever border it is nearest.
+   *
+   * This is how a connector comes to meet a component somewhere other than a midpoint, which matters
+   * as soon as three lines arrive at the same side: at the midpoint they overlap for their last 20px
+   * and a reader cannot tell which goes where.
+   *
+   * Local state, and it is a render per pointer move over the *border strip only* -- the handler
+   * returns early well before `setAnchor` for a pointer anywhere else on the card, so crossing the
+   * middle of a component costs nothing. That is the reason for `BORDER_REACH` rather than tracking
+   * every move and deciding in the renderer.
+   */
+  const [anchor, setAnchor] = useState(null)
+
+  const track = (event) => {
+    const box = event.currentTarget.getBoundingClientRect()
+    if (!box.width || !box.height) return
+    const found = nearestBorder(
+      { x: event.clientX - box.left, y: event.clientY - box.top },
+      /* The box on *screen*, so the reach is in screen pixels and the strip stays the same width to
+         the pointer at every zoom. Converting to flow units would make it unusably thin zoomed out. */
+      { width: box.width, height: box.height },
+    )
+    if (found.distance > BORDER_REACH) {
+      /* Cleared rather than left behind: a stale dot at the last border the pointer passed is a
+         connection start point sitting somewhere the user is not looking. */
+      if (anchor) setAnchor(null)
+      return
+    }
+    if (anchor && anchor.side === found.side && Math.abs(anchor.t - found.t) < 0.01) return
+    setAnchor({ side: found.side, t: found.t })
+  }
+
+  return (
+    <>
+      {free && (
+        /* A transparent overlay across the whole card, purely to track the pointer. `inset: 0` on the
+           node's own element rather than a handler on the card, because the card is where the label
+           and the buttons live and a move handler there would fight them for the pointer. */
+        <div
+          className="absolute inset-0"
+          style={{ pointerEvents: 'auto', background: 'transparent' }}
+          onPointerMove={track}
+          onPointerLeave={() => anchor && setAnchor(null)}
+        />
+      )}
+
+      {anchor && (
+        /* The handle itself, positioned by percentage along the side it snapped to. Its *id* carries
+           the anchor, which is what makes the connection remember where it was drawn from with no new
+           document field -- see canvas/handles.js. */
+        <Handle
+          type="source"
+          id={encodeFreeHandle(anchor.side, anchor.t)}
+          position={anchor.side}
+          className="pointer-events-auto !h-3 !w-3 !border-2 !bg-white"
+          style={{
+            borderColor: border,
+            /* Above the four fixed dots and above the resizer: it is under the cursor, so it has to
+               be the thing the cursor grabs. */
+            zIndex: 6,
+            ...(anchor.side === 'left' || anchor.side === 'right'
+              ? { top: `${anchor.t * 100}%` }
+              : { left: `${anchor.t * 100}%` }),
+          }}
+          title="Drag to connect from this exact point on the border"
+        />
+      )}
+
+      <FixedHandles border={border} dim={dim} />
+    </>
+  )
+}
+
+function FixedHandles({ border, dim }) {
   return SIDES.map((side) => {
     /* Both types per side, sharing an id. Source first, so a pointer aimed at the side lands
        on the exit -- starting a connection is what the dot is mostly for, and `Loose` mode

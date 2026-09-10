@@ -13,7 +13,15 @@
 import { describe, expect, it } from 'vitest'
 import { Position } from '@xyflow/react'
 
-import { LEGACY_SOURCE, LEGACY_TARGET, SIDES } from './handles.js'
+import {
+  LEGACY_SOURCE,
+  LEGACY_TARGET,
+  SIDES,
+  encodeFreeHandle,
+  nearestBorder,
+  parseFreeHandle,
+  pointOnBorder,
+} from './handles.js'
 import { toFlowEdge } from './layout.js'
 import { serializeEdge } from '../diagram/serialize.js'
 
@@ -148,5 +156,105 @@ describe('a connector remembers how it was routed', () => {
     expect(back.data.line).toBeUndefined()
     expect(back.data.waypoints).toBeUndefined()
     expect(serializeEdge(back)).toEqual(serializeEdge(edge()))
+  })
+})
+
+/*
+ * Free anchors: a connector that meets a component anywhere along its border.
+ *
+ * The encoding rides in `sourceHandle`/`targetHandle`, which already persist -- so what needs pinning
+ * is that a *fixed* handle never parses as a free one (or every existing edge would be re-resolved
+ * from a fraction it does not have) and that a malformed one fails closed rather than drawing an edge
+ * end into empty space.
+ */
+describe('free border anchors', () => {
+  it('round-trips a side and a fraction', () => {
+    expect(parseFreeHandle(encodeFreeHandle('right', 0.73))).toEqual({ side: 'right', t: 0.73 })
+    expect(parseFreeHandle(encodeFreeHandle('top', 0))).toEqual({ side: 'top', t: 0 })
+    expect(parseFreeHandle(encodeFreeHandle('bottom', 1))).toEqual({ side: 'bottom', t: 1 })
+  })
+
+  it('rounds to two places, so a saved handle id does not differ every save', () => {
+    expect(encodeFreeHandle('left', 0.7333333)).toBe('free:left:0.73')
+  })
+
+  it('clamps a fraction outside the border', () => {
+    expect(parseFreeHandle(encodeFreeHandle('right', 4)).t).toBe(1)
+    expect(parseFreeHandle(encodeFreeHandle('right', -2)).t).toBe(0)
+  })
+
+  it('does not mistake a fixed handle for a free one', () => {
+    /* The load-bearing case. Every edge in every saved diagram has `e`, `w`, `n`, `s` or null here,
+       and reading one as a free anchor would re-resolve it from a fraction it does not have. */
+    for (const id of [...SIDES.map((side) => side.id), null, undefined, '', 'freehand']) {
+      expect(parseFreeHandle(id), String(id)).toBeNull()
+    }
+  })
+
+  it('fails closed on a malformed anchor', () => {
+    /* Handle ids are persisted and therefore hand-editable. Falling back to null puts the edge on the
+       fixed handle React Flow already has, instead of drawing an end off the side of the card. */
+    for (const id of ['free:sideways:0.5', 'free:right:abc', 'free:right:2', 'free:right:-1', 'free:']) {
+      expect(parseFreeHandle(id), id).toBeNull()
+    }
+  })
+})
+
+describe('pointOnBorder', () => {
+  const box = { x: 100, y: 200, width: 200, height: 60 }
+
+  it('places a point along each side', () => {
+    expect(pointOnBorder(box, { side: 'left', t: 0.5 })).toEqual({ x: 100, y: 230, position: 'left' })
+    expect(pointOnBorder(box, { side: 'right', t: 0.5 })).toEqual({ x: 300, y: 230, position: 'right' })
+    expect(pointOnBorder(box, { side: 'top', t: 0.25 })).toEqual({ x: 150, y: 200, position: 'top' })
+    expect(pointOnBorder(box, { side: 'bottom', t: 1 })).toEqual({ x: 300, y: 260, position: 'bottom' })
+  })
+
+  it('reports the side, so the router gets a direction as well as a point', () => {
+    /* Without this the line would leave a right-hand anchor heading whichever way the default handle
+       faced, which for a hand-placed anchor is the one thing it must not do. */
+    for (const side of ['left', 'right', 'top', 'bottom']) {
+      expect(pointOnBorder(box, { side, t: 0.5 }).position).toBe(side)
+    }
+  })
+
+  it('agrees with the fixed handle at the midpoint', () => {
+    /* A free anchor at t=0.5 is the fixed handle. If the two disagreed, dragging an anchor to the
+       middle of a side would visibly jump. */
+    expect(pointOnBorder(box, { side: 'right', t: 0.5 })).toEqual({
+      x: box.x + box.width,
+      y: box.y + box.height / 2,
+      position: 'right',
+    })
+  })
+})
+
+describe('nearestBorder', () => {
+  const size = { width: 200, height: 60 }
+
+  it('snaps to whichever border the pointer is closest to', () => {
+    expect(nearestBorder({ x: 4, y: 30 }, size).side).toBe('left')
+    expect(nearestBorder({ x: 196, y: 30 }, size).side).toBe('right')
+    expect(nearestBorder({ x: 100, y: 2 }, size).side).toBe('top')
+    expect(nearestBorder({ x: 100, y: 58 }, size).side).toBe('bottom')
+  })
+
+  it('reports the fraction along that border', () => {
+    expect(nearestBorder({ x: 2, y: 15 }, size).t).toBeCloseTo(0.25)
+    expect(nearestBorder({ x: 150, y: 1 }, size).t).toBeCloseTo(0.75)
+  })
+
+  it('reports the distance, so the caller can decide the dot is not close enough', () => {
+    expect(nearestBorder({ x: 100, y: 30 }, size).distance).toBe(30)
+    expect(nearestBorder({ x: 1, y: 30 }, size).distance).toBe(1)
+  })
+
+  it('clamps the fraction and survives a zero-sized node', () => {
+    /* An unmeasured node reports no size, and dividing by it would put the anchor at NaN -- which in
+       a path string makes the whole edge vanish. */
+    const zero = nearestBorder({ x: 0, y: 0 }, { width: 0, height: 0 })
+    expect(Number.isFinite(zero.t)).toBe(true)
+    expect(zero.t).toBeGreaterThanOrEqual(0)
+    expect(zero.t).toBeLessThanOrEqual(1)
   })
 })

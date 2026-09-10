@@ -27,9 +27,10 @@
  */
 
 import { useCallback, useRef, useState } from 'react'
-import { BaseEdge, EdgeLabelRenderer, useReactFlow } from '@xyflow/react'
+import { BaseEdge, EdgeLabelRenderer, useInternalNode, useReactFlow } from '@xyflow/react'
 
 import { useChrome } from '../chrome.js'
+import { parseFreeHandle, pointOnBorder } from '../handles.js'
 import {
   cleanWaypoints,
   cornerHandles,
@@ -65,6 +66,23 @@ const SEGMENT = 11
  * chooses: a bar on an axis-aligned segment slides it, a dot on a real bend drags the corner (moving
  * both segments that meet there), and a dot on anything else moves a free waypoint.
  */
+/**
+ * Where one end of an edge sits when its handle is a free border anchor, or null for a fixed one.
+ *
+ * Returns null for an unmeasured node as well: a node reports no size for the frame after it mounts,
+ * and a fraction of zero height is `NaN` -- which in a path string makes the entire edge disappear
+ * rather than look wrong, and is far harder to diagnose than a line briefly on the wrong side.
+ */
+function anchorPoint(node, handleId) {
+  const anchor = parseFreeHandle(handleId)
+  if (!anchor || !node) return null
+  const at = node.internals?.positionAbsolute
+  const width = node.measured?.width
+  const height = node.measured?.height
+  if (!at || !width || !height) return null
+  return pointOnBorder({ x: at.x, y: at.y, width, height }, anchor)
+}
+
 function resolveDrag(gesture, point) {
   if (gesture.mode === 'slide') return dragSegment(gesture.points, gesture.index, point)
   if (gesture.mode === 'corner') return dragCorner(gesture.points, gesture.index, point)
@@ -73,6 +91,10 @@ function resolveDrag(gesture, point) {
 
 export default function FlowEdge({
   id,
+  source,
+  target,
+  sourceHandleId,
+  targetHandleId,
   sourceX,
   sourceY,
   targetX,
@@ -94,11 +116,36 @@ export default function FlowEdge({
   const line = lineStyleOf(data)
   const waypoints = cleanWaypoints(data?.waypoints)
 
+  /*
+   * A hand-placed anchor somewhere along a node's border, resolved here rather than by React Flow.
+   *
+   * It has to be here. The handle a free anchor names follows the cursor and then stops existing, so
+   * React Flow's own lookup finds nothing a moment after the drag and puts that end of the edge at the
+   * node's origin -- which is the line snapping to the top-left corner of the card. See
+   * canvas/handles.js.
+   *
+   * `useInternalNode` is what makes it possible: it gives the node's absolute position and measured
+   * size, which is exactly what `pointOnBorder` needs. A fixed handle parses as null and falls
+   * straight through to the coordinates React Flow already worked out.
+   */
+  const fromNode = useInternalNode(source)
+  const toNode = useInternalNode(target)
+  const fromAnchor = anchorPoint(fromNode, sourceHandleId)
+  const toAnchor = anchorPoint(toNode, targetHandleId)
+
+  /* `?? 0` on the coordinates, not just on the anchor. When a handle id names a handle that is not
+     currently mounted -- which is every free anchor, a moment after the drag that made it -- React
+     Flow cannot resolve the end and passes `null` for all four coordinates (`nullPosition`) rather
+     than skipping the edge. So the anchor is the real answer here and these are only a floor that
+     keeps `NaN` out of the path string, which would make the whole edge vanish. */
+  const start = fromAnchor ?? { x: sourceX ?? 0, y: sourceY ?? 0, position: sourcePosition }
+  const end = toAnchor ?? { x: targetX ?? 0, y: targetY ?? 0, position: targetPosition }
+
   const { path, labelX, labelY, points } = routeEdge({
-    source: { x: sourceX, y: sourceY },
-    target: { x: targetX, y: targetY },
-    sourcePosition,
-    targetPosition,
+    source: { x: start.x, y: start.y },
+    target: { x: end.x, y: end.y },
+    sourcePosition: start.position,
+    targetPosition: end.position,
     waypoints,
     line,
   })
@@ -141,10 +188,10 @@ export default function FlowEdge({
   const live =
     dragging &&
     routeEdge({
-      source: { x: sourceX, y: sourceY },
-      target: { x: targetX, y: targetY },
-      sourcePosition,
-      targetPosition,
+      source: { x: start.x, y: start.y },
+      target: { x: end.x, y: end.y },
+      sourcePosition: start.position,
+      targetPosition: end.position,
       waypoints: shown,
       line,
     })
