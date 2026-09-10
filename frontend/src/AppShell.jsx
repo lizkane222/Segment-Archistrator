@@ -25,6 +25,7 @@ import Inspector from './inspector/Inspector.jsx'
 import NuancesDialog from './commands/NuancesDialog.jsx'
 import OpenDialog from './diagram/OpenDialog.jsx'
 import Palette from './palette/Palette.jsx'
+import EventPreview from './simulation/EventPreview.jsx'
 import WalkthroughDrawer from './simulation/WalkthroughDrawer.jsx'
 import { Toasts, useToasts } from './ui/Toasts.jsx'
 import { clearSchemaCache } from './inspector/useSpaceSchema.js'
@@ -1130,7 +1131,15 @@ function Workbench({
       />
 
       <div className="relative flex min-h-0 flex-1">
-        <aside className="w-80 shrink-0 overflow-hidden border-r border-twilio-gray-20 bg-white">
+        {/* A column, so the payload panel takes the height it needs and the palette scrolls in what
+            is left. `min-h-0` on the palette wrapper is what allows that -- a flex child defaults to
+            never shrinking below its content, and the palette's content is long. */}
+        <aside className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-twilio-gray-20 bg-white">
+          {/* Above the palette rather than below it: while an animation is playing this is what the
+              reader is following, and the palette is what they are not using. Renders nothing at all
+              when no walkthrough is mid-flight, so it costs an idle canvas no space. */}
+          <EventPreview frame={liveFrame} graph={simGraph} scenarios={scenarios} />
+          <div className="min-h-0 flex-1 overflow-hidden">
           <Palette
             topology={topology}
             graph={graphState.graph}
@@ -1139,6 +1148,7 @@ function Workbench({
             onConnect={() => setConnectOpen(true)}
             onStartSimulation={startSimulation}
           />
+          </div>
         </aside>
 
         <main
@@ -1189,6 +1199,11 @@ function Workbench({
                 onRename={(id, name) => updateNode(id, { name })}
                 /* Whether the Unbound flags mean anything yet -- see canvas/chrome.js. */
                 connected={Boolean(workspace)}
+                /* So an untouched component and an untouched zone can tell they are being left out
+                   of a path, which nothing in their own data says -- see canvas/chrome.js. Exactly
+                   the condition `liveFrame` uses, so the dimming appears and disappears with the
+                   annotations rather than a frame either side of them. */
+                walkthroughActive={runs.length > 0 && playback.tick >= 0}
                 flash={flash}
                 exporting={exporting}
               />

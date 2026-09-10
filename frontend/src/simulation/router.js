@@ -450,16 +450,8 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
         propagate: false,
       }
 
-    /* The three Protocols kinds. Nothing passes through a definition -- and saying
-       which component *does* enforce it is the useful half of the answer, because a
-       plan that enforces nothing is the commonest surprise in Protocols. */
     case 'tracking_plan':
-      return {
-        status: STATUS.notApplicable,
-        reason:
-          'A tracking plan is the list of events the workspace agreed to, not a stage the event passes through. What stops an unplanned event is the connected source’s schema controls — a plan with none set to block changes nothing.',
-        propagate: false,
-      }
+      return visitTrackingPlan({ node, payload, from })
 
     case 'event_library':
     case 'property_library':
@@ -577,6 +569,110 @@ function visitFunction({ node, payload, functionBehaviour }) {
  * property is the right type, or required, or nested where the plan says. So an event
  * that is *in* the plan is not reported as valid, only as planned.
  */
+/*
+ * A tracking plan, as a stage the event travels through.
+ *
+ * It used to be `notApplicable` and stop the path dead, on the grounds that a plan is a *list* and
+ * enforcement lives in the connected source's schema controls. That is factually right and was the
+ * wrong call for a diagram: someone who has drawn `app -> tracking plan -> source` has drawn the
+ * question "does this event get in?", and answering it with a greyed-out box and a paragraph about
+ * where enforcement really lives leaves the most interesting component on the diagram contributing
+ * nothing to the walkthrough.
+ *
+ * So the plan now reports a verdict and the path continues through it. What it does *not* do is
+ * invent authority it does not have:
+ *
+ *   - Event in the plan: passes, and says only the name was checked. Whether the properties satisfy
+ *     the plan's rules needs the rules, and the API gives names.
+ *   - Event not in the plan, and the plan records an `unplanned` policy: that policy is honoured,
+ *     because a plan carrying one is someone recording the enforcement they have configured.
+ *   - Event not in the plan, no policy recorded: passes, *with* the note about schema controls. This
+ *     is the case the old behaviour was protecting, and it is preserved -- the plan does not claim to
+ *     have blocked anything, it just no longer swallows the rest of the path.
+ *   - No events listed at all: passes, saying so. A plan with no events on the diagram is a
+ *     placeholder, and a placeholder must not read as "this event is unplanned".
+ *
+ * The `unplanned` field is deliberately the same name `source_schema_control` uses. They are the same
+ * question -- what happens to an event nobody planned -- and one name means the inspector's existing
+ * editor serves both and a reader does not have to learn two vocabularies.
+ */
+function visitTrackingPlan({ node, payload, from }) {
+  const data = dataOf(node)
+
+  /*
+   * Nothing upstream reached this plan, so it is being *accounted for* rather than walked -- pass
+   * three, which calls `visit` with no `from` for exactly the kinds in INERT_KINDS. A plan sitting
+   * off to one side of the diagram must not report `passed`: that would claim the event went through
+   * a component it never touched, which is a wrong diagram rather than a generous one.
+   *
+   * This is the old behaviour, kept precisely for the case it was right about.
+   */
+  if (!from) {
+    return {
+      status: STATUS.notApplicable,
+      reason:
+        'Nothing on this path reaches this plan, so it takes no part in the event’s journey. A tracking plan is the list of events the workspace agreed to; what stops an unplanned event is the connected source’s schema controls. Draw it between a source and what feeds it to include it in the walkthrough.',
+      propagate: false,
+    }
+  }
+  const name = eventNameOf(payload)
+  /* Three spellings, because a plan reaches this diagram three ways: read from the API, seeded by a
+     template, or typed by hand into the inspector. Treating only one as authoritative would make the
+     walkthrough depend on how the plan got here. */
+  const planned = namesOf(data.plannedEvents ?? data.events ?? data.rules)
+  const label = data.trackingPlan ? `“${data.trackingPlan}”` : `“${nameOf(node)}”`
+
+  if (!name || planned.length === 0) {
+    return {
+      status: STATUS.passed,
+      reason: `${label} records no event list on this diagram, so there is nothing to check this event against. It passes; what a plan actually enforces is the connected source’s schema controls.`,
+      propagate: true,
+    }
+  }
+
+  if (planned.some((entry) => sameName(entry, name))) {
+    return {
+      status: STATUS.passed,
+      reason: `“${name}” is in ${label}, so it is a planned event. Only the name is checked here — whether its properties match the plan’s rules needs the rules themselves, which the API does not return.`,
+      propagate: true,
+    }
+  }
+
+  switch (data.unplanned) {
+    case 'block':
+      return {
+        status: STATUS.dropped,
+        reason: `“${name}” is not in ${label}, and unplanned events are set to be blocked, so it never reaches the source — and is not counted as an MTU or an API call either.`,
+        propagate: false,
+      }
+    case 'omit':
+      return {
+        status: STATUS.transformed,
+        reason: `“${name}” is not in ${label}. Unplanned properties are omitted rather than the event being blocked, so it continues — with fields this simulator cannot list, because that needs the plan’s rules and not just its event names.`,
+        transform: { unread: true },
+        payload,
+        propagate: true,
+      }
+    case 'allow':
+      return {
+        status: STATUS.passed,
+        reason: `“${name}” is not in ${label}, but unplanned events are allowed, so it passes. It will show as a violation without being stopped.`,
+        propagate: true,
+      }
+    default:
+      /* Passes, unlike the schema control's equivalent branch, which refuses to guess. The
+         difference is where the authority sits: a *source* that does not record its unplanned
+         policy genuinely might block, so claiming anything past it would be a guess. A plan has no
+         enforcement of its own, so "it carries on and the source decides" is not a guess -- it is
+         what happens. */
+      return {
+        status: STATUS.passed,
+        reason: `“${name}” is not in ${label}, so it is an unplanned event — a violation. The plan itself blocks nothing; whether it actually gets in is the connected source’s schema controls, which this diagram does not record for this path.`,
+        propagate: true,
+      }
+  }
+}
+
 function visitSchemaControl({ node, payload }) {
   const data = dataOf(node)
   const name = eventNameOf(payload)

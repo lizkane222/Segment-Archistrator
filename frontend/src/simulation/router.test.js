@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   STATUS,
+  hasArrived,
   defaultSourceId,
   eligibleSources,
   eligibleStarts,
@@ -750,5 +751,131 @@ describe('a path that begins outside Segment', () => {
     const trace = simulate(graph, TRACK, { sourceId: 'app' })
     expect(trace.steps.map((step) => step.nodeId)).toEqual(['app', 'queue', 'src', 'dest'])
     expect(statusOf(trace, 'dest')).toBe(STATUS.delivered)
+  })
+})
+
+/*
+ * A tracking plan drawn *on* the path.
+ *
+ * It used to be `notApplicable` and stop the walk dead -- factually defensible (a plan is a list;
+ * enforcement is the source's schema controls) and the wrong call for a diagram. Someone who draws
+ * `app -> plan -> source` has drawn the question "does this event get in?", and the most interesting
+ * component on the canvas was answering it with a greyed box.
+ *
+ * What these pin is the line between "reports a verdict" and "invents authority it does not have".
+ */
+describe('a tracking plan on the path', () => {
+  const planned = (planData = {}, event = TRACK) => {
+    const graph = {
+      nodes: [
+        { id: 'app', kind: 'custom', name: 'Mobile app' },
+        { id: 'plan', kind: 'tracking_plan', name: 'Core plan', ...planData },
+        { id: 'src', kind: 'source', name: 'Web', segmentId: 'S1' },
+        { id: 'dest', kind: 'destination', name: 'Braze', sourceId: 'S1' },
+      ],
+      edges: [
+        { id: 'e1', source: 'app', target: 'plan' },
+        { id: 'e2', source: 'plan', target: 'src' },
+        { id: 'e3', source: 'src', target: 'dest' },
+      ],
+    }
+    return simulate(graph, event, { sourceId: 'app' })
+  }
+
+  it('lets the event travel through it and on to the source', () => {
+    /* The whole point. The plan is a stage now, so everything downstream of it gets a verdict
+       instead of sitting grey behind a component that refused to propagate. */
+    const trace = planned({ plannedEvents: ['Order Completed'] })
+    expect(hasArrived(statusOf(trace, 'plan'))).toBe(true)
+    expect(hasArrived(statusOf(trace, 'src'))).toBe(true)
+    expect(statusOf(trace, 'dest')).toBe(STATUS.delivered)
+  })
+
+  it('says the event is planned when the plan lists it', () => {
+    const trace = planned({ plannedEvents: ['Order Completed'] })
+    expect(statusOf(trace, 'plan')).toBe(STATUS.passed)
+    expect(reasonOf(trace, 'plan')).toMatch(/planned event/i)
+  })
+
+  it('checks only the name, and says so', () => {
+    /* The API returns a plan's event names, not its rules. Claiming the properties validate would be
+       inventing a verdict the data cannot support. */
+    expect(reasonOf(planned({ plannedEvents: ['Order Completed'] }), 'plan')).toMatch(
+      /only the name is checked/i,
+    )
+  })
+
+  it('reads an event list under any of the three spellings', () => {
+    /* A plan reaches this diagram three ways -- read from the API, seeded by a template, or typed
+       into the inspector -- and the walkthrough must not depend on which. */
+    for (const key of ['plannedEvents', 'events', 'rules']) {
+      const trace = planned({ [key]: ['Order Completed'] })
+      expect(reasonOf(trace, 'plan'), key).toMatch(/planned event/i)
+    }
+  })
+
+  it('blocks an unplanned event when the plan records that policy', () => {
+    const trace = planned({ plannedEvents: ['Something Else'], unplanned: 'block' })
+    expect(statusOf(trace, 'plan')).toBe(STATUS.dropped)
+    /* And nothing downstream is claimed to have received it -- which is the visualisation the
+       request was asking for. */
+    expect(hasArrived(statusOf(trace, 'src'))).toBe(false)
+    expect(statusOf(trace, 'dest')).not.toBe(STATUS.delivered)
+  })
+
+  it('honours allow and omit as well', () => {
+    const allowed = planned({ plannedEvents: ['Other'], unplanned: 'allow' })
+    expect(statusOf(allowed, 'plan')).toBe(STATUS.passed)
+    expect(reasonOf(allowed, 'plan')).toMatch(/violation/i)
+
+    const omitted = planned({ plannedEvents: ['Other'], unplanned: 'omit' })
+    expect(statusOf(omitted, 'plan')).toBe(STATUS.transformed)
+    expect(hasArrived(statusOf(omitted, 'src'))).toBe(true)
+  })
+
+  it('passes an unplanned event on when no policy is recorded, and says where enforcement lives', () => {
+    /* Deliberately different from `source_schema_control`'s equivalent branch, which refuses to
+       guess. A *source* with no recorded policy genuinely might block, so claiming anything past it
+       would be a guess. A plan has no enforcement of its own, so "it carries on and the source
+       decides" is not a guess -- it is what happens. */
+    const trace = planned({ plannedEvents: ['Something Else'] })
+    expect(statusOf(trace, 'plan')).toBe(STATUS.passed)
+    expect(reasonOf(trace, 'plan')).toMatch(/unplanned event/i)
+    expect(reasonOf(trace, 'plan')).toMatch(/schema controls/)
+    expect(hasArrived(statusOf(trace, 'src'))).toBe(true)
+  })
+
+  it('does not treat an empty plan as evidence the event is unplanned', () => {
+    /* A plan with no events on the diagram is a placeholder. Reading it as "this event is not in the
+       plan" would make every template's blank plan flag a violation. */
+    const trace = planned({})
+    expect(statusOf(trace, 'plan')).toBe(STATUS.passed)
+    expect(reasonOf(trace, 'plan')).toMatch(/no event list/i)
+    expect(reasonOf(trace, 'plan')).not.toMatch(/violation/i)
+  })
+
+  it('names the plan when the node records one', () => {
+    expect(
+      reasonOf(planned({ trackingPlan: 'Checkout v2', plannedEvents: ['Order Completed'] }), 'plan'),
+    ).toMatch(/Checkout v2/)
+  })
+
+  it('still accounts for an unconnected plan without claiming the event reached it', () => {
+    /* The case the old behaviour was right about, kept. Pass three calls `visit` with no `from`, and
+       reporting `passed` there would say the event went through a component it never touched. */
+    const trace = simulate(
+      {
+        nodes: [
+          { id: 'src', kind: 'source', name: 'Web', segmentId: 'S1' },
+          { id: 'plan', kind: 'tracking_plan', name: 'Core plan', plannedEvents: ['Order Completed'] },
+        ],
+        edges: [],
+      },
+      TRACK,
+      { sourceId: 'src' },
+    )
+    expect(statusOf(trace, 'plan')).toBe(STATUS.notApplicable)
+    expect(hasArrived(statusOf(trace, 'plan'))).toBe(false)
+    expect(reasonOf(trace, 'plan')).toMatch(/schema controls/)
   })
 })

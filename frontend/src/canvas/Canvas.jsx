@@ -128,6 +128,7 @@ export default function Canvas({
   onRename,
   flash,
   connected = false,
+  walkthroughActive = false,
   exporting = false,
 }) {
   const { screenToFlowPosition, getNode, getInternalNode, fitBounds } = useReactFlow()
@@ -240,8 +241,15 @@ export default function Canvas({
   const [adjustingEdgeId, setAdjustingEdgeId] = useState(null)
 
   const chrome = useMemo(
-    () => ({ showFlags, connected, rename: onRename ?? null, onWaypoints, adjustingEdgeId }),
-    [showFlags, connected, onRename, onWaypoints, adjustingEdgeId],
+    () => ({
+      showFlags,
+      connected,
+      rename: onRename ?? null,
+      onWaypoints,
+      adjustingEdgeId,
+      walkthroughActive,
+    }),
+    [showFlags, connected, onRename, onWaypoints, adjustingEdgeId, walkthroughActive],
   )
 
   /*

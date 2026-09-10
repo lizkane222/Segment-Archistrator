@@ -15,6 +15,10 @@
  *   - `rename(id, name)`: how a node writes a name back. Double-clicking a card edits it in
  *     place, and the edit has to reach the same `setNodes` the inspector's field does or the
  *     two would show different names for the same component.
+ *   - `walkthroughActive`: whether a walkthrough is currently showing a frame. Nodes and zones need
+ *     it to know they are being *left out* of a path, which is not something they can tell from
+ *     their own data -- an untouched component carries no path state at all, and is
+ *     indistinguishable from one on a canvas where nothing is playing.
  *   - `onWaypoints(edgeId, waypoints)`: how an edge writes a hand-dragged route back. Same
  *     argument as `rename` -- the drag happens inside the edge renderer, but the edit belongs to
  *     whoever owns the document. An edge reaching for the store directly would be a second write
@@ -37,7 +41,13 @@ import { createContext, useContext } from 'react'
 /* Flags off and no callbacks, which is what a node or edge rendered outside the canvas gets --
    the export path and any test that mounts one on its own. Everything degrades to "draw it, no
    badge, not editable", which is the reading with the fewest moving parts. */
-const NO_CHROME = { showFlags: false, connected: false, rename: null, onWaypoints: null }
+const NO_CHROME = {
+  showFlags: false,
+  connected: false,
+  rename: null,
+  onWaypoints: null,
+  walkthroughActive: false,
+}
 
 export const ChromeContext = createContext(NO_CHROME)
 

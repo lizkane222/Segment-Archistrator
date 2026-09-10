@@ -32,6 +32,7 @@ import { NodeResizer, useNodes } from '@xyflow/react'
 import { Lock } from 'lucide-react'
 
 import ConnectionHandles from './ConnectionHandles.jsx'
+import { useChrome } from '../chrome.js'
 import { MIN_ZONE_HEIGHT, MIN_ZONE_WIDTH } from '../layout.js'
 import { zoneStyleFor } from '../kinds.js'
 
@@ -48,6 +49,22 @@ function ZoneNode({ id, data, selected }) {
      its own -- only the three product zones -- so counting components alone would
      have it permanently claiming to be empty. */
   const empty = !nodes.some((node) => node.parentId === id)
+
+  /*
+   * A zone the current walkthrough never enters recedes.
+   *
+   * Answered from the children rather than from anything stored on the zone: a zone has no path
+   * state of its own, and it is *on* the path exactly when something inside it is. Descendants
+   * count, not just direct children -- Segment holds only the three product zones, so counting
+   * direct children alone would leave the whole backdrop dimmed while an event ran through
+   * Connections inside it.
+   *
+   * `useNodes` above already re-renders this on every node change, so this costs a pass over the
+   * list on a render that was happening anyway.
+   */
+  const { walkthroughActive } = useChrome()
+  const aside =
+    walkthroughActive && !nodes.some((node) => onPath(node) && within(node, id, nodes))
 
   return (
     <>
@@ -77,7 +94,9 @@ function ZoneNode({ id, data, selected }) {
       <ConnectionHandles border={style.border} />
 
       <div
-        className="pointer-events-none h-full w-full rounded-xl border-2 border-dashed"
+        className={`pointer-events-none h-full w-full rounded-xl border-2 border-dashed ${
+          aside ? 'walkthrough-aside-zone' : ''
+        }`}
         style={{ background: style.bg, borderColor: style.border }}
       >
         {/* The grab cursor goes with the drag, so a locked zone must not advertise one --
@@ -111,6 +130,29 @@ function ZoneNode({ id, data, selected }) {
       </div>
     </>
   )
+}
+
+/* Did any scenario's event actually arrive at this node? `paths` carries entries for components the
+   event never reached too -- that is how "why did it not get here" is recorded -- so arrival is the
+   test, not presence. */
+function onPath(node) {
+  return Boolean(node.data?.paths?.some((entry) => entry.arrived))
+}
+
+/* Is `node` inside the zone `zoneId`, at any depth? Walks `parentId` upward with a visited set,
+   because the parent links come from live canvas state and a bad one should draw a diagram oddly
+   rather than overflow the stack on a drag frame -- the same guard `growZones` and `orderForFlow`
+   both keep. */
+function within(node, zoneId, nodes) {
+  const byId = new Map(nodes.map((entry) => [entry.id, entry]))
+  const seen = new Set()
+  let current = node
+  while (current?.parentId && !seen.has(current.parentId)) {
+    if (current.parentId === zoneId) return true
+    seen.add(current.parentId)
+    current = byId.get(current.parentId)
+  }
+  return false
 }
 
 export default memo(ZoneNode)

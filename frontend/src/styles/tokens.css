@@ -186,3 +186,85 @@
     opacity: 1;
   }
 }
+
+/*
+ * The walkthrough's spotlight.
+ *
+ * Three separate jobs, and they were being done by one 3px ring at 33% alpha -- which on a canvas of
+ * forty cards was, as reported, "not easy to see".
+ *
+ * `walkthrough-here` is where the event is *now*. It has to be findable at a glance on a diagram the
+ * reader is zoomed out of, so it is a pulsing halo rather than a static ring: motion is the only
+ * property that survives being small, and it is the one thing no other state on this canvas uses.
+ * The colour comes from `--path-colour`, set inline per scenario, so two paths pulse in their own
+ * colours rather than both in a hardcoded blue.
+ *
+ * `walkthrough-trail` is where the event has *been*. A steady ring, no motion -- a trail that pulsed
+ * would compete with the playhead and the eye would have nothing to lock onto.
+ *
+ * `walkthrough-aside` is everything the path does not touch. Dimmed *and* desaturated, because
+ * opacity alone on a canvas of pale cards is nearly invisible; draining the colour is what makes the
+ * lit path read as lit. Deliberately not `display: none` -- the architecture around the path is the
+ * context that makes the path mean anything, and hiding it would leave the reader looking at a line
+ * floating in space.
+ */
+@keyframes walkthrough-here {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px var(--path-colour),
+      0 0 0 9px color-mix(in srgb, var(--path-colour) 35%, transparent),
+      0 0 22px 6px color-mix(in srgb, var(--path-colour) 55%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 4px var(--path-colour),
+      0 0 0 16px color-mix(in srgb, var(--path-colour) 12%, transparent),
+      0 0 34px 10px color-mix(in srgb, var(--path-colour) 30%, transparent);
+  }
+}
+
+.walkthrough-here {
+  animation: walkthrough-here 1.15s ease-in-out infinite;
+  /* Above its neighbours while it is the playhead: the halo extends well past the card's own box, and
+     under an adjacent card it would be clipped on the side the reader is looking at. */
+  z-index: 4;
+}
+
+.walkthrough-trail {
+  box-shadow:
+    0 0 0 2px var(--path-colour),
+    0 0 12px 2px color-mix(in srgb, var(--path-colour) 30%, transparent);
+}
+
+.walkthrough-aside {
+  opacity: 0.32;
+  filter: saturate(0.25);
+  transition:
+    opacity 220ms ease,
+    filter 220ms ease;
+}
+
+/* A zone the path never enters. Much gentler than a component's: a zone is a large pale area, so the
+   same treatment turns a third of the canvas into a grey slab and takes the diagram's structure with
+   it. Enough to recede, not enough to stop being a landmark. */
+.walkthrough-aside-zone {
+  opacity: 0.55;
+  filter: saturate(0.4);
+  transition:
+    opacity 220ms ease,
+    filter 220ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The halo still has to be findable, so the pulse becomes its own brightest frame rather than
+     nothing -- turning the animation off entirely would leave the playhead indistinguishable from
+     the trail, which is the thing this was asked to fix. */
+  .walkthrough-here {
+    animation: none;
+    box-shadow:
+      0 0 0 4px var(--path-colour),
+      0 0 0 14px color-mix(in srgb, var(--path-colour) 18%, transparent),
+      0 0 30px 8px color-mix(in srgb, var(--path-colour) 40%, transparent);
+  }
+}

@@ -85,7 +85,7 @@ export default function FlowEdge({
   selected,
 }) {
   const { screenToFlowPosition } = useReactFlow()
-  const { onWaypoints, adjustingEdgeId } = useChrome()
+  const { onWaypoints, adjustingEdgeId, walkthroughActive } = useChrome()
   /* Double-clicking the line puts it in adjust mode -- see Canvas's `onEdgeDoubleClick`. Held there
      rather than here so only one connector is ever in it: two edges showing handles at once means two
      sets of dots competing for the same few pixels wherever the lines cross. */
@@ -207,7 +207,10 @@ export default function FlowEdge({
              something is playing somewhere else, and an edge should not depend on the state of
              edges it cannot see. */
           ...style,
-          opacity: paths ? 0.2 : style?.opacity,
+          /* Three cases. Under its own overlays it fades so the colours read against it; with a
+             walkthrough running and no path on it, it recedes with the rest of the diagram the event
+             never touched; otherwise it is left alone. */
+          opacity: paths ? 0.2 : walkthroughActive ? 0.3 : style?.opacity,
           /* Thicker with what it stands for, capped: a merged line has to look heavier than a
              single connection at a glance, and unbounded growth would make one edge into a band
              across the diagram. */
@@ -217,11 +220,25 @@ export default function FlowEdge({
 
       {paths?.map((entry, index) => (
         <g key={entry.scenarioId} style={{ pointerEvents: 'none' }}>
+          {/* A wide, faint copy underneath the coloured stroke: the trail has to read as *lit* against
+              the dimmed diagram around it, and a 2px line does not glow however saturated it is.
+              Only on the hop being travelled and the ones already travelled -- a dropped hop is
+              exactly where the event stopped, and lighting it up would say the opposite. */}
+          {entry.status !== 'dropped' && (
+            <path
+              d={drawnPath}
+              fill="none"
+              stroke={entry.color}
+              strokeWidth={entry.status === 'active' ? 12 : 8}
+              strokeLinecap="round"
+              strokeOpacity={entry.status === 'active' ? 0.28 : 0.14}
+            />
+          )}
           <path
             d={drawnPath}
             fill="none"
             stroke={entry.color}
-            strokeWidth={entry.status === 'active' ? 3 : 2}
+            strokeWidth={entry.status === 'active' ? 3.5 : 2.5}
             strokeLinecap="round"
             /* Dropped is dimmed rather than recoloured: the colour is the scenario's identity,
                and turning it red to mean "dropped" would make one path look like another. */

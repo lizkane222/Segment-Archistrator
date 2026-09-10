@@ -71,7 +71,7 @@ function SegmentNode({ id, data, selected, dragging }) {
   const hasChildren = (data.children?.length ?? 0) > 0
   /* Both halves of the condition, and the second is the load-bearing one: see chrome.js.
      `bound === false` alone is true of every card on a canvas with no workspace behind it. */
-  const { showFlags, rename } = useChrome()
+  const { showFlags, rename, walkthroughActive } = useChrome()
   const isPlaceholder = data.bound === false && showFlags
   const locked = Boolean(data.locked)
 
@@ -146,6 +146,24 @@ function SegmentNode({ id, data, selected, dragging }) {
   const lit = paths?.filter((entry) => entry.arrived) ?? null
   const glowing = lit?.length ? lit : null
 
+  /*
+   * Three walkthrough states, and they need to look nothing like each other -- the old single 3px
+   * ring at 33% alpha was doing all three jobs and, as reported, none of them visibly.
+   *
+   *   here    the playhead. A pulsing halo, because motion is the only property that survives being
+   *           small on a diagram the reader is zoomed out of.
+   *   trail   somewhere the event has already been. A steady ring; a pulsing trail would compete
+   *           with the playhead and leave the eye nothing to lock onto.
+   *   aside   not on this path at all. Dimmed and desaturated -- see `walkthroughActive` for why a
+   *           node has to be told a walkthrough is running to know it is being left out of one.
+   */
+  const here = paths?.find((entry) => entry.current) ?? null
+  const trail = !here && glowing ? glowing[0] : null
+  /* Touched but never arrived is its own case: the trace records where the event did *not* get to,
+     and those nodes have `paths` without `arrived`. They dim like an untouched node rather than
+     glowing, because glowing would say the opposite of what the trace says. */
+  const aside = walkthroughActive && !here && !glowing
+
   /* Absent until someone drags a handle, and that is the point: with no chosen height a
      card is `minHeight` and grows with `InternalSections`, so an Identity Resolver is as
      tall as its buckets need. A chosen height is a size the user picked, so it wins even
@@ -187,7 +205,9 @@ function SegmentNode({ id, data, selected, dragging }) {
       <div
         className={`group relative flex items-center gap-2 border px-3 py-2 transition-shadow ${shapeClass} ${
           selected ? 'shadow-lg ring-2 ring-twilio-blue ring-offset-1' : 'shadow-sm'
-        } ${flashing ? 'flash-border' : ''}`}
+        } ${flashing ? 'flash-border' : ''} ${
+          here ? 'walkthrough-here' : trail ? 'walkthrough-trail' : aside ? 'walkthrough-aside' : ''
+        }`}
         style={{
           /*
            * Two sizing modes, and which one applies is simply whether the user has dragged a
@@ -215,13 +235,18 @@ function SegmentNode({ id, data, selected, dragging }) {
           minHeight: chosen.height ?? NODE_HEIGHT,
           background: style.bg,
           color: style.text,
-          borderColor: glowing?.[0]?.color ?? style.border,
-          /* One ring per arriving scenario, stacked outward, so a node two paths
-             reached shows both rather than the first one only. */
-          boxShadow: glowing
-            ? glowing.map((entry, index) => `0 0 0 ${(index + 1) * 3}px ${entry.color}55`).join(', ')
-            : undefined,
-          opacity: paths && !glowing ? 0.5 : undefined,
+          borderColor: here?.color ?? glowing?.[0]?.color ?? style.border,
+          /*
+           * The halo and the ring are CSS classes now, not inline shadows, because a keyframe
+           * animation cannot be expressed inline -- so what is passed in is the *colour* it should
+           * use. `--path-colour` is read by all three walkthrough rules in tokens.css, which is what
+           * makes two scenarios pulse in their own colours instead of both in a hardcoded blue.
+           */
+          '--path-colour': here?.color ?? trail?.color ?? undefined,
+          /* Only the "touched but never arrived" case is left inline: it is a plain fade with no
+             animation, and it must not be confused with `walkthrough-aside`, which means the path
+             never came near this component at all. */
+          opacity: paths && !glowing && !here ? 0.45 : undefined,
           /* An outline rather than a ring class or another box-shadow, because both of those
              are already spoken for: `selected` uses the ring and a scenario's arrival uses an
              inline box-shadow, and whichever of the three was written last would silently win.
