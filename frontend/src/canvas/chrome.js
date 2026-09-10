@@ -15,6 +15,9 @@
  *   - `rename(id, name)`: how a node writes a name back. Double-clicking a card edits it in
  *     place, and the edit has to reach the same `setNodes` the inspector's field does or the
  *     two would show different names for the same component.
+ *   - `setRadius(id, radius)`: how a shape writes its corner rounding back. Same argument as
+ *     `rename` -- the drag happens inside the node renderer, the edit belongs to whoever owns the
+ *     document.
  *   - `walkthroughActive`: whether a walkthrough is currently showing a frame. Nodes and zones need
  *     it to know they are being *left out* of a path, which is not something they can tell from
  *     their own data -- an untouched component carries no path state at all, and is
@@ -45,6 +48,7 @@ const NO_CHROME = {
   showFlags: false,
   connected: false,
   rename: null,
+  setRadius: null,
   onWaypoints: null,
   walkthroughActive: false,
 }

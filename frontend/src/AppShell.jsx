@@ -1298,6 +1298,9 @@ function Workbench({
                    typed on the card and one typed in the sidebar are the same edit and land
                    on the same undo stack. */
                 onRename={(id, name) => updateNode(id, { name })}
+                /* The corner-rounding drag on a shape. Through `updateNode` like every other field
+                   edit, so it lands on the same undo stack and the same dirty check. */
+                onSetRadius={(id, radius) => updateNode(id, { radius })}
                 /* Whether the Unbound flags mean anything yet -- see canvas/chrome.js. */
                 connected={Boolean(workspace)}
                 /* So an untouched component and an untouched zone can tell they are being left out

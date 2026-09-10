@@ -16,6 +16,8 @@
  */
 
 import { useEffect, useMemo, useReducer, useState } from 'react'
+
+import ShapesTab from './ShapesTab.jsx'
 import {
   Box,
   Boxes,
@@ -116,7 +118,7 @@ export default function Palette({
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {filters.tab === TABS.components && (
-          <ComponentsTab
+          <ComponentsSection
             topology={topology}
             zonesOnCanvas={zonesOnCanvas}
             search={filters.search}
@@ -144,6 +146,56 @@ export default function Palette({
 }
 
 /* --- tabs ----------------------------------------------------------------- */
+
+/*
+ * Components, split in two.
+ *
+ * "Segment" is everything with rules -- a kind from topology.py, with a zone it belongs in and a
+ * verdict the walkthrough can give it. "Shapes" is everything without: geometry, annotations, and the
+ * converted Twilio icon libraries.
+ *
+ * Nested rather than a fifth top-level tab, because the top row is about *where a thing comes from* --
+ * the rules, the catalog, this workspace, an event -- and both of these come from the same place. It
+ * is also what the request asked for.
+ *
+ * The sub-tab is local state. It is a view preference within one session, not part of the document and
+ * not something the filter reducer needs to know: no other tab's behaviour depends on it, so putting it
+ * in `filters` would be adding a field every reducer case has to carry.
+ */
+function ComponentsSection({ topology, zonesOnCanvas, search }) {
+  const [section, setSection] = useState('segment')
+
+  return (
+    <div>
+      <div className="mb-3 flex gap-1 border-b border-twilio-gray-20 pb-2">
+        {[
+          ['segment', 'Segment'],
+          ['shapes', 'Shapes'],
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setSection(id)}
+            aria-pressed={section === id}
+            className={`rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
+              section === id
+                ? 'bg-twilio-blue text-white'
+                : 'text-twilio-gray-60 hover:bg-twilio-gray-10 hover:text-twilio-navy'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {section === 'segment' ? (
+        <ComponentsTab topology={topology} zonesOnCanvas={zonesOnCanvas} search={search} />
+      ) : (
+        <ShapesTab search={search} />
+      )}
+    </div>
+  )
+}
 
 function ComponentsTab({ topology, zonesOnCanvas, search }) {
   if (!topology) return <Hint>Loading component rules…</Hint>

@@ -902,7 +902,10 @@ export function toFlowNode(node, zoneId, position) {
   const chosen = componentSize(node)
   return {
     id: node.id,
-    type: 'segmentNode',
+    /* A shape has its own renderer: its outline is the content, where a component's box is furniture
+       around fields. See canvas/nodes/ShapeNode.jsx. The `kind` is what decides, so a shape survives a
+       save and reload as one -- `type` is React Flow's and is not stored. */
+    type: node.kind === 'shape' ? 'shape' : 'segmentNode',
     position,
     ...(zone ? { parentId: zoneNodeId(zone) } : {}),
     /* Only when the user chose one. React Flow prefers a top-level `width` over

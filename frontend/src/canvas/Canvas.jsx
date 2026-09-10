@@ -51,6 +51,7 @@ import FlowEdge from './edges/FlowEdge.jsx'
 import GroupControl from './GroupControl.jsx'
 import GroupStackNode from './nodes/GroupStackNode.jsx'
 import SegmentNode from './nodes/SegmentNode.jsx'
+import ShapeNode from './nodes/ShapeNode.jsx'
 import ZoneNode from './nodes/ZoneNode.jsx'
 import AnchorGutter from './AnchorGutter.jsx'
 import { AnchorContext, createAnchorFocus } from './anchors.js'
@@ -104,7 +105,12 @@ import {
 
 /* Declared once, at module scope. React Flow warns (and rebuilds its internal
    node registry) if these object identities change between renders. */
-const NODE_TYPES = { segmentNode: SegmentNode, zone: ZoneNode, groupStack: GroupStackNode }
+const NODE_TYPES = {
+  segmentNode: SegmentNode,
+  shape: ShapeNode,
+  zone: ZoneNode,
+  groupStack: GroupStackNode,
+}
 const EDGE_TYPES = { flow: FlowEdge }
 
 export const DRAG_MIME = 'application/segment-arch-kind'
@@ -126,6 +132,7 @@ export default function Canvas({
   onNotify,
   onAdvise,
   onRename,
+  onSetRadius,
   flash,
   connected = false,
   walkthroughActive = false,
@@ -245,11 +252,20 @@ export default function Canvas({
       showFlags,
       connected,
       rename: onRename ?? null,
+      setRadius: onSetRadius ?? null,
       onWaypoints,
       adjustingEdgeId,
       walkthroughActive,
     }),
-    [showFlags, connected, onRename, onWaypoints, adjustingEdgeId, walkthroughActive],
+    [
+      showFlags,
+      connected,
+      onRename,
+      onSetRadius,
+      onWaypoints,
+      adjustingEdgeId,
+      walkthroughActive,
+    ],
   )
 
   /*
