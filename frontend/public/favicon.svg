@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="connectorGrad" x1="21" y1="8" x2="11" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F22F46" />
+      <stop offset="1" stop-color="#4FDBAC" />
+    </linearGradient>
+  </defs>
+
+  <!-- app-icon tile, Twilio dark navy -->
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="#0D122B" />
+
+  <!-- the "S": one flowing connector line, same curve a bezier edge on the
+       canvas draws, doubling as the stroke of Segment's S mark -->
+  <path
+    d="M21 8C21 8 12 8 11 11C10 14 14 15 16 16C18 17 22 18 21 21C20 24 11 24 11 24"
+    fill="none"
+    stroke="url(#connectorGrad)"
+    stroke-width="3.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- waypoint at the curve's own inflection, same navy as the tile so it
+       reads as a node on the line rather than a third competing color -->
+  <circle cx="16" cy="16" r="1.6" fill="#0D122B" stroke="#ffffff" stroke-width="0.6" />
+
+  <!-- connector endpoints, styled like the canvas's own handles: white fill,
+       colored ring -->
+  <circle cx="21" cy="8" r="2.4" fill="#ffffff" stroke="#F22F46" stroke-width="1.8" />
+  <circle cx="11" cy="24" r="2.4" fill="#ffffff" stroke="#4FDBAC" stroke-width="1.8" />
+</svg>

@@ -1,0 +1,47 @@
+# --- secrets -----------------------------------------------------------------
+# `.env` holds a real SECRET_KEY, a real Fernet key and a real DATABASE_URL. The
+# Fernet key is the one that decrypts every stored Segment token, so this is the
+# single most important line in this file. `.env.example` is the committed one
+# and carries placeholders only.
+.env
+.env.*
+!.env.example
+# Anything dropped in here to talk to a TLS-inspecting proxy. The directory is
+# committed (empty) because settings reference it; its contents never are.
+config/certs/*
+!config/certs/.gitkeep
+*.pem
+*.key
+*.crt
+*.p12
+
+# --- build output ------------------------------------------------------------
+# Both are produced by `render.yaml`'s build command from source in this repo.
+# Committing them means a deploy can ship a stale bundle that no commit explains.
+static/spa/
+staticfiles/
+frontend/dist/
+
+# --- dependencies ------------------------------------------------------------
+.venv/
+venv/
+node_modules/
+
+# --- local databases ---------------------------------------------------------
+*.sqlite3
+db.sqlite3
+
+# --- caches and tooling ------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# --- editors and OS ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,7 @@
+{
+  "name": "segment-builder",
+  "private": true,
+  "scripts": {
+    "segment-builder": "bash scripts/segment-builder.sh"
+  }
+}

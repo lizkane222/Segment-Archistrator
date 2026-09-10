@@ -1,0 +1,1057 @@
+[
+  {
+    "key": "web-mobile-unify-engage",
+    "name": "Web + Mobile → Unify → Engage",
+    "description": "The canonical full-stack architecture: browser and app sources into Connections, profiles in Unify, audiences and a journey in Engage. Start here for most customers.",
+    "category": "Reference architecture",
+    "sort_order": 0,
+    "nodes": [
+      {
+        "id": "ph:source-web",
+        "kind": "source",
+        "name": "Marketing site",
+        "sourceType": "javascript",
+        "description": "Analytics.js on the marketing site and web app. Usually the highest-volume source and the one that defines the event taxonomy.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "javascript"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-ios",
+        "kind": "source",
+        "name": "iOS app",
+        "sourceType": "ios",
+        "description": "Analytics-Swift. Shares the event names with the web source — if it does not, that gap is worth drawing attention to here.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "ios",
+            "apple",
+            "swift"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-android",
+        "kind": "source",
+        "name": "Android app",
+        "sourceType": "android",
+        "description": "Analytics-Kotlin.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "android",
+            "kotlin"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-backend",
+        "kind": "source",
+        "name": "Backend service",
+        "sourceType": "server",
+        "description": "Server-side events: purchases, refunds, subscription changes. The events you cannot trust a client to send.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "node",
+            "python",
+            "java",
+            "go",
+            "ruby",
+            "php",
+            "http",
+            "http-api"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-insert-fn",
+        "kind": "source_insert_function",
+        "name": "Enrich + redact",
+        "description": "Runs before the event reaches Segment: drop PII the client should not have sent, and add anything only the server knows.",
+        "binds": {
+          "kind": "source_insert_function"
+        }
+      },
+      {
+        "id": "ph:filter-eu",
+        "kind": "destination_filter",
+        "name": "Consent filter",
+        "description": "Drops events for profiles that have not consented to marketing before they reach the ad and email destinations.",
+        "binds": {
+          "kind": "destination_filter"
+        }
+      },
+      {
+        "id": "ph:dest-analytics",
+        "kind": "destination",
+        "name": "Product analytics",
+        "description": "Amplitude, Mixpanel, or similar. Gets the full event stream.",
+        "binds": {
+          "kind": "destination",
+          "categories": [
+            "Analytics",
+            "Raw Data"
+          ]
+        }
+      },
+      {
+        "id": "ph:dest-engagement",
+        "kind": "destination",
+        "name": "Email / push",
+        "description": "Braze, Iterable, Customer.io. Downstream of the consent filter.",
+        "binds": {
+          "kind": "destination",
+          "categories": [
+            "Email Marketing",
+            "Marketing Automation",
+            "CRM"
+          ]
+        }
+      },
+      {
+        "id": "ph:dest-ads",
+        "kind": "destination",
+        "name": "Paid media",
+        "description": "Audience sync for ad platforms. Fed from Engage rather than from the raw stream, so the ad account only ever sees the segment.",
+        "binds": {
+          "kind": "destination",
+          "categories": [
+            "Advertising",
+            "Google",
+            "Facebook"
+          ]
+        }
+      },
+      {
+        "id": "ph:warehouse",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "description": "The full event history, for analysis Segment is not the right tool for. Also the join key back to non-Segment data.",
+        "binds": {
+          "kind": "warehouse"
+        }
+      },
+      {
+        "id": "ph:space",
+        "kind": "space",
+        "name": "Unify space",
+        "description": "Where events become profiles. Everything in Engage reads from here.",
+        "binds": {
+          "kind": "space"
+        }
+      },
+      {
+        "id": "idres",
+        "kind": "identity_resolution",
+        "name": "Identity resolution",
+        "synthetic": true,
+        "bound": true,
+        "description": "Match rules and identifier precedence. Configured per space in Segment — this node is a reminder to check them, not a resource this tool reads."
+      },
+      {
+        "id": "ph:trait-ltv",
+        "kind": "computed_trait",
+        "name": "Lifetime value",
+        "description": "An aggregation trait over purchase events. The example of a trait that only exists because the backend source is wired up.",
+        "binds": {
+          "kind": "computed_trait"
+        }
+      },
+      {
+        "id": "ph:trait-engagement",
+        "kind": "computed_trait",
+        "name": "Last seen",
+        "description": "A most-recent trait. Cheap, and the one most audiences end up depending on.",
+        "binds": {
+          "kind": "computed_trait"
+        }
+      },
+      {
+        "id": "profile-api",
+        "kind": "profile_api",
+        "name": "Profile API",
+        "synthetic": true,
+        "bound": true,
+        "description": "Read surface over the space: the customer's own services asking \"what do we know about this user?\" at request time."
+      },
+      {
+        "id": "ph:audience-highvalue",
+        "kind": "audience",
+        "name": "High-value customers",
+        "description": "Built on the lifetime-value trait. Syncs to paid media.",
+        "binds": {
+          "kind": "audience"
+        }
+      },
+      {
+        "id": "ph:audience-churn",
+        "kind": "audience",
+        "name": "At risk of churn",
+        "description": "Built on the last-seen trait. Entry condition for the win-back journey.",
+        "binds": {
+          "kind": "audience"
+        }
+      },
+      {
+        "id": "journey-winback",
+        "kind": "journey",
+        "name": "Win-back journey",
+        "bindable": false,
+        "description": "Segment publishes no Journeys API, so this node is drawn by hand and cannot be bound. Edit it to match what is actually configured in Engage."
+      }
+    ],
+    "edges": [
+      {
+        "source": "ph:source-web",
+        "target": "ph:source-insert-fn"
+      },
+      {
+        "source": "ph:source-insert-fn",
+        "target": "ph:dest-analytics"
+      },
+      {
+        "source": "ph:source-insert-fn",
+        "target": "ph:filter-eu"
+      },
+      {
+        "source": "ph:source-insert-fn",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-insert-fn",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-ios",
+        "target": "ph:dest-analytics"
+      },
+      {
+        "source": "ph:source-ios",
+        "target": "ph:filter-eu"
+      },
+      {
+        "source": "ph:source-ios",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-ios",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-android",
+        "target": "ph:dest-analytics"
+      },
+      {
+        "source": "ph:source-android",
+        "target": "ph:filter-eu"
+      },
+      {
+        "source": "ph:source-android",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-android",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-backend",
+        "target": "ph:dest-analytics"
+      },
+      {
+        "source": "ph:source-backend",
+        "target": "ph:filter-eu"
+      },
+      {
+        "source": "ph:source-backend",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-backend",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:filter-eu",
+        "target": "ph:dest-engagement"
+      },
+      {
+        "source": "ph:space",
+        "target": "idres"
+      },
+      {
+        "source": "ph:space",
+        "target": "profile-api"
+      },
+      {
+        "source": "ph:space",
+        "target": "ph:trait-ltv"
+      },
+      {
+        "source": "ph:space",
+        "target": "ph:trait-engagement"
+      },
+      {
+        "source": "ph:trait-ltv",
+        "target": "ph:audience-highvalue"
+      },
+      {
+        "source": "ph:trait-engagement",
+        "target": "ph:audience-churn"
+      },
+      {
+        "source": "ph:audience-highvalue",
+        "target": "ph:dest-ads"
+      },
+      {
+        "source": "ph:audience-churn",
+        "target": "journey-winback"
+      },
+      {
+        "source": "journey-winback",
+        "target": "ph:dest-engagement"
+      }
+    ]
+  },
+  {
+    "key": "cloud-sources-reverse-etl",
+    "name": "Cloud sources + Reverse ETL",
+    "description": "Warehouse-first. Cloud sources pull business systems into Segment and the warehouse, then Reverse ETL models push modelled data back out to the tools that act on it.",
+    "category": "Reference architecture",
+    "sort_order": 1,
+    "nodes": [
+      {
+        "id": "ph:source-crm",
+        "kind": "source",
+        "name": "CRM (cloud source)",
+        "sourceType": "salesforce",
+        "description": "A cloud source is a scheduled pull, not a stream — object records arrive as identify/group calls on Segment's sync cadence, not in real time.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "salesforce",
+            "hubspot",
+            "dynamics-365"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-billing",
+        "kind": "source",
+        "name": "Billing (cloud source)",
+        "sourceType": "stripe",
+        "description": "Subscriptions, invoices, failed payments — the events that make a revenue model possible.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "stripe",
+            "recurly",
+            "chargebee",
+            "zuora"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-app",
+        "kind": "source",
+        "name": "Product events",
+        "sourceType": "javascript",
+        "description": "Behavioural events, so the warehouse can join product usage to billing.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "javascript",
+            "node",
+            "http"
+          ]
+        }
+      },
+      {
+        "id": "ph:warehouse",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "description": "The centre of this architecture rather than a side-effect of it. Reverse ETL models are SQL against this.",
+        "binds": {
+          "kind": "warehouse"
+        }
+      },
+      {
+        "id": "ph:retl-accounts",
+        "kind": "reverse_etl_model",
+        "name": "Account health model",
+        "description": "SQL joining product usage to billing state. Runs on a schedule; its output is what the CRM actually sees.",
+        "binds": {
+          "kind": "reverse_etl_model"
+        }
+      },
+      {
+        "id": "ph:retl-leads",
+        "kind": "reverse_etl_model",
+        "name": "Lead scoring model",
+        "description": "The second model, drawn separately because the two have different schedules and different failure modes.",
+        "binds": {
+          "kind": "reverse_etl_model"
+        }
+      },
+      {
+        "id": "ph:dest-crm",
+        "kind": "destination",
+        "name": "CRM (write-back)",
+        "description": "The same system that appears as a cloud source on the left. Data going both ways is the thing this diagram exists to make visible.",
+        "binds": {
+          "kind": "destination",
+          "categories": [
+            "CRM"
+          ]
+        }
+      },
+      {
+        "id": "ph:dest-support",
+        "kind": "destination",
+        "name": "Support tool",
+        "description": "Account health on the ticket, so support sees it without leaving the tool.",
+        "binds": {
+          "kind": "destination",
+          "categories": [
+            "CRM",
+            "Customer Success",
+            "Analytics"
+          ]
+        }
+      }
+    ],
+    "edges": [
+      {
+        "source": "ph:source-crm",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-billing",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-app",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:warehouse",
+        "target": "ph:retl-accounts"
+      },
+      {
+        "source": "ph:warehouse",
+        "target": "ph:retl-leads"
+      },
+      {
+        "source": "ph:retl-accounts",
+        "target": "ph:dest-crm"
+      },
+      {
+        "source": "ph:retl-accounts",
+        "target": "ph:dest-support"
+      },
+      {
+        "source": "ph:retl-leads",
+        "target": "ph:dest-crm"
+      }
+    ]
+  },
+  {
+    "key": "end-to-end-test",
+    "name": "End-to-end test harness",
+    "description": "One source, one transform, one filter, one destination. Deliberately small: this is the diagram to open when you want to watch a single event travel the pipeline and see exactly where it is dropped.",
+    "category": "Validation",
+    "sort_order": 2,
+    "nodes": [
+      {
+        "id": "ph:source-test",
+        "kind": "source",
+        "name": "Test source",
+        "sourceType": "http",
+        "description": "An HTTP API source is the easiest thing to send a deliberate event into — curl, no SDK, no build step.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "http",
+            "http-api",
+            "javascript"
+          ]
+        }
+      },
+      {
+        "id": "ph:insert-fn",
+        "kind": "source_insert_function",
+        "name": "Transform under test",
+        "description": "The step whose behaviour you are actually checking. Simulate an event with and without it to see what it changes.",
+        "binds": {
+          "kind": "source_insert_function"
+        }
+      },
+      {
+        "id": "ph:filter-under-test",
+        "kind": "destination_filter",
+        "name": "Filter under test",
+        "description": "The commonest cause of \"the event never arrived\". Bind the real filter and the simulator will report its verdict and its reason.",
+        "binds": {
+          "kind": "destination_filter"
+        }
+      },
+      {
+        "id": "ph:dest-under-test",
+        "kind": "destination",
+        "name": "Destination under test",
+        "description": "Where the event is supposed to end up.",
+        "binds": {
+          "kind": "destination"
+        }
+      },
+      {
+        "id": "ph:dest-debug",
+        "kind": "destination",
+        "name": "Webhook (control)",
+        "description": "An unfiltered webhook destination, wired straight off the transform with no filter in between. If the event reaches here and not the destination under test, the filter is the answer.",
+        "binds": {
+          "kind": "destination",
+          "categories": [
+            "Webhooks",
+            "Raw Data"
+          ]
+        }
+      }
+    ],
+    "edges": [
+      {
+        "source": "ph:source-test",
+        "target": "ph:insert-fn"
+      },
+      {
+        "source": "ph:insert-fn",
+        "target": "ph:filter-under-test"
+      },
+      {
+        "source": "ph:insert-fn",
+        "target": "ph:dest-debug"
+      },
+      {
+        "source": "ph:filter-under-test",
+        "target": "ph:dest-under-test"
+      }
+    ]
+  },
+  {
+    "key": "mtu-billing-view",
+    "name": "MTU / billing view",
+    "description": "Sources and the space only, annotated with what each contributes to billing. MTU is counted across all sources at once, on distinct users seen per month — not per source, and not per destination, which is why there is no destination detail here. Leaving it out is what makes this view readable in a commercial conversation.",
+    "category": "Commercial",
+    "sort_order": 3,
+    "nodes": [
+      {
+        "id": "ph:source-web",
+        "kind": "source",
+        "name": "Website",
+        "sourceType": "javascript",
+        "description": "MTU: anonymous visitors do not count until they are identified. A high anonymous-to-identified ratio here is the usual first thing to look at.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "javascript"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-mobile",
+        "kind": "source",
+        "name": "Mobile apps",
+        "sourceType": "ios",
+        "description": "MTU: logged-in app users are almost always counted. Typically the densest contributor per user.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "ios",
+            "android"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-server",
+        "kind": "source",
+        "name": "Backend",
+        "sourceType": "server",
+        "description": "MTU: server events carry a userId by definition, so every distinct user reached this month counts. Watch for batch jobs that touch the whole user table — that is the classic surprise on an invoice.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "node",
+            "python",
+            "java",
+            "go",
+            "http"
+          ]
+        }
+      },
+      {
+        "id": "ph:source-cloud",
+        "kind": "source",
+        "name": "Cloud sources",
+        "sourceType": "salesforce",
+        "description": "MTU: a scheduled sync that touches every record counts every record. The most common cause of an MTU number nobody can explain.",
+        "binds": {
+          "kind": "source",
+          "sourceType": [
+            "salesforce",
+            "hubspot",
+            "stripe"
+          ]
+        }
+      },
+      {
+        "id": "ph:space",
+        "kind": "space",
+        "name": "Unify space",
+        "description": "Profiles, which is the unit the MTU count is really about. Bind this and the inspector shows the space's real profile count.",
+        "binds": {
+          "kind": "space"
+        }
+      },
+      {
+        "id": "ph:warehouse",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "description": "Included because it is the place to actually verify an MTU figure: count distinct userId per month in the identifies and tracks tables.",
+        "binds": {
+          "kind": "warehouse"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "source": "ph:source-web",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-web",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-mobile",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-mobile",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-server",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-server",
+        "target": "ph:warehouse"
+      },
+      {
+        "source": "ph:source-cloud",
+        "target": "ph:space"
+      },
+      {
+        "source": "ph:source-cloud",
+        "target": "ph:warehouse"
+      }
+    ]
+  },
+  {
+    "key": "end-to-end-full-pipeline",
+    "name": "End-to-end full pipeline",
+    "description": "The whole pipeline in one diagram: collection upstream of Segment, Connections, Unify and Engage, and a warehouse on each end -- one that Reverse ETL reads from, one that Profiles Sync writes to. Hand-arranged rather than laid out by column, and it uses the optional sub-zones, so it is the one to start from when the point is to show somebody the shape of the whole thing.",
+    "category": "Reference architecture",
+    "sort_order": 4,
+    "zones": [
+      {
+        "id": "segment",
+        "position": {
+          "x": 23,
+          "y": 7
+        },
+        "width": 1529,
+        "height": 1059
+      },
+      {
+        "id": "connections",
+        "parent": "segment",
+        "position": {
+          "x": 26,
+          "y": 53
+        },
+        "width": 1104,
+        "height": 311
+      },
+      {
+        "id": "sources",
+        "parent": "connections",
+        "position": {
+          "x": 9,
+          "y": 32
+        },
+        "width": 465,
+        "height": 165
+      },
+      {
+        "id": "destinations",
+        "parent": "connections",
+        "position": {
+          "x": 655,
+          "y": 31
+        },
+        "width": 410,
+        "height": 248
+      },
+      {
+        "id": "unify",
+        "parent": "segment",
+        "position": {
+          "x": 32,
+          "y": 507
+        },
+        "width": 676,
+        "height": 520
+      },
+      {
+        "id": "profile_sources",
+        "parent": "unify",
+        "position": {
+          "x": 20,
+          "y": 48
+        },
+        "width": 284,
+        "height": 259
+      },
+      {
+        "id": "profiles",
+        "parent": "unify",
+        "position": {
+          "x": 351,
+          "y": 216
+        },
+        "width": 284,
+        "height": 272
+      },
+      {
+        "id": "engage",
+        "parent": "segment",
+        "position": {
+          "x": 710,
+          "y": 525
+        },
+        "width": 787,
+        "height": 368
+      },
+      {
+        "id": "debugger",
+        "parent": "engage",
+        "position": {
+          "x": 272,
+          "y": 25
+        },
+        "width": 265,
+        "height": 311
+      },
+      {
+        "id": "custom:upstream",
+        "custom": true,
+        "label": "App / Mobile / Server / Warehouse",
+        "position": {
+          "x": -284,
+          "y": 106
+        },
+        "width": 284,
+        "height": 491,
+        "description": "Outside Segment"
+      },
+      {
+        "id": "custom:warehouse",
+        "custom": true,
+        "label": "Warehouse",
+        "position": {
+          "x": 1585,
+          "y": 329
+        },
+        "width": 284,
+        "height": 230,
+        "description": "Outside Segment"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "ph:profiles-sync",
+        "kind": "profile_sync",
+        "name": "Profiles Sync",
+        "zone": "segment",
+        "position": {
+          "x": 1041,
+          "y": 903
+        },
+        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. On the Segment backdrop in no single product, because it genuinely belongs to two."
+      },
+      {
+        "id": "ph:reverse-etl-model",
+        "kind": "reverse_etl_model",
+        "name": "Reverse ETL Model",
+        "zone": "segment",
+        "position": {
+          "x": 33,
+          "y": 411
+        },
+        "binds": {
+          "kind": "reverse_etl_model"
+        },
+        "description": "SQL against that warehouse, on a schedule. Drawn on the Segment backdrop rather than inside Connections because it spans the boundary: the query is theirs, the delivery is Segment's."
+      },
+      {
+        "id": "ph:source-web",
+        "kind": "source",
+        "name": "Source",
+        "zone": "sources",
+        "position": {
+          "x": 30,
+          "y": 49
+        },
+        "binds": {
+          "kind": "source"
+        },
+        "description": "Where events come in. The Sources box around it is a drawing choice -- a source on the bare Connections backdrop is filed just as correctly."
+      },
+      {
+        "id": "ph:mapping",
+        "kind": "destination_mapping",
+        "name": "Mapping",
+        "zone": "destinations",
+        "position": {
+          "x": 14,
+          "y": 108
+        },
+        "binds": {
+          "kind": "destination_mapping"
+        },
+        "description": "The trigger and the field mapping -- the last thing that touches the payload before it becomes this destination's own API call."
+      },
+      {
+        "id": "ph:destination",
+        "kind": "destination",
+        "name": "Destination",
+        "zone": "destinations",
+        "position": {
+          "x": 11,
+          "y": 49
+        },
+        "binds": {
+          "kind": "destination"
+        },
+        "description": "Where events go out. An actions destination does nothing until a mapping says what to send it."
+      },
+      {
+        "id": "ph:identity-rule",
+        "kind": "identity_setting",
+        "name": "Identity Resolution Rule",
+        "zone": "unify",
+        "position": {
+          "x": 364,
+          "y": 46
+        },
+        "description": "One identity resolution rule -- which identifiers may collapse two events into one profile. Maintained by hand; Segment publishes no API for these.",
+        "rules": [
+          {
+            "externalId": "user_id",
+            "limit": 1,
+            "frequency": "Ever"
+          },
+          {
+            "externalId": "email",
+            "limit": 5,
+            "frequency": "Ever"
+          },
+          {
+            "externalId": "anonymous_id",
+            "limit": 5,
+            "frequency": "Ever"
+          }
+        ],
+        "size": {
+          "width": 280
+        }
+      },
+      {
+        "id": "ph:profile-source",
+        "kind": "source",
+        "name": "Source",
+        "zone": "profile_sources",
+        "position": {
+          "x": 36,
+          "y": 80
+        },
+        "binds": {
+          "kind": "source"
+        },
+        "description": "The same source again, as a feeder of profiles. Whether a source is connected to the space is a separate switch from the source existing, and it is the commonest reason Unify sees nothing."
+      },
+      {
+        "id": "ph:segment-profiles",
+        "kind": "destination",
+        "name": "Segment Profiles",
+        "zone": "profile_sources",
+        "position": {
+          "x": 30,
+          "y": 167
+        },
+        "binds": {
+          "kind": "destination"
+        },
+        "description": "The Segment Profiles destination: how a source's events reach the space. Drawn in Unify rather than Connections because what it does belongs to Unify, which is exactly the placement the canvas advises on rather than refuses."
+      },
+      {
+        "id": "ph:profile",
+        "kind": "profile",
+        "name": "Profile",
+        "zone": "profiles",
+        "position": {
+          "x": 32,
+          "y": 55
+        },
+        "description": "A shape, not a person: identifiers, traits and events per profile. Never a real one, so exporting this diagram cannot put customer data in a slide deck."
+      },
+      {
+        "id": "ph:audience",
+        "kind": "audience",
+        "name": "Audience",
+        "zone": "engage",
+        "position": {
+          "x": 33,
+          "y": 57
+        },
+        "binds": {
+          "kind": "audience"
+        },
+        "description": "Computed from profiles, and what most journeys are keyed on."
+      },
+      {
+        "id": "ph:journey",
+        "kind": "journey",
+        "name": "Journey",
+        "zone": "engage",
+        "position": {
+          "x": 31,
+          "y": 217
+        },
+        "description": "Hand-authored. There is no Journeys API, so this one never binds to anything and is not counted as a placeholder."
+      },
+      {
+        "id": "ph:computed-trait",
+        "kind": "computed_trait",
+        "name": "Computed Trait",
+        "zone": "engage",
+        "position": {
+          "x": 31,
+          "y": 133
+        },
+        "binds": {
+          "kind": "computed_trait"
+        },
+        "description": "Configured in Unify, drawn in Engage -- this is where the recomputation is actually felt. Another placement the canvas advises on rather than refuses."
+      },
+      {
+        "id": "ph:engage-destination",
+        "kind": "destination",
+        "name": "Destination",
+        "zone": "engage",
+        "position": {
+          "x": 555,
+          "y": 32
+        },
+        "binds": {
+          "kind": "destination"
+        },
+        "description": "Where an audience is activated. The same kind as the destination in Connections, drawn in Engage because the edge that matters reaches it from an audience."
+      },
+      {
+        "id": "ph:debugger-source",
+        "kind": "source",
+        "name": "Debugger Source",
+        "zone": "debugger",
+        "position": {
+          "x": 33,
+          "y": 115
+        },
+        "binds": {
+          "kind": "source"
+        },
+        "description": "The source whose events the debugger is showing. Populated by playing a walkthrough, not by binding."
+      },
+      {
+        "id": "ph:custom-app",
+        "kind": "custom",
+        "name": "Custom component",
+        "zone": "custom:upstream",
+        "position": {
+          "x": 27,
+          "y": 113
+        },
+        "description": "Whatever the customer runs that Segment does not -- their own service, a job, a queue. Deliberately rule-free: it has no zone of its own and no adjacency table, because Segment's rules have nothing to say about it."
+      },
+      {
+        "id": "ph:warehouse-upstream",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "zone": "custom:upstream",
+        "position": {
+          "x": 39,
+          "y": 318
+        },
+        "binds": {
+          "kind": "warehouse"
+        },
+        "description": "Their warehouse acting as a source rather than a destination. This is the one Reverse ETL models read out of."
+      },
+      {
+        "id": "ph:warehouse-sync-target",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "zone": "custom:warehouse",
+        "position": {
+          "x": 10,
+          "y": 51
+        },
+        "binds": {
+          "kind": "warehouse"
+        },
+        "description": "The warehouse Profiles Sync writes into. Drawn separately from the upstream one: often the same warehouse in practice, never the same role in the diagram."
+      }
+    ],
+    "edges": [
+      {
+        "id": "e:reverse-etl-model->destination",
+        "source": "ph:reverse-etl-model",
+        "target": "ph:destination"
+      },
+      {
+        "id": "e:warehouse-upstream->reverse-etl-model",
+        "source": "ph:warehouse-upstream",
+        "target": "ph:reverse-etl-model"
+      },
+      {
+        "id": "e:reverse-etl-model->segment-profiles",
+        "source": "ph:reverse-etl-model",
+        "target": "ph:segment-profiles"
+      },
+      {
+        "id": "e:profiles-sync->warehouse-sync-target",
+        "source": "ph:profiles-sync",
+        "target": "ph:warehouse-sync-target"
+      },
+      {
+        "id": "e:audience->engage-destination",
+        "source": "ph:audience",
+        "target": "ph:engage-destination"
+      }
+    ]
+  }
+]

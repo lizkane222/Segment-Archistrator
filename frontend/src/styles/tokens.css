@@ -1,0 +1,188 @@
+/*
+ * Design tokens, taken from segment-playground/src/index.css so the two tools
+ * look like siblings.
+ *
+ * Deliberately NOT copied from that file:
+ *   - its global `button:not(.card-btn) { border-radius: 9999px !important }`
+ *   - its ~40 lines of !important blue/indigo -> Twilio colour remaps
+ * Both would fight React Flow's own node and handle styling, and !important
+ * rules are close to impossible to override from a node component.
+ *
+ * Tailwind 4 is configured here in CSS rather than in a tailwind.config.js --
+ * that is the v4 idiom, and it keeps the palette and the raw custom properties
+ * in one file instead of two that can drift.
+ */
+
+@import 'tailwindcss';
+
+@theme {
+  /* Brand */
+  --color-twilio-red: #db131a;
+  --color-twilio-red-dark: #b10f12;
+  --color-twilio-red-light: #fdeced;
+  --color-twilio-blue: #0263e0;
+  --color-twilio-blue-dark: #043cb5;
+  --color-twilio-blue-light: #e4f7ff;
+
+  /* Neutrals */
+  --color-twilio-navy: #121c2d;
+  --color-twilio-navy-light: #1c2b45;
+  --color-twilio-slate: #354052;
+  --color-twilio-gray-10: #f4f4f6;
+  --color-twilio-gray-20: #e1e3ea;
+  --color-twilio-gray-40: #aebbc1;
+  --color-twilio-gray-60: #606b85;
+  --color-twilio-gray-80: #39476a;
+  --color-twilio-gray-100: #000d25;
+
+  /* Semantic */
+  --color-twilio-success: #0e7c3a;
+  --color-twilio-warning: #e67e22;
+  --color-twilio-error: #db131a;
+
+  /* Pipeline zones. Each zone gets a backdrop tint and a border, so which
+     product a component belongs to is legible at a glance without reading it.
+     Segment is the outermost one and contains the other three, so its tint is
+     almost white -- anything stronger would show through all three products and
+     shift every colour below. */
+  --color-zone-segment: #f8f9fb;
+  --color-zone-segment-border: #121c2d;
+  --color-zone-connections: #e4f7ff;
+  --color-zone-connections-border: #0263e0;
+  /* Protocols is inside Connections but is its own product, so it gets its own
+     border rather than borrowing its parent's the way the other sub-zones do --
+     otherwise a tracking plan reads as another kind of source. Teal because it is
+     the one hue not already spoken for by a product, and it survives being drawn on
+     top of the Connections tint. No backdrop of its own: see subZoneOf in kinds.js
+     for why a sub-zone tint accumulates. */
+  --color-zone-protocols-border: #0f7c8a;
+  --color-zone-unify: #f3ecff;
+  --color-zone-unify-border: #6f42c1;
+  --color-zone-engage: #fdeced;
+  --color-zone-engage-border: #db131a;
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', helvetica, arial, sans-serif;
+  --font-mono: 'TwilioSansMono', 'Courier New', monospace;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    color: var(--color-twilio-navy);
+    background: var(--color-twilio-gray-10);
+  }
+
+  /* The canvas fills the viewport; nothing above it should ever scroll. */
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+}
+
+@layer utilities {
+  /*
+   * A horizontally scrollable strip of tabs or chips.
+   *
+   * The scrollbar is hidden rather than styled: these strips are one row of
+   * buttons tall, so a 15px scrollbar underneath either eats the row's padding or
+   * pushes the panel's content down by a line. Scrolling still works by trackpad,
+   * shift-wheel, and keyboard focus, and the strips are narrow enough that a
+   * clipped button is itself the affordance.
+   */
+  .scroll-x-thin {
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .scroll-x-thin::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/*
+ * What the cursor promises over a zone.
+ *
+ * A zone is dragged by its header strip alone -- `dragHandle: '.zone-handle'` in
+ * layout.js's `toZoneNode` -- but React Flow marks every draggable node element
+ * `.draggable` and gives it `cursor: grab`. On a zone that element is the whole
+ * backdrop, which is most of the canvas once Segment is on it, so the cursor promised a
+ * drag that never happened anywhere except the header. A click on the body does do
+ * something (it selects the zone and opens it in the inspector), and `pointer` is what
+ * says so.
+ *
+ * Written with enough specificity to beat `.react-flow__node.draggable` rather than
+ * relying on being emitted after it: which of the two stylesheets the bundler puts
+ * second is not something this file should depend on.
+ */
+.react-flow .react-flow__node-zone.draggable {
+  cursor: pointer;
+}
+
+/* Still grabbing while the header is being dragged, for the part of the drag where the
+   pointer has left the strip and is over the backdrop. */
+.react-flow .react-flow__node-zone.draggable.dragging {
+  cursor: grabbing;
+}
+
+/*
+ * The pulse that answers "which one?".
+ *
+ * A placement note names a kind and a name, and on a diagram with three destinations
+ * that is nearly no information. The component it is about pulses instead of the reader
+ * hunting for it -- see canvas/flash.js, which owns the timing (FLASH_MS must stay in
+ * step with the count and duration here: three pulses at 600ms).
+ *
+ * Drawn on a pseudo-element rather than on the card, and that is the whole reason this
+ * is here instead of being three lines of inline style in SegmentNode. Every property
+ * that could carry it is already spoken for: `box-shadow` is a scenario arriving,
+ * `ring` is the selection, and `outline` is the anchor note under the cursor -- so a
+ * fourth meaning in any of them would silently lose to whichever was written last,
+ * which on a component that is selected *and* on a traced path is most of the time.
+ * A pseudo-element stacks with all three.
+ *
+ * `inset` negative rather than a border on the card: a border would reflow the row and
+ * nudge every neighbour by a pixel for the duration of the pulse.
+ *
+ * Amber on purpose, and the same amber the console drawer uses for a warning. Green
+ * means delivered on this canvas and red means dropped, so a component tinted either
+ * while being pointed at would read as a verdict about the component rather than a note
+ * about where it sits.
+ */
+@keyframes flash-border {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.flash-border::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 2px solid #e67e22;
+  border-radius: 0.65rem;
+  /* Click-through: the pulse sits over the card, and a component you cannot select
+     while it is being pointed out to you is worse than not pointing. */
+  pointer-events: none;
+  animation: flash-border 600ms ease-in-out 3;
+}
+
+/* Respect a reader who has asked the OS for less motion: they still get the answer to
+   "which one?", held steady instead of pulsing. */
+@media (prefers-reduced-motion: reduce) {
+  .flash-border::after {
+    animation: none;
+    opacity: 1;
+  }
+}
