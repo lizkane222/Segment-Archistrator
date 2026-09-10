@@ -20,7 +20,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.auth_workspace.models import WriteKeyRevealAudit
-from apps.auth_workspace.permissions import AllowAny
+from apps.auth_workspace.permissions import HasAnyWorkspaceCredential, AllowAny
 from apps.segmentapi import endpoints as ep
 from apps.segmentapi import topology
 from apps.segmentapi.client import SegmentClient
@@ -220,12 +220,27 @@ class WorkspaceGraphView(APIView):
     """
     The auto-generate call: the whole workspace as a canvas-ready graph.
 
-    Partial results are the norm -- see `resources.build_graph`. Check
-    `warnings` in the response rather than assuming completeness.
+    Partial results are the norm -- see `resources.build_graph`. Check `warnings` in the response
+    rather than assuming completeness.
+
+    Two credentials reach this, and they read different amounts. A Public API token gets the whole
+    graph; an app `auth_token` gets the Connections spine over GraphQL, and says so in `warnings`.
+    Branching here rather than inside `build_graph` because they are two different reads against two
+    different services -- one function pretending to be both would need every caching, fan-out and
+    partial-failure decision to be conditional.
+
+    `HasWorkspaceSession` is relaxed to `HasAnyWorkspaceCredential` for this one view. The default
+    refuses a GraphQL session everywhere, deliberately, so that a view added next year is Public-API
+    only unless someone thinks about it -- and this is the one view that has thought about it.
     """
 
+    permission_classes = [HasAnyWorkspaceCredential]
+
     def get(self, request):
-        graph = resources.build_graph(request.user.session, refresh=_wants_refresh(request))
+        session = request.user.session
+        if not session.can_read_workspace_api:
+            return Response(resources.build_graph_via_graphql(session))
+        graph = resources.build_graph(session, refresh=_wants_refresh(request))
         return Response(graph)
 
 

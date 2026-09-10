@@ -66,9 +66,20 @@ Two ways in, offered as equals:
 
 The second is somebody's *whole login session* — it carries all of their access, in every
 workspace they can reach, and cannot be revoked without ending their session. Use your own
-login rather than asking a customer for theirs. It currently authenticates and names the
-workspace but cannot read its components; those reads have no GraphQL equivalent here yet, and
-the app says so rather than letting you find out from a failed request.
+login rather than asking a customer for theirs.
+
+What each one reads differs, and the app says so rather than letting you find out from a gap:
+
+| | Public API token | App session |
+| --- | --- | --- |
+| Sources, destinations, warehouses, and their connections | yes | yes |
+| Functions, Reverse ETL models | yes | not yet |
+| Unify spaces, audiences, computed traits | yes | not yet |
+
+The GraphQL read is one request rather than one per source, because `Source.integrations` and
+`Source.warehouses` are fields — which matters, since that client is throttled to one request a
+second on purpose. Everything it cannot reach comes back in the graph's `warnings`, worded so the
+absence reads as this tool's limitation rather than as a fact about the workspace.
 
 Nothing is stored in the browser. A pasted credential is validated against Segment, encrypted
 with `SEGMENT_TOKEN_ENCRYPTION_KEYS` and kept server-side; only an opaque httpOnly session id

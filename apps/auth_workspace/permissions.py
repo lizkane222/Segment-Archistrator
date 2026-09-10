@@ -51,6 +51,27 @@ class HasWorkspaceSession(permissions.BasePermission):
         return True
 
 
+class HasAnyWorkspaceCredential(permissions.BasePermission):
+    """
+    A session with *some* credential for a real workspace, whichever kind.
+
+    The opposite end of `HasWorkspaceSession` from `HasSession`: it still refuses an anonymous scope,
+    but it accepts a session connected with an app `auth_token` as well as one with a Public API token.
+
+    Used by exactly one view -- the workspace graph -- and that narrowness is the point. The default
+    stays Public-API-only so a view added next year is safe without anyone thinking about it, and a
+    view that has genuinely handled both credentials opts in here. Anything using this has to branch
+    on `session.can_read_workspace_api` itself; the permission only says a credential exists, not that
+    the Public API will accept it.
+    """
+
+    message = "Connect a workspace to read this."
+    code = "workspace_not_connected"
+
+    def has_permission(self, request, view):
+        return isinstance(request.user, WorkspacePrincipal) and request.user.has_token
+
+
 class HasSession(permissions.BasePermission):
     """
     Any resolved session, connected or not.

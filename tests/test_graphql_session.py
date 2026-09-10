@@ -379,20 +379,120 @@ def test_a_long_jwt_is_not_truncated_by_the_serializer(client, mock_segment):
 # --- the boundary of what a GraphQL session can do -------------------------
 
 
-def test_a_graphql_session_is_told_why_it_cannot_load_the_workspace(client, mock_segment):
+def test_a_graphql_session_reads_the_connections_spine(client, mock_segment):
     """
-    The honest failure.
+    A GraphQL session can now load a workspace -- the Connections spine of it.
 
-    None of the thirty-six Public API endpoints have GraphQL equivalents yet, so an auth_token
-    sent at `api.segmentapis.com` would come back 401 -- indistinguishable from a bad token. It
-    is refused here instead, with a sentence saying what to do about it.
+    This used to be a 403 with "connect a Public API token", because no read had a GraphQL
+    equivalent. `build_graph_via_graphql` is that equivalent for sources, destinations, warehouses
+    and their connections, so the refusal has become a partial answer.
     """
     graphql_reply(mock_segment, ONE)
     connect(client)
 
+    graphql_reply(
+        mock_segment,
+        body={
+            "data": {
+                "workspace": {
+                    "id": "ws_solo",
+                    "slug": "solo-co",
+                    "name": "Solo Co",
+                    "region": "us",
+                    "sources": [
+                        {
+                            "id": "src_1",
+                            "slug": "web",
+                            "name": "Web",
+                            "enabled": True,
+                            "metadata": {"id": "m1", "name": "Javascript", "slug": "javascript"},
+                            "integrations": [
+                                {"id": "dst_1", "name": "Braze", "enabled": True, "metadataId": "md1"}
+                            ],
+                            "warehouses": [{"id": "wh_1", "name": "Snowflake", "enabled": True}],
+                        }
+                    ],
+                    "warehouses": [{"id": "wh_1", "name": "Snowflake", "enabled": True}],
+                }
+            }
+        },
+    )
+
     response = client.get("/api/workspace/graph")
-    assert response.status_code == 403
-    assert "Public API token" in str(response.json())
+    assert response.status_code == 200
+    graph = response.json()
+
+    kinds = {node["kind"] for node in graph["nodes"]}
+    assert kinds == {"source", "destination", "warehouse"}
+    # One warehouse node, not two: it arrives both under the source and at workspace level, and the
+    # graph wants one node with an edge rather than a duplicate.
+    assert len([n for n in graph["nodes"] if n["kind"] == "warehouse"]) == 1
+    # And the connections came back with the sources rather than needing a call each.
+    assert len(graph["edges"]) == 2
+
+
+def test_the_graphql_graph_says_what_it_could_not_read(client, mock_segment):
+    """
+    The load-bearing half. Four of the six resource families have no GraphQL equivalent here, and
+    shipping the other two silently would leave someone concluding the workspace has no Unify --
+    a wrong fact about the customer rather than a gap in this tool.
+    """
+    graphql_reply(mock_segment, ONE)
+    connect(client)
+    graphql_reply(
+        mock_segment,
+        body={
+            "data": {
+                "workspace": {"id": "ws_solo", "slug": "solo-co", "name": "Solo Co", "region": "us", "sources": [], "warehouses": []}
+            }
+        },
+    )
+
+    warnings = " ".join(client.get("/api/workspace/graph").json()["warnings"])
+    assert "GraphQL" in warnings
+    for absent in ("functions", "Reverse ETL", "Unify", "audiences", "computed traits"):
+        assert absent in warnings, absent
+    assert "this tool's limitation" in warnings
+
+
+def test_an_edge_to_something_the_query_did_not_return_is_dropped(client, mock_segment):
+    """
+    An edge to a node that is not in the graph renders as a line to nothing, which reads as a broken
+    diagram rather than a partial one -- and the save-time validator rejects it outright.
+    """
+    graphql_reply(mock_segment, ONE)
+    connect(client)
+    graphql_reply(
+        mock_segment,
+        body={
+            "data": {
+                "workspace": {
+                    "id": "ws_solo",
+                    "slug": "solo-co",
+                    "name": "Solo Co",
+                    "region": "us",
+                    "sources": [
+                        {
+                            "id": "src_1",
+                            "slug": "web",
+                            "name": "Web",
+                            "enabled": True,
+                            "metadata": {"id": "m1", "name": "Javascript", "slug": "javascript"},
+                            # Malformed: no id, so no node is emitted for it.
+                            "integrations": [{"name": "Nameless", "enabled": True}],
+                            "warehouses": [],
+                        }
+                    ],
+                    "warehouses": [],
+                }
+            }
+        },
+    )
+
+    graph = client.get("/api/workspace/graph").json()
+    known = {node["id"] for node in graph["nodes"]}
+    for edge in graph["edges"]:
+        assert edge["source"] in known and edge["target"] in known
 
 
 def test_a_public_api_session_still_reads_the_workspace(auth_client, workspace_ok):

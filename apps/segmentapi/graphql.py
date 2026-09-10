@@ -274,3 +274,204 @@ class SegmentGraphQLClient:
                 "from a browser that is logged in to the workspace you want to read."
             )
         return workspaces
+
+
+# --- reading a workspace's graph ---------------------------------------------
+
+"""
+Why this is an *adapter* and not a second graph builder.
+
+`apps/catalog/resources.py` already assembles the whole workspace -- nodes, edges, zones, warnings --
+and every node goes through `schemas.normalize_*`, which is deliberately tolerant about shape (it reads
+`metadata.slug` or `type`, `name` or `slug`, and so on). So the cheapest correct way to make a GraphQL
+session useful is to hand that pipeline dicts of the shape it already expects, rather than to write a
+parallel builder that would drift from it feature by feature.
+
+That is what `GRAPH_QUERY` and the `as_*` functions below do: one query, then a reshape into the
+Public API's own field names. Everything downstream -- normalisation, zoning, the canvas layout, the
+walkthrough -- is unchanged and untested-against-GraphQL because it never sees GraphQL.
+
+## One request, not thirty-six
+
+The Public API needs a call per source to list what it is connected to (`_connections_for_source`
+fans out across a thread pool). GraphQL does not: `Source.integrations` and `Source.warehouses` are
+fields, so the connections come back with the sources in a single round trip. On a workspace with
+thirty sources that is one request instead of thirty-one -- which matters here more than usual, because
+this client is throttled to one request a second on purpose.
+
+## Every field below was read from the schema, not guessed
+
+A misspelled field fails the *whole* query, so each one was checked against
+`packages/gateway-api/src/graphql/{sources,integrations,warehouses}/queries.graphql`:
+
+    Workspace   id slug name region sources warehouses
+    Source      id slug name enabled metadata integrations warehouses
+    SourceMetadata  id name slug
+    Integration id name enabled metadataId
+    Warehouse   id name enabled
+
+Deliberately narrow. `Source.writeKeys` is not requested -- a write key is a credential, this client
+holds somebody's login session, and the canvas masks the key anyway. Nothing is requested that the
+canvas does not draw.
+"""
+
+GRAPH_QUERY = """
+query SegmentBuilderWorkspaceGraph($slug: Slug!) {
+  workspace(slug: $slug) {
+    id
+    slug
+    name
+    region
+    sources {
+      id
+      slug
+      name
+      enabled
+      metadata {
+        id
+        name
+        slug
+      }
+      integrations {
+        id
+        name
+        enabled
+        metadataId
+      }
+      warehouses {
+        id
+        name
+        enabled
+      }
+    }
+    warehouses {
+      id
+      name
+      enabled
+    }
+  }
+}
+"""
+
+
+def as_source(raw: dict) -> dict:
+    """A GraphQL `Source` in the Public API's shape, for `schemas.normalize_source`."""
+    metadata = raw.get("metadata") or {}
+    return {
+        "id": raw.get("id") or "",
+        "slug": raw.get("slug") or raw.get("name") or "",
+        "name": raw.get("name") or raw.get("slug") or "",
+        "enabled": raw.get("enabled", True),
+        # `normalize_source` reads the source type from `metadata.slug` first, which is exactly what
+        # the GraphQL field is -- so this passes through rather than being translated.
+        "metadata": {
+            "id": metadata.get("id") or "",
+            "name": metadata.get("name") or "",
+            "slug": metadata.get("slug") or "",
+        },
+        # Absent on purpose, not forgotten: a write key is a credential and this client is holding
+        # somebody's login session. `normalize_source` masks a missing key to None, which is the same
+        # thing the canvas shows for a source whose key nobody has revealed.
+        "settings": {},
+    }
+
+
+def as_destination(raw: dict) -> dict:
+    """A GraphQL `Integration` in the Public API's destination shape."""
+    return {
+        "id": raw.get("id") or "",
+        "name": raw.get("name") or "",
+        # The Public API calls this `metadata.id`; GraphQL flattens it to `metadataId`. Nested back so
+        # `normalize_destination` finds it where it looks.
+        "metadata": {"id": raw.get("metadataId") or "", "slug": "", "name": raw.get("name") or ""},
+        "enabled": raw.get("enabled", True),
+        "settings": {},
+    }
+
+
+def as_warehouse(raw: dict) -> dict:
+    """A GraphQL `Warehouse` in the Public API's shape."""
+    return {
+        "id": raw.get("id") or "",
+        "name": raw.get("name") or "",
+        "enabled": raw.get("enabled", True),
+        # GraphQL's Warehouse carries no metadata slug, so the type is not knowable from this query.
+        # Left empty rather than guessed: `normalize_warehouse` falls back to a generic warehouse,
+        # which is honest, where a guess would label a Snowflake warehouse as BigQuery.
+        "metadata": {"id": "", "slug": "", "name": ""},
+        "settings": {},
+    }
+
+
+class GraphQLWorkspaceReader:
+    """
+    The workspace graph, read over GraphQL.
+
+    Returns `{sources, destinations, warehouses, connections}` in Public API shapes, where
+    `connections` maps a source id to the destination and warehouse ids it feeds. The caller assembles
+    the graph from that with the code it already has.
+    """
+
+    def __init__(self, client: SegmentGraphQLClient, workspace_slug: str):
+        self._client = client
+        self._slug = workspace_slug
+
+    def read(self) -> dict:
+        data = self._client.query(
+            GRAPH_QUERY,
+            {"slug": self._slug},
+            operation="segment_builder_workspace_graph",
+        )
+        workspace = data.get("workspace")
+        if not workspace:
+            raise SegmentAuthError(
+                f"That session cannot see the workspace “{self._slug}”. It may have been "
+                "disconnected, or the session may have expired."
+            )
+
+        sources: list[dict] = []
+        destinations: dict[str, dict] = {}
+        warehouses: dict[str, dict] = {}
+        connections: dict[str, list[str]] = {}
+
+        for raw in workspace.get("sources") or []:
+            if not raw or not raw.get("id"):
+                continue
+            sources.append(as_source(raw))
+            reached: list[str] = []
+
+            for integration in raw.get("integrations") or []:
+                if not integration or not integration.get("id"):
+                    continue
+                # De-duplicated by id: a destination connected to twenty sources appears under all
+                # twenty, and the graph wants one node with twenty edges rather than twenty nodes.
+                destinations.setdefault(integration["id"], as_destination(integration))
+                reached.append(f"destination:{integration['id']}")
+
+            for warehouse in raw.get("warehouses") or []:
+                if not warehouse or not warehouse.get("id"):
+                    continue
+                warehouses.setdefault(warehouse["id"], as_warehouse(warehouse))
+                reached.append(f"warehouse:{warehouse['id']}")
+
+            connections[f"source:{raw['id']}"] = reached
+
+        # Workspace-level warehouses too. A warehouse with no source connected to it is still part of
+        # the architecture -- and is exactly the thing someone is looking for when they ask why nothing
+        # is landing in it.
+        for raw in workspace.get("warehouses") or []:
+            if raw and raw.get("id"):
+                warehouses.setdefault(raw["id"], as_warehouse(raw))
+
+        return {
+            "workspace": {
+                "id": workspace.get("id") or "",
+                "slug": workspace.get("slug") or self._slug,
+                "name": workspace.get("name") or "",
+                "region": (workspace.get("region") or "").lower(),
+            },
+            "sources": sources,
+            "destinations": list(destinations.values()),
+            "warehouses": list(warehouses.values()),
+            "connections": connections,
+        }

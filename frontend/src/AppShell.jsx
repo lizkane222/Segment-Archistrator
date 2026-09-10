@@ -358,19 +358,22 @@ function Workbench({
   /* One string, or null when the affordance is available. Every workspace-only
      control reads this, so a disconnected visitor is told why the button is dead
      instead of finding out from a 403. */
-  const workspaceReason = !workspace
-    ? 'Connect a workspace with a Segment Public API token to read its components.'
-    : /*
-       * A workspace *is* connected, with an app session `auth_token` -- which identifies it but
-       * cannot read its components. Said here, where every workspace-only control already looks
-       * for its reason, so the button is dead with an explanation rather than dead because the
-       * request behind it 403s. The two states need different sentences: one is "connect
-       * something", the other is "connect the other thing", and a message covering both would
-       * tell someone who has already connected a workspace to go and connect a workspace.
-       */
-      workspace.canReadWorkspace === false
-      ? 'This workspace was connected with an app session. Reading its components needs a Segment Public API token.'
-      : null
+  /*
+   * One sentence, or null when the affordance is available.
+   *
+   * Only the no-workspace case now. It used to also refuse a session connected with an app
+   * `auth_token`, on the grounds that such a credential could identify a workspace but not read it --
+   * which was true until `build_graph_via_graphql` existed and is not any more. A GraphQL session
+   * reads the Connections spine, and what it *cannot* read comes back in the graph's own `warnings`
+   * and is surfaced verbatim by `loadWorkspace`.
+   *
+   * That is the right channel for it: a gap in a result that arrived is a caveat about the result,
+   * where this string is a reason a control does not work at all. Keeping the credential caveat here
+   * would leave the button disabled and the partial read unreachable.
+   */
+  const workspaceReason = workspace
+    ? null
+    : 'Connect a workspace with a Segment Public API token to read its components.'
 
   /* The *id*, not the node. The inspector edits node data, so holding the object
      captured at selection time would show stale values right after an edit. */

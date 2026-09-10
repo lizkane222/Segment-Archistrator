@@ -19,6 +19,7 @@ from django.conf import settings
 from apps.segmentapi import schemas, topology
 from apps.segmentapi.client import SegmentClient
 from apps.segmentapi.exceptions import SegmentFeatureUnavailable, SegmentRateLimited
+from apps.segmentapi.graphql import GraphQLWorkspaceReader, SegmentGraphQLClient
 
 from .models import WorkspaceResourceCache
 
@@ -270,6 +271,67 @@ def _connections_for_source(session, source_node) -> tuple[list[dict], list[str]
         pass
 
     return edges, warnings
+
+
+def build_graph_via_graphql(session) -> dict:
+    """
+    The workspace graph for a session whose credential is an app `auth_token`.
+
+    A much smaller graph than the Public API's, and the gap is stated in `warnings` rather than left
+    for the reader to notice: this covers sources, destinations, warehouses and the connections
+    between them, which is the spine of a Connections diagram. Functions, Reverse ETL models, spaces,
+    audiences and computed traits are not here -- each needs its own GraphQL query against a schema
+    that names them differently again, and shipping four of the six with no note would leave someone
+    concluding the workspace has no Unify.
+
+    One request, not thirty-one. `Source.integrations` and `Source.warehouses` are *fields* on a
+    source, so the connections arrive with the sources -- where the Public API needs a call per source
+    (`_connections_for_source`). That matters more than usual here, because the GraphQL client is
+    throttled to one request a second on purpose.
+
+    No caching, unlike `build_graph`: `fetch` keys its cache on the session, and a session whose
+    credential is a login that expires in a week is not something to hold a stale graph for.
+    """
+    client = SegmentGraphQLClient.for_session(session)
+    reader = GraphQLWorkspaceReader(client, session.workspace_slug)
+    read = reader.read()
+
+    slug = session.workspace_slug
+    sources = [schemas.normalize_source(raw, workspace_slug=slug) for raw in read["sources"]]
+    destinations = [
+        schemas.normalize_destination(raw, workspace_slug=slug) for raw in read["destinations"]
+    ]
+    warehouses = [
+        schemas.normalize_warehouse(raw, workspace_slug=slug) for raw in read["warehouses"]
+    ]
+
+    nodes = [*sources, *destinations, *warehouses]
+    known = {node["id"] for node in nodes}
+    edges = [
+        _edge(source_id, target_id)
+        for source_id, targets in read["connections"].items()
+        for target_id in targets
+        # Both ends have to be nodes we emitted. A connection to something the query did not return
+        # would render as an edge to nothing, which reads as a broken diagram rather than a partial one.
+        if source_id in known and target_id in known
+    ]
+
+    warnings = [
+        "Read over GraphQL from an app session. Sources, destinations, warehouses and their "
+        "connections are here; functions, Reverse ETL models, Unify spaces, audiences and computed "
+        "traits are not — those reads have no GraphQL equivalent in this app yet, so their absence "
+        "is this tool's limitation and not a fact about the workspace."
+    ]
+    if not sources:
+        warnings.append("This workspace has no sources, or the session cannot see them.")
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "zones": topology.as_payload()["zones"],
+        "warnings": warnings,
+        "inferredJourneys": [],
+    }
 
 
 def build_graph(session, *, refresh: bool = False) -> dict:
