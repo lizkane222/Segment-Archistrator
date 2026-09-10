@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react'
 import { KeyRound, LogOut, RefreshCw, TriangleAlert, Workflow } from 'lucide-react'
 
@@ -144,9 +145,45 @@ export default function AppShell({ workspace, onConnected, onSignOut }) {
     [tabs.tabs, dirtyByTab],
   )
 
+  /*
+   * Where the shared chrome lands.
+   *
+   * The header, the document bar, the palette and the inspector are all rendered *by a pane* -- they
+   * read that pane's graph, its document, its selection -- but they must not be *inside* it. Two of
+   * each is the problem this exists to fix: on a 1600px screen a palette and an inspector per pane is
+   * 1280px of furniture and 320px of diagram, which made the side-by-side view technically working
+   * and practically useless.
+   *
+   * They move by portal rather than by hoisting the state they need. Hoisting would mean the focused
+   * pane publishing its graph upward on every drag frame, a parent re-render behind it, and both
+   * panes re-rendering underneath that -- so the fix for a layout problem would have cost the frame
+   * rate. A portal moves only the DOM: the React tree, the hooks and the context all stay exactly
+   * where they were, and nothing above re-renders when a node moves.
+   *
+   * State rather than refs, because a ref is populated during commit and the portal has to exist on
+   * the render *after* the container does. A callback ref into state is the standard way to have the
+   * child re-render once its target is available.
+   */
+  const [topSlot, setTopSlot] = useState(null)
+  const [leftSlot, setLeftSlot] = useState(null)
+  const [rightSlot, setRightSlot] = useState(null)
+  const slots = useMemo(
+    () => ({ top: topSlot, left: leftSlot, right: rightSlot }),
+    [topSlot, leftSlot, rightSlot],
+  )
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <SplitView orientation={tabs.orientation}>
+      {/* `display: contents` on every slot, so the portalled element becomes a flex child of *this*
+          row rather than of a wrapper with opinions of its own. It is what lets the header and the
+          document bar keep being two siblings in a column, and the two asides keep their own widths,
+          without any of those classes moving out of the component that owns them. */}
+      <div ref={setTopSlot} style={{ display: 'contents' }} />
+
+      <div className="relative flex min-h-0 flex-1">
+        <div ref={setLeftSlot} style={{ display: 'contents' }} />
+
+        <SplitView orientation={tabs.orientation}>
         {tabs.visible.map((tab, index) => (
           <ReactFlowProvider key={tab.id}>
             <Workbench
@@ -189,12 +226,42 @@ export default function AppShell({ workspace, onConnected, onSignOut }) {
                     )
                   : null
               }
+              slots={slots}
+              /* Only one pane draws the shared chrome, and it is the one you last clicked in. The
+                 other renders its canvas and nothing else -- which is what makes a comparison view
+                 two diagrams rather than two applications. */
+              chromeOwner={index === focused}
             />
           </ReactFlowProvider>
         ))}
-      </SplitView>
+        </SplitView>
+
+        <div ref={setRightSlot} style={{ display: 'contents' }} />
+      </div>
     </div>
   )
+}
+
+/**
+ * Where one piece of shared chrome should be drawn: `inline`, `portal`, or `none`.
+ *
+ * Extracted and exported because it is the logic that decides whether the user sees an inspector at
+ * all, and getting it wrong is invisible in a test that cannot render -- `none` when it should be
+ * `portal` is a workbench with no sidebars and no error anywhere.
+ *
+ * Three cases, in the order they are decided:
+ *
+ *   - Not the chrome owner: `none`. The other pane in a split renders its canvas and nothing else.
+ *   - No slots supplied: `inline`. Anything mounting a `Workbench` on its own -- a test, a future
+ *     embed -- gets the whole workbench in one box exactly as it did before slots existed.
+ *   - Slots supplied but this one not yet mounted: `none`, for the one frame between AppShell's
+ *     first render and its callback refs landing. Rendering inline for that frame instead would put
+ *     the palette inside the pane and then move it, which is a visible jump.
+ */
+export function chromePlacement({ chromeOwner, slots, slot }) {
+  if (!chromeOwner) return 'none'
+  if (!slots) return 'inline'
+  return slot ? 'portal' : 'none'
 }
 
 function Workbench({
@@ -208,6 +275,8 @@ function Workbench({
   onFocusPane,
   onDirtyChange,
   tabStrip = null,
+  slots = null,
+  chromeOwner = true,
 }) {
   const { toasts, notify: raiseToast, dismiss } = useToasts()
   const log = useConsoleLog()
@@ -1041,115 +1110,147 @@ function Workbench({
     enabled: !dialogOpen && !connectOpen && !nuancesFor,
   })
 
+  /*
+   * The shared chrome, moved to app level by portal -- or rendered in place when there are no slots.
+   *
+   * Two callers with different needs, and one function so they cannot diverge: `AppShell` supplies
+   * slots and exactly one pane owns them, while anything mounting a `Workbench` on its own (a test,
+   * a future embed) supplies none and gets the whole workbench in one box as before.
+   *
+   * A non-owning pane renders `null` for all of it. Not `visibility: hidden` and not a second copy
+   * portalled somewhere else -- a second Inspector would mount a second copy of every per-kind
+   * branch against the same node and race the first one's edits.
+   */
+  const chrome = (slot, content) => {
+    switch (chromePlacement({ chromeOwner, slots, slot })) {
+      case 'inline':
+        return content
+      case 'portal':
+        return createPortal(content, slot)
+      default:
+        return null
+    }
+  }
+
   return (
     /* `onPointerDownCapture` rather than a click handler: it has to fire before the canvas handles
        the gesture, because "which pane am I working in" has to be settled before whatever that
        gesture does. Capture phase also means it fires for a drag that never becomes a click. */
     <div className="flex h-full min-h-0 flex-col" onPointerDownCapture={onFocusPane}>
-      <header className="flex shrink-0 items-center justify-between border-b border-twilio-gray-20 bg-white px-4 py-3">
-        <div className="flex items-baseline gap-3">
-          <span className="text-sm font-semibold text-twilio-navy">
-            Segment Builder
-          </span>
-          {workspace ? (
-            <span className="text-xs text-twilio-gray-60">
-              {workspace.name}
-              {workspace.slug && (
-                <span className="ml-2 font-mono text-[11px] opacity-70">{workspace.slug}</span>
-              )}
+      {chrome(
+        slots?.top,
+        <>
+        <header className="flex shrink-0 items-center justify-between border-b border-twilio-gray-20 bg-white px-4 py-3">
+          <div className="flex items-baseline gap-3">
+            <span className="text-sm font-semibold text-twilio-navy">
+              Segment Builder
             </span>
-          ) : (
-            <span className="text-xs text-twilio-gray-40">Not connected</span>
-          )}
-        </div>
+            {workspace ? (
+              <span className="text-xs text-twilio-gray-60">
+                {workspace.name}
+                {workspace.slug && (
+                  <span className="ml-2 font-mono text-[11px] opacity-70">{workspace.slug}</span>
+                )}
+              </span>
+            ) : (
+              <span className="text-xs text-twilio-gray-40">Not connected</span>
+            )}
+          </div>
 
-        <div className="flex items-center gap-2">
-          {workspace ? (
-            <>
+          <div className="flex items-center gap-2">
+            {workspace ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => loadWorkspace({ refresh: graphState.status === 'ready' })}
+                  /* Disabled, with the reason on the tooltip, when the connected credential
+                     cannot reach the Public API. Leaving it live would send the user at a
+                     request that 403s and report it as a failure to load rather than as a
+                     credential that cannot. */
+                  disabled={graphState.status === 'loading' || Boolean(workspaceReason)}
+                  title={workspaceReason ?? undefined}
+                  className="flex items-center gap-1.5 rounded-md bg-twilio-blue px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-twilio-blue-dark disabled:opacity-50"
+                >
+                  <RefreshCw
+                    size={13}
+                    aria-hidden="true"
+                    className={graphState.status === 'loading' ? 'animate-spin' : undefined}
+                  />
+                  {graphState.status === 'ready' ? 'Refresh workspace' : 'Load workspace'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    /* The schema cache is module-level and holds one workspace's event
+                       and trait names. Dropping it on disconnect keeps it from leaking
+                       into whoever pastes the next token. */
+                    clearSchemaCache()
+                    onSignOut()
+                  }}
+                  className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
+                >
+                  <LogOut size={14} aria-hidden="true" />
+                  Disconnect
+                </button>
+              </>
+            ) : (
               <button
                 type="button"
-                onClick={() => loadWorkspace({ refresh: graphState.status === 'ready' })}
-                /* Disabled, with the reason on the tooltip, when the connected credential
-                   cannot reach the Public API. Leaving it live would send the user at a
-                   request that 403s and report it as a failure to load rather than as a
-                   credential that cannot. */
-                disabled={graphState.status === 'loading' || Boolean(workspaceReason)}
-                title={workspaceReason ?? undefined}
-                className="flex items-center gap-1.5 rounded-md bg-twilio-blue px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-twilio-blue-dark disabled:opacity-50"
+                onClick={() => setConnectOpen(true)}
+                className="flex items-center gap-1.5 rounded-md bg-twilio-blue px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-twilio-blue-dark"
               >
-                <RefreshCw
-                  size={13}
-                  aria-hidden="true"
-                  className={graphState.status === 'loading' ? 'animate-spin' : undefined}
-                />
-                {graphState.status === 'ready' ? 'Refresh workspace' : 'Load workspace'}
+                <KeyRound size={13} aria-hidden="true" />
+                Connect a workspace
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  /* The schema cache is module-level and holds one workspace's event
-                     and trait names. Dropping it on disconnect keeps it from leaking
-                     into whoever pastes the next token. */
-                  clearSchemaCache()
-                  onSignOut()
-                }}
-                className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
-              >
-                <LogOut size={14} aria-hidden="true" />
-                Disconnect
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setConnectOpen(true)}
-              className="flex items-center gap-1.5 rounded-md bg-twilio-blue px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-twilio-blue-dark"
-            >
-              <KeyRound size={13} aria-hidden="true" />
-              Connect a workspace
-            </button>
-          )}
-        </div>
-      </header>
+            )}
+          </div>
+        </header>
 
-      <DiagramBar
-        tabStrip={tabStrip?.({ onRename: docs.rename })}
-        doc={docs.current}
-        dirty={dirty}
-        busy={docs.busy}
-        placeholders={placeholders}
-        exporting={exporting}
-        themeable={componentCount > 0}
-        onOpen={() => setDialogOpen(true)}
-        onSave={save}
-        onSaveAs={saveAs}
-        onRename={docs.rename}
-        onExport={exportDiagram}
-        onFocusPlaceholder={focusPlaceholder}
-        onApplyPalette={applyPalette}
-        onResetPalette={resetPalette}
-      />
+        <DiagramBar
+          tabStrip={tabStrip?.({ onRename: docs.rename })}
+          doc={docs.current}
+          dirty={dirty}
+          busy={docs.busy}
+          placeholders={placeholders}
+          exporting={exporting}
+          themeable={componentCount > 0}
+          onOpen={() => setDialogOpen(true)}
+          onSave={save}
+          onSaveAs={saveAs}
+          onRename={docs.rename}
+          onExport={exportDiagram}
+          onFocusPlaceholder={focusPlaceholder}
+          onApplyPalette={applyPalette}
+          onResetPalette={resetPalette}
+        />
+        </>,
+      )}
 
       <div className="relative flex min-h-0 flex-1">
-        {/* A column, so the payload panel takes the height it needs and the palette scrolls in what
-            is left. `min-h-0` on the palette wrapper is what allows that -- a flex child defaults to
-            never shrinking below its content, and the palette's content is long. */}
-        <aside className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-twilio-gray-20 bg-white">
-          {/* Above the palette rather than below it: while an animation is playing this is what the
-              reader is following, and the palette is what they are not using. Renders nothing at all
-              when no walkthrough is mid-flight, so it costs an idle canvas no space. */}
-          <EventPreview frame={liveFrame} graph={simGraph} scenarios={scenarios} />
-          <div className="min-h-0 flex-1 overflow-hidden">
-          <Palette
-            topology={topology}
-            graph={graphState.graph}
-            zonesOnCanvas={zonesOnCanvas}
-            workspaceReason={workspaceReason}
-            onConnect={() => setConnectOpen(true)}
-            onStartSimulation={startSimulation}
-          />
-          </div>
-        </aside>
+        {chrome(
+          slots?.left,
+          <>
+          {/* A column, so the payload panel takes the height it needs and the palette scrolls in what
+              is left. `min-h-0` on the palette wrapper is what allows that -- a flex child defaults to
+              never shrinking below its content, and the palette's content is long. */}
+          <aside className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-twilio-gray-20 bg-white">
+            {/* Above the palette rather than below it: while an animation is playing this is what the
+                reader is following, and the palette is what they are not using. Renders nothing at all
+                when no walkthrough is mid-flight, so it costs an idle canvas no space. */}
+            <EventPreview frame={liveFrame} graph={simGraph} scenarios={scenarios} />
+            <div className="min-h-0 flex-1 overflow-hidden">
+            <Palette
+              topology={topology}
+              graph={graphState.graph}
+              zonesOnCanvas={zonesOnCanvas}
+              workspaceReason={workspaceReason}
+              onConnect={() => setConnectOpen(true)}
+              onStartSimulation={startSimulation}
+            />
+            </div>
+          </aside>
+          </>,
+        )}
 
         <main
           className="relative min-w-0 flex-1 bg-twilio-gray-10"
@@ -1263,34 +1364,39 @@ function Workbench({
           />
         </main>
 
-        <aside className="w-96 shrink-0 overflow-hidden border-l border-twilio-gray-20 bg-white">
-          {/* Separately from the canvas, and keyed on the selection. The panel renders
-              per-kind branches against whatever a node happens to carry, so it is the
-              most likely thing here to meet a shape it was not written for -- and the
-              canvas beside it, holding the unsaved diagram, has nothing to do with that.
-              Reset by selection, so one unrenderable node does not close the panel for
-              the rest of the session. */}
-          <ErrorBoundary
-            resetKey={inspected?.id ?? null}
-            title="This component cannot be shown"
-            hint="The canvas is unaffected — nothing has been lost. Select another component, or reopen this one."
-          >
-            <Inspector
-              node={inspected}
-              /* The whole canvas, so the Bind tab can tell which real components are
-                 already spoken for by another node. */
-              nodes={graphState.nodes}
-              topology={topology}
-              graph={graphState.graph}
-              workspaceReason={workspaceReason}
-              onConnect={() => setConnectOpen(true)}
-              onUpdateNode={updateNode}
-              onUpdateKind={updateKindStyle}
-              onClose={() => setInspectedId(null)}
-              onNotify={notify}
-            />
-          </ErrorBoundary>
-        </aside>
+        {chrome(
+          slots?.right,
+          <>
+          <aside className="w-96 shrink-0 overflow-hidden border-l border-twilio-gray-20 bg-white">
+            {/* Separately from the canvas, and keyed on the selection. The panel renders
+                per-kind branches against whatever a node happens to carry, so it is the
+                most likely thing here to meet a shape it was not written for -- and the
+                canvas beside it, holding the unsaved diagram, has nothing to do with that.
+                Reset by selection, so one unrenderable node does not close the panel for
+                the rest of the session. */}
+            <ErrorBoundary
+              resetKey={inspected?.id ?? null}
+              title="This component cannot be shown"
+              hint="The canvas is unaffected — nothing has been lost. Select another component, or reopen this one."
+            >
+              <Inspector
+                node={inspected}
+                /* The whole canvas, so the Bind tab can tell which real components are
+                   already spoken for by another node. */
+                nodes={graphState.nodes}
+                topology={topology}
+                graph={graphState.graph}
+                workspaceReason={workspaceReason}
+                onConnect={() => setConnectOpen(true)}
+                onUpdateNode={updateNode}
+                onUpdateKind={updateKindStyle}
+                onClose={() => setInspectedId(null)}
+                onNotify={notify}
+              />
+            </ErrorBoundary>
+          </aside>
+          </>,
+        )}
       </div>
 
       {/* Full width under all three columns, and mounted only once a path exists.
