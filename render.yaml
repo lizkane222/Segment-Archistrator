@@ -11,7 +11,11 @@ services:
   - type: web
     name: segment-archistrator
     runtime: python
-    plan: starter
+    # Free tier: no cost, but the instance spins down after 15 minutes of no
+    # traffic and takes ~30-60s to wake on the next request. Fine for
+    # validating a deploy; upgrade to a paid plan before relying on this for
+    # anyone who can't tolerate that cold start.
+    plan: free
     healthCheckPath: /api/health
     buildCommand: |
       pip install -r requirements.txt
@@ -89,5 +93,8 @@ services:
 
 databases:
   - name: segment-archistrator-db
-    plan: basic-256mb
+    # Free tier: no cost, but Render deletes a free Postgres database 90 days
+    # after creation. Fine for validating a deploy; migrate to a paid plan
+    # before this holds anything you can't afford to lose.
+    plan: free
     postgresMajorVersion: "16"
