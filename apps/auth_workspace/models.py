@@ -63,7 +63,30 @@ class WorkspaceSession(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    workspace_id = models.CharField(max_length=64, db_index=True)
+    # Who is holding this cookie, when they have signed in. Null is the ordinary
+    # anonymous case, and stays supported: the canvas is usable before anyone signs
+    # in, exactly as it was before accounts existed.
+    #
+    # This is the column that makes identity outlive the cookie. Diagrams owned by
+    # the account are reachable from any session it holds, which is what a lost or
+    # expired cookie used to make impossible.
+    account = models.ForeignKey(
+        "accounts.Account",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="sessions",
+    )
+
+    # The synthetic scope a signed-out visitor's diagrams are saved against.
+    #
+    # Split out of `workspace_id`, which used to hold `anon:<hex>` values as well as
+    # real Segment workspace ids. That conflation is what let "which workspace is this
+    # about" and "who may see this" be the same column, and untangling them is the
+    # point of this change: `workspace_id` below now means only a real workspace.
+    anon_scope = models.CharField(max_length=64, blank=True, db_index=True)
+
+    workspace_id = models.CharField(max_length=64, db_index=True, blank=True)
     workspace_name = models.CharField(max_length=255)
     workspace_slug = models.CharField(max_length=255)
     region = models.CharField(max_length=8, choices=REGION_CHOICES, default="us")
@@ -98,10 +121,22 @@ class WorkspaceSession(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["workspace_id", "token_fingerprint"],
+                # Only where there is a credential to be unique *about*.
+                #
+                # This condition is new and load-bearing. Anonymous sessions used to
+                # satisfy the constraint incidentally, because each carried its own
+                # random `anon:<hex>` in `workspace_id`. Now that an anonymous scope
+                # lives in `anon_scope` and leaves `workspace_id` blank, every
+                # tokenless row would look like ("", "") and the second visitor of the
+                # day would collide with the first.
+                condition=models.Q(encrypted_token__isnull=False),
                 name="uniq_workspace_token",
             )
         ]
-        indexes = [models.Index(fields=["workspace_id", "-last_seen_at"])]
+        indexes = [
+            models.Index(fields=["workspace_id", "-last_seen_at"]),
+            models.Index(fields=["account", "-last_seen_at"]),
+        ]
 
     def __str__(self):
         return f"{self.workspace_slug} ({self.id})"
@@ -116,6 +151,8 @@ class WorkspaceSession(models.Model):
         workspace: dict,
         region: str = "us",
         credential_kind: str = CREDENTIAL_PUBLIC_API,
+        account=None,
+        anon_scope: str = "",
     ) -> "WorkspaceSession":
         """
         Create or refresh the session for a validated credential.
@@ -130,31 +167,72 @@ class WorkspaceSession(models.Model):
         is on (workspace, fingerprint), and two different credentials have two different
         fingerprints -- so both rows can exist, and the newer one is the one the cookie names.
         """
-        obj, _ = cls.objects.update_or_create(
+        defaults = {
+            "workspace_name": workspace.get("name", "") or "",
+            "workspace_slug": workspace.get("slug", "") or "",
+            "region": region,
+            "encrypted_token": encrypt_token(token),
+            "credential_kind": credential_kind,
+            "account": account,
+        }
+        # Only when the caller has one to carry. Left out of the defaults otherwise, so
+        # re-pasting a credential does not blank the scope the row already holds --
+        # which would strand every diagram drawn under it before signing in.
+        if anon_scope:
+            defaults["anon_scope"] = anon_scope
+
+        obj, created = cls.objects.update_or_create(
             workspace_id=workspace["id"],
             token_fingerprint=fingerprint_token(token),
-            defaults={
-                "workspace_name": workspace.get("name", "") or "",
-                "workspace_slug": workspace.get("slug", "") or "",
-                "region": region,
-                "encrypted_token": encrypt_token(token),
-                "credential_kind": credential_kind,
-            },
+            defaults=defaults,
         )
+        if created and not obj.anon_scope:
+            # Every session gets a scope, connected or not. Generating it here rather
+            # than on first save means there is no "promote this session so it can save"
+            # step to forget, and a connected session that later signs out still has
+            # somewhere to put work.
+            obj.anon_scope = cls.new_anon_scope()
+            obj.save(update_fields=["anon_scope"])
         return obj
+
+    @staticmethod
+    def new_anon_scope() -> str:
+        """
+        A fresh scope key for diagrams saved without an account.
+
+        Random per session rather than a shared constant like "anonymous": it is the
+        scoping key those diagrams are saved against, so a shared one would put every
+        signed-out visitor's work in a single pile they could all read.
+        """
+        return f"anon:{uuid.uuid4().hex[:12]}"
 
     @classmethod
     def start_anonymous(cls) -> "WorkspaceSession":
-        """
-        A session with no token, so the canvas is usable before anyone connects.
+        """A session with no token and no account, so the canvas is usable immediately."""
+        return cls.objects.create(
+            anon_scope=cls.new_anon_scope(),
+            workspace_id="",
+            workspace_name="",
+            workspace_slug="",
+            token_fingerprint="",
+            encrypted_token=None,
+            credential_kind="",
+        )
 
-        The workspace_id is synthetic and random per session rather than a shared
-        constant like "anonymous": it is the scoping key for the diagrams saved
-        against it, so a shared one would put every anonymous visitor's work in a
-        single pile that they could all read.
+    @classmethod
+    def start_for_account(cls, account, *, anon_scope: str = "") -> "WorkspaceSession":
+        """
+        A fresh session belonging to an account.
+
+        Deliberately a *new* row rather than an update of the one that began sign-in:
+        rotating the id means a session cookie that was floating around before anyone
+        signed in cannot be used afterwards. The caller carries `anon_scope` across
+        because it is the only proof of which unsaved work belonged to that browser.
         """
         return cls.objects.create(
-            workspace_id=f"anon:{uuid.uuid4().hex[:12]}",
+            account=account,
+            anon_scope=anon_scope or cls.new_anon_scope(),
+            workspace_id="",
             workspace_name="",
             workspace_slug="",
             token_fingerprint="",
@@ -209,6 +287,37 @@ class WorkspaceSession(models.Model):
     def touch(self):
         """Slide the idle window. auto_now on last_seen_at does the update."""
         self.save(update_fields=["last_seen_at"])
+
+
+class OperatorWorkspaceBookmark(models.Model):
+    """
+    A workspace slug an account resolved through the `segment-operator` gateway.
+
+    `segment-operator` itself is never a connectable workspace -- see `_OPERATOR_SLUG`
+    in views.py -- it is a prompt to type the exact slug of a real one. This is what
+    makes that slug reappear in the picker on a later connect without retyping it,
+    scoped to the account that resolved it so one Twilion's bookmarks are not
+    another's shortcut into a workspace they were never shown.
+    """
+
+    account = models.ForeignKey(
+        "accounts.Account",
+        on_delete=models.CASCADE,
+        related_name="operator_workspace_bookmarks",
+    )
+    slug = models.CharField(max_length=255)
+    workspace_id = models.CharField(max_length=64)
+    workspace_name = models.CharField(max_length=255, blank=True)
+    region = models.CharField(max_length=8, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["account", "slug"], name="uniq_account_bookmark_slug")
+        ]
+
+    def __str__(self):
+        return f"{self.slug} ({self.account_id})"
 
 
 class WriteKeyRevealAudit(models.Model):

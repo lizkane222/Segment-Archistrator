@@ -69,6 +69,29 @@ def test_every_kind_has_an_adjacency_entry():
         ("space", "profile_sync"),
         ("audience", "profile_sync"),
         ("profile_sync", "warehouse"),
+        # A destination's own mapping detail is drawn hanging off it, and Profiles
+        # Sync's "audience membership from Engage" input is drawn from the
+        # destination an audience activates.
+        ("destination", "destination_mapping"),
+        ("destination", "profile_sync"),
+        # The same source drawn twice -- once in Connections, once again as a feeder
+        # of Unify's profiles -- and an edge between the two copies says so.
+        ("source", "source"),
+        # What identity_resolution produces, a profile drives the same downstream as
+        # identity_resolution itself when a diagram has no separate node to draw the
+        # fan-out from.
+        ("profile", "audience"),
+        ("profile", "computed_trait"),
+        ("profile", "journey"),
+        # A walkthrough exercises any of these by feeding events into the debugger's
+        # source.
+        ("audience", "source"),
+        ("computed_trait", "source"),
+        ("journey", "source"),
+        # A source drawn as a Profile Source reaches a profile directly, the same
+        # allowance `profile`'s own incoming edges get when there is no separate
+        # identity_resolution node to draw the fan-out from.
+        ("source", "profile"),
     ],
 )
 def test_legal_edges(from_kind, to_kind):
@@ -91,15 +114,10 @@ def test_legal_edges(from_kind, to_kind):
         # Terminals.
         ("destination_function", "destination"),
         ("profile_api", "audience"),
-        ("profile", "audience"),
         ("identity_setting", "space"),
         # One gate per source, not a chain of them: schema controls are a single
         # settings page, so two in a row would depict something with no counterpart.
         ("source_schema_control", "source_schema_control"),
-        # A mapping is upstream of the destination it feeds. Drawn the other way it
-        # would read as the destination handing the event back for mapping, which is
-        # the reverse of what an actions destination does.
-        ("destination", "destination_mapping"),
         # Protocols describes what may enter, so nothing routes *through* a plan.
         ("tracking_plan", "destination"),
         ("source", "tracking_plan"),
@@ -401,3 +419,41 @@ def _styled_zones() -> set[str]:
 def test_every_zone_has_a_style():
     missing = {zone["id"] for zone in t.ZONES} - _styled_zones()
     assert not missing, f"no zone style for {sorted(missing)} in {KINDS_JS}"
+
+
+# --- The same zone more than once -------------------------------------------
+#
+# One canvas can hold several diagrams side by side, divided by a frame, so a zone may
+# appear more than once -- and two zones sharing an id would collide in the document.
+# The copy gets `connections~2`, and every rule here has to keep answering about
+# Connections. The failure if one of them does not is not a crash: it is an advisory on
+# every component in the copy, on every save, telling the user their diagram is wrong.
+
+
+def test_zone_product_is_the_identity_for_a_zone_that_appears_once():
+    for zone in t.ZONES:
+        assert t.zone_product(zone["id"]) == zone["id"]
+
+
+def test_zone_product_reads_a_copy_back_to_its_product():
+    assert t.zone_product("connections~2") == "connections"
+    assert t.zone_product("profile_sources~10") == "profile_sources"
+
+
+def test_zone_product_leaves_the_other_id_shapes_alone():
+    # A custom zone is `custom:zone:ab12`; neither separator collides with the tilde,
+    # which is why the tilde was chosen.
+    assert t.zone_product("custom:zone:ab12") == "custom:zone:ab12"
+    assert t.zone_product(None) is None
+    assert t.zone_product("") == ""
+
+
+def test_a_copied_zone_takes_the_same_components():
+    assert t.is_valid_placement("source", "connections~2")
+    assert not t.is_valid_placement("audience", "connections~2")
+
+
+def test_a_copied_subdivision_keeps_the_upward_rule():
+    # A profile on the bare Unify backdrop is filed correctly, and so is one on the
+    # second Unify backdrop.
+    assert t.is_valid_placement("profile", "unify~2")

@@ -17,6 +17,9 @@
           "sourceType": [
             "javascript"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -32,6 +35,9 @@
             "apple",
             "swift"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -46,6 +52,9 @@
             "android",
             "kotlin"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -66,6 +75,9 @@
             "http",
             "http-api"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -75,15 +87,27 @@
         "description": "Runs before the event reaches Segment: drop PII the client should not have sent, and add anything only the server knows.",
         "binds": {
           "kind": "source_insert_function"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
         "id": "ph:filter-eu",
         "kind": "destination_filter",
         "name": "Consent filter",
-        "description": "Drops events for profiles that have not consented to marketing before they reach the ad and email destinations.",
+        "description": "Drops events for profiles that have not consented to marketing before they reach the ad and email destinations. An event arriving without `context.consent.marketing` set is treated as not consented, which is what makes the drop visible in a walkthrough.",
+        "condition": "!context.consent.marketing",
+        "actions": [
+          {
+            "type": "DROP"
+          }
+        ],
         "binds": {
           "kind": "destination_filter"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -97,6 +121,9 @@
             "Analytics",
             "Raw Data"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -111,6 +138,9 @@
             "Marketing Automation",
             "CRM"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -125,6 +155,9 @@
             "Google",
             "Facebook"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -134,6 +167,9 @@
         "description": "The full event history, for analysis Segment is not the right tool for. Also the join key back to non-Segment data.",
         "binds": {
           "kind": "warehouse"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -143,6 +179,9 @@
         "description": "Where events become profiles. Everything in Engage reads from here.",
         "binds": {
           "kind": "space"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -151,7 +190,10 @@
         "name": "Identity resolution",
         "synthetic": true,
         "bound": true,
-        "description": "Match rules and identifier precedence. Configured per space in Segment — this node is a reminder to check them, not a resource this tool reads."
+        "description": "Match rules and identifier precedence. Configured per space in Segment — this node is a reminder to check them, not a resource this tool reads.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:trait-ltv",
@@ -160,6 +202,9 @@
         "description": "An aggregation trait over purchase events. The example of a trait that only exists because the backend source is wired up.",
         "binds": {
           "kind": "computed_trait"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -169,6 +214,9 @@
         "description": "A most-recent trait. Cheap, and the one most audiences end up depending on.",
         "binds": {
           "kind": "computed_trait"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -177,7 +225,10 @@
         "name": "Profile API",
         "synthetic": true,
         "bound": true,
-        "description": "Read surface over the space: the customer's own services asking \"what do we know about this user?\" at request time."
+        "description": "Read surface over the space: the customer's own services asking \"what do we know about this user?\" at request time.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:audience-highvalue",
@@ -186,6 +237,9 @@
         "description": "Built on the lifetime-value trait. Syncs to paid media.",
         "binds": {
           "kind": "audience"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -195,6 +249,9 @@
         "description": "Built on the last-seen trait. Entry condition for the win-back journey.",
         "binds": {
           "kind": "audience"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -202,7 +259,10 @@
         "kind": "journey",
         "name": "Win-back journey",
         "bindable": false,
-        "description": "Segment publishes no Journeys API, so this node is drawn by hand and cannot be bound. Edit it to match what is actually configured in Engage."
+        "description": "Segment publishes no Journeys API, so this node is drawn by hand and cannot be bound. Edit it to match what is actually configured in Engage.",
+        "showFields": {
+          "description": false
+        }
       }
     ],
     "edges": [
@@ -336,6 +396,9 @@
             "hubspot",
             "dynamics-365"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -352,6 +415,9 @@
             "chargebee",
             "zuora"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -367,6 +433,9 @@
             "node",
             "http"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -376,6 +445,9 @@
         "description": "The centre of this architecture rather than a side-effect of it. Reverse ETL models are SQL against this.",
         "binds": {
           "kind": "warehouse"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -385,6 +457,9 @@
         "description": "SQL joining product usage to billing state. Runs on a schedule; its output is what the CRM actually sees.",
         "binds": {
           "kind": "reverse_etl_model"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -394,6 +469,9 @@
         "description": "The second model, drawn separately because the two have different schedules and different failure modes.",
         "binds": {
           "kind": "reverse_etl_model"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -406,6 +484,9 @@
           "categories": [
             "CRM"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -420,6 +501,9 @@
             "Customer Success",
             "Analytics"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       }
     ],
@@ -478,6 +562,9 @@
             "http-api",
             "javascript"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -487,15 +574,27 @@
         "description": "The step whose behaviour you are actually checking. Simulate an event with and without it to see what it changes.",
         "binds": {
           "kind": "source_insert_function"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
         "id": "ph:filter-under-test",
         "kind": "destination_filter",
         "name": "Filter under test",
-        "description": "The commonest cause of \"the event never arrived\". Bind the real filter and the simulator will report its verdict and its reason.",
+        "description": "The commonest cause of \"the event never arrived\". Bind the real filter and the simulator will report its verdict and its reason. Until you do, it is configured to drop every track call, so this template demonstrates the drop it exists to explain.",
+        "condition": "type = \"track\"",
+        "actions": [
+          {
+            "type": "DROP"
+          }
+        ],
         "binds": {
           "kind": "destination_filter"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -505,6 +604,9 @@
         "description": "Where the event is supposed to end up.",
         "binds": {
           "kind": "destination"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -518,6 +620,9 @@
             "Webhooks",
             "Raw Data"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       }
     ],
@@ -558,6 +663,9 @@
           "sourceType": [
             "javascript"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -572,6 +680,9 @@
             "ios",
             "android"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -589,6 +700,9 @@
             "go",
             "http"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -604,6 +718,9 @@
             "hubspot",
             "stripe"
           ]
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -613,6 +730,9 @@
         "description": "Profiles, which is the unit the MTU count is really about. Bind this and the inspector shows the space's real profile count.",
         "binds": {
           "kind": "space"
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -622,6 +742,9 @@
         "description": "Included because it is the place to actually verify an MTU figure: count distinct userId per month in the identifies and tracks tables.",
         "binds": {
           "kind": "warehouse"
+        },
+        "showFields": {
+          "description": false
         }
       }
     ],
@@ -673,8 +796,8 @@
           "x": 23,
           "y": 7
         },
-        "width": 1529,
-        "height": 1059
+        "width": 1755,
+        "height": 1061
       },
       {
         "id": "connections",
@@ -683,27 +806,27 @@
           "x": 26,
           "y": 53
         },
-        "width": 1104,
+        "width": 1687,
         "height": 311
       },
       {
         "id": "sources",
         "parent": "connections",
         "position": {
-          "x": 9,
+          "x": 10,
           "y": 32
         },
-        "width": 465,
-        "height": 165
+        "width": 709,
+        "height": 166
       },
       {
         "id": "destinations",
         "parent": "connections",
         "position": {
-          "x": 655,
+          "x": 1007,
           "y": 31
         },
-        "width": 410,
+        "width": 621,
         "height": 248
       },
       {
@@ -713,8 +836,8 @@
           "x": 32,
           "y": 507
         },
-        "width": 676,
-        "height": 520
+        "width": 687,
+        "height": 522
       },
       {
         "id": "profile_sources",
@@ -723,18 +846,18 @@
           "x": 20,
           "y": 48
         },
-        "width": 284,
-        "height": 259
+        "width": 283,
+        "height": 442
       },
       {
         "id": "profiles",
         "parent": "unify",
         "position": {
-          "x": 351,
-          "y": 216
+          "x": 314,
+          "y": 242
         },
-        "width": 284,
-        "height": 272
+        "width": 341,
+        "height": 246
       },
       {
         "id": "engage",
@@ -757,28 +880,38 @@
         "height": 311
       },
       {
+        "id": "warehouses",
+        "position": {
+          "x": 1816,
+          "y": 388
+        },
+        "width": 284,
+        "height": 340,
+        "color": "#606b85"
+      },
+      {
+        "id": "custom:zone:a31670c9",
+        "custom": true,
+        "label": "Destination",
+        "description": "Outside Segment",
+        "position": {
+          "x": 1834,
+          "y": 35
+        },
+        "width": 284,
+        "height": 230
+      },
+      {
         "id": "custom:upstream",
         "custom": true,
         "label": "App / Mobile / Server / Warehouse",
+        "description": "Outside Segment",
         "position": {
           "x": -284,
           "y": 106
         },
-        "width": 284,
-        "height": 491,
-        "description": "Outside Segment"
-      },
-      {
-        "id": "custom:warehouse",
-        "custom": true,
-        "label": "Warehouse",
-        "position": {
-          "x": 1585,
-          "y": 329
-        },
-        "width": 284,
-        "height": 230,
-        "description": "Outside Segment"
+        "width": 279,
+        "height": 491
       }
     ],
     "nodes": [
@@ -788,10 +921,13 @@
         "name": "Profiles Sync",
         "zone": "segment",
         "position": {
-          "x": 1041,
-          "y": 903
+          "x": 1523,
+          "y": 587
         },
-        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. On the Segment backdrop in no single product, because it genuinely belongs to two."
+        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. On the Segment backdrop in no single product, because it genuinely belongs to two.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:reverse-etl-model",
@@ -805,7 +941,10 @@
         "binds": {
           "kind": "reverse_etl_model"
         },
-        "description": "SQL against that warehouse, on a schedule. Drawn on the Segment backdrop rather than inside Connections because it spans the boundary: the query is theirs, the delivery is Segment's."
+        "description": "SQL against that warehouse, on a schedule. Drawn on the Segment backdrop rather than inside Connections because it spans the boundary: the query is theirs, the delivery is Segment's.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:source-web",
@@ -814,12 +953,15 @@
         "zone": "sources",
         "position": {
           "x": 30,
-          "y": 49
+          "y": 48
         },
         "binds": {
           "kind": "source"
         },
-        "description": "Where events come in. The Sources box around it is a drawing choice -- a source on the bare Connections backdrop is filed just as correctly."
+        "description": "Where events come in. The Sources box around it is a drawing choice -- a source on the bare Connections backdrop is filed just as correctly.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:mapping",
@@ -827,13 +969,16 @@
         "name": "Mapping",
         "zone": "destinations",
         "position": {
-          "x": 14,
-          "y": 108
+          "x": 267,
+          "y": 52
         },
         "binds": {
           "kind": "destination_mapping"
         },
-        "description": "The trigger and the field mapping -- the last thing that touches the payload before it becomes this destination's own API call."
+        "description": "The trigger and the field mapping -- the last thing that touches the payload before it becomes this destination's own API call.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:destination",
@@ -847,7 +992,10 @@
         "binds": {
           "kind": "destination"
         },
-        "description": "Where events go out. An actions destination does nothing until a mapping says what to send it."
+        "description": "Where events go out. An actions destination does nothing until a mapping says what to send it.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:identity-rule",
@@ -878,6 +1026,9 @@
         ],
         "size": {
           "width": 280
+        },
+        "showFields": {
+          "description": false
         }
       },
       {
@@ -886,13 +1037,16 @@
         "name": "Source",
         "zone": "profile_sources",
         "position": {
-          "x": 36,
-          "y": 80
+          "x": 29,
+          "y": 123
         },
         "binds": {
           "kind": "source"
         },
-        "description": "The same source again, as a feeder of profiles. Whether a source is connected to the space is a separate switch from the source existing, and it is the commonest reason Unify sees nothing."
+        "description": "The same source again, as a feeder of profiles. Whether a source is connected to the space is a separate switch from the source existing, and it is the commonest reason Unify sees nothing.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:segment-profiles",
@@ -900,13 +1054,16 @@
         "name": "Segment Profiles",
         "zone": "profile_sources",
         "position": {
-          "x": 30,
-          "y": 167
+          "x": 23,
+          "y": 253
         },
         "binds": {
           "kind": "destination"
         },
-        "description": "The Segment Profiles destination: how a source's events reach the space. Drawn in Unify rather than Connections because what it does belongs to Unify, which is exactly the placement the canvas advises on rather than refuses."
+        "description": "The Segment Profiles destination: how a source's events reach the space. Drawn in Unify rather than Connections because what it does belongs to Unify, which is exactly the placement the canvas advises on rather than refuses.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:profile",
@@ -914,10 +1071,13 @@
         "name": "Profile",
         "zone": "profiles",
         "position": {
-          "x": 32,
-          "y": 55
+          "x": 41,
+          "y": 61
         },
-        "description": "A shape, not a person: identifiers, traits and events per profile. Never a real one, so exporting this diagram cannot put customer data in a slide deck."
+        "description": "A shape, not a person: identifiers, traits and events per profile. Never a real one, so exporting this diagram cannot put customer data in a slide deck.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:audience",
@@ -931,7 +1091,10 @@
         "binds": {
           "kind": "audience"
         },
-        "description": "Computed from profiles, and what most journeys are keyed on."
+        "description": "Computed from profiles, and what most journeys are keyed on.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:journey",
@@ -942,7 +1105,10 @@
           "x": 31,
           "y": 217
         },
-        "description": "Hand-authored. There is no Journeys API, so this one never binds to anything and is not counted as a placeholder."
+        "description": "Hand-authored. There is no Journeys API, so this one never binds to anything and is not counted as a placeholder.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:computed-trait",
@@ -956,7 +1122,10 @@
         "binds": {
           "kind": "computed_trait"
         },
-        "description": "Configured in Unify, drawn in Engage -- this is where the recomputation is actually felt. Another placement the canvas advises on rather than refuses."
+        "description": "Configured in Unify, drawn in Engage -- this is where the recomputation is actually felt. Another placement the canvas advises on rather than refuses.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:engage-destination",
@@ -965,12 +1134,15 @@
         "zone": "engage",
         "position": {
           "x": 555,
-          "y": 32
+          "y": 65
         },
         "binds": {
           "kind": "destination"
         },
-        "description": "Where an audience is activated. The same kind as the destination in Connections, drawn in Engage because the edge that matters reaches it from an audience."
+        "description": "Where an audience is activated. The same kind as the destination in Connections, drawn in Engage because the edge that matters reaches it from an audience.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:debugger-source",
@@ -978,24 +1150,58 @@
         "name": "Debugger Source",
         "zone": "debugger",
         "position": {
-          "x": 33,
-          "y": 115
+          "x": 26,
+          "y": 50
         },
         "binds": {
           "kind": "source"
         },
-        "description": "The source whose events the debugger is showing. Populated by playing a walkthrough, not by binding."
+        "description": "The source whose events the debugger is showing. Populated by playing a walkthrough, not by binding.",
+        "showFields": {
+          "description": false
+        }
+      },
+      {
+        "id": "ph:warehouse-sync-target",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "zone": "warehouses",
+        "position": {
+          "x": 27,
+          "y": 205
+        },
+        "binds": {
+          "kind": "warehouse"
+        },
+        "description": "The warehouse Profiles Sync writes into. Drawn separately from the upstream one: often the same warehouse in practice, never the same role in the diagram.",
+        "showFields": {
+          "description": false
+        }
+      },
+      {
+        "id": "manual:destination:10d140e1",
+        "kind": "destination",
+        "name": "Destination",
+        "zone": "custom:zone:a31670c9",
+        "position": {
+          "x": 20,
+          "y": 107
+        },
+        "bindable": false
       },
       {
         "id": "ph:custom-app",
         "kind": "custom",
-        "name": "Custom component",
+        "name": "Web App",
         "zone": "custom:upstream",
         "position": {
-          "x": 27,
+          "x": 23,
           "y": 113
         },
-        "description": "Whatever the customer runs that Segment does not -- their own service, a job, a queue. Deliberately rule-free: it has no zone of its own and no adjacency table, because Segment's rules have nothing to say about it."
+        "description": "Whatever the customer runs that Segment does not -- their own service, a job, a queue. Deliberately rule-free: it has no zone of its own and no adjacency table, because Segment's rules have nothing to say about it.",
+        "showFields": {
+          "description": false
+        }
       },
       {
         "id": "ph:warehouse-upstream",
@@ -1003,34 +1209,33 @@
         "name": "Warehouse",
         "zone": "custom:upstream",
         "position": {
-          "x": 39,
+          "x": 32,
           "y": 318
         },
         "binds": {
           "kind": "warehouse"
         },
-        "description": "Their warehouse acting as a source rather than a destination. This is the one Reverse ETL models read out of."
-      },
-      {
-        "id": "ph:warehouse-sync-target",
-        "kind": "warehouse",
-        "name": "Warehouse",
-        "zone": "custom:warehouse",
-        "position": {
-          "x": 10,
-          "y": 51
-        },
-        "binds": {
-          "kind": "warehouse"
-        },
-        "description": "The warehouse Profiles Sync writes into. Drawn separately from the upstream one: often the same warehouse in practice, never the same role in the diagram."
+        "description": "Their warehouse acting as a source rather than a destination. This is the one Reverse ETL models read out of.",
+        "showFields": {
+          "description": false
+        }
       }
     ],
     "edges": [
       {
-        "id": "e:reverse-etl-model->destination",
-        "source": "ph:reverse-etl-model",
-        "target": "ph:destination"
+        "id": "e:debugger-source->engage-destination",
+        "source": "ph:debugger-source",
+        "target": "ph:engage-destination"
+      },
+      {
+        "id": "e:engage-destination->profiles-sync",
+        "source": "ph:engage-destination",
+        "target": "ph:profiles-sync"
+      },
+      {
+        "id": "e:profiles-sync->warehouse-sync-target",
+        "source": "ph:profiles-sync",
+        "target": "ph:warehouse-sync-target"
       },
       {
         "id": "e:warehouse-upstream->reverse-etl-model",
@@ -1043,14 +1248,64 @@
         "target": "ph:segment-profiles"
       },
       {
-        "id": "e:profiles-sync->warehouse-sync-target",
-        "source": "ph:profiles-sync",
-        "target": "ph:warehouse-sync-target"
+        "id": "e:custom-app->source-web",
+        "source": "ph:custom-app",
+        "target": "ph:source-web"
       },
       {
-        "id": "e:audience->engage-destination",
+        "id": "e:source-web->destination",
+        "source": "ph:source-web",
+        "target": "ph:destination"
+      },
+      {
+        "id": "e:destination->mapping",
+        "source": "ph:destination",
+        "target": "ph:mapping"
+      },
+      {
+        "id": "e:mapping->destination:10d140e1",
+        "source": "ph:mapping",
+        "target": "manual:destination:10d140e1"
+      },
+      {
+        "id": "e:source-web->profile-source",
+        "source": "ph:source-web",
+        "target": "ph:profile-source"
+      },
+      {
+        "id": "e:audience->debugger-source",
         "source": "ph:audience",
-        "target": "ph:engage-destination"
+        "target": "ph:debugger-source"
+      },
+      {
+        "id": "e:computed-trait->debugger-source",
+        "source": "ph:computed-trait",
+        "target": "ph:debugger-source"
+      },
+      {
+        "id": "e:journey->debugger-source",
+        "source": "ph:journey",
+        "target": "ph:debugger-source"
+      },
+      {
+        "id": "e:profile-source->profile",
+        "source": "ph:profile-source",
+        "target": "ph:profile"
+      },
+      {
+        "id": "e:profile->audience",
+        "source": "ph:profile",
+        "target": "ph:audience"
+      },
+      {
+        "id": "e:profile->computed-trait",
+        "source": "ph:profile",
+        "target": "ph:computed-trait"
+      },
+      {
+        "id": "e:profile->journey",
+        "source": "ph:profile",
+        "target": "ph:journey"
       }
     ]
   }

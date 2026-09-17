@@ -39,6 +39,9 @@ export const STATUS_LABELS = {
   [STATUS.undecided]: 'Cannot be decided',
   [STATUS.notEvaluated]: 'Not evaluated',
   [STATUS.notApplicable]: 'Not applicable',
+  /* "Stepped over", not "skipped" or "excluded": the event went *through* it, which is exactly what
+     distinguishes leaving a component out of a path from switching it off ("Never reached"). */
+  [STATUS.bypassed]: 'Stepped over',
 }
 
 /*
@@ -61,12 +64,12 @@ const NARRATION = {
   source_function: {
     what: 'A payload that is not yet a Segment event — a partner webhook, a bare HTTP POST — is handed to your code, and whatever it emits becomes the event.',
     why: 'It lets a system with no Segment library produce events without standing up a service in the middle to translate for it.',
-    caveat: 'The function body is not read here, so what it emits is not simulated.',
+    caveat: bodyCaveat('what it emits is not simulated'),
   },
   source_insert_function: {
     what: 'Every event from the source is handed to your code on its way in, before Segment validates it. It can enrich the payload, or return nothing and drop the event.',
     why: 'Enrichment that has to apply to everything downstream belongs here — once, rather than repeated in every destination that needs it.',
-    caveat: 'The function body is not read here. Mark it as dropping in a scenario to see the path without it.',
+    caveat: bodyCaveat('the payload is carried through unchanged'),
   },
   source_schema_control: {
     what: (data) =>
@@ -116,12 +119,12 @@ const NARRATION = {
   destination_insert_function: {
     what: 'Runs on the event once per destination, after that destination’s filters and immediately before it is sent, so it can reshape or drop the payload for this one destination.',
     why: 'Per-destination shaping without changing what every other destination receives.',
-    caveat: 'The function body is not read here, so the shape it sends is not simulated.',
+    caveat: bodyCaveat('the shape it sends is not simulated'),
   },
   destination_function: {
     what: 'Your code receives the event and is responsible for sending it on. There is no catalog destination behind it — the function is the destination.',
     why: 'It is how a tool Segment has no catalog destination for still gets events.',
-    caveat: 'The function body is not read here, so what it sends — and whether the send succeeded — is not simulated.',
+    caveat: bodyCaveat('what it sends — and whether the send succeeded — is not simulated'),
   },
   destination: {
     what: 'The event is mapped into the shape this tool expects and delivered. Nothing continues past it.',
@@ -296,7 +299,30 @@ export function describeStep(step, node) {
     arrived: hasArrived(step.status),
     index: step.index,
     depth: step.depth,
+    /* Whether this is the event's second time through here, so a caller can mark the card as a return
+       leg. The `reason` already says so in words -- the router writes the clause, because rewording it
+       here is exactly what the note above forbids -- and this is the same fact as a flag, for a chip
+       or an icon that should not have to parse a sentence to know. */
+    revisit: step.revisit === true,
   }
+}
+
+/*
+ * What to say about a function's body, which now depends on whether it has one.
+ *
+ * The four function kinds all used to carry a flat "the function body is not read here",
+ * which was true and is no longer: a component with code in its Code tab has that code
+ * *run* against the event by ../functions/runtime.js. Leaving the old sentence in place
+ * would have the anchor contradict the verdict printed directly underneath it.
+ *
+ * `unsimulated` is the half that stays true when there is no body to read, phrased to
+ * follow "so".
+ */
+function bodyCaveat(unsimulated) {
+  return (data) =>
+    data.code?.trim()
+      ? 'The code on this component is run against the event, in your browser and synchronously — so `fetch`, `cache` and anything that has to wait are unavailable, and a function needing them is reported as not simulated rather than guessed at.'
+      : `The function body is not read here, so ${unsimulated}. Paste it into the Code tab to have it run, or mark the function as dropping in a scenario to see the path without it.`
 }
 
 function resolve(value, data) {

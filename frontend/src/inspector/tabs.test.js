@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   BIND,
+  EDGE_STYLE,
   FIELDS,
   LINKS,
   OVERVIEW,
@@ -18,6 +19,7 @@ import {
   spacesFromGraph,
   tabsFor,
   DATA,
+  CODE,
 } from './tabs.js'
 
 const node = (kind, data = {}) => ({ id: `${kind}:1`, data: { kind, ...data } })
@@ -68,6 +70,12 @@ describe('tabsFor', () => {
     // A kind added server-side before the client knows about it must not lose
     // the inspector entirely.
     expect(tabsFor(node('quantum_toaster'))).toEqual([OVERVIEW, STYLE, LINKS])
+  })
+
+  it('gives a connector only its own Style tab, same reasoning as a zone', () => {
+    // No kind, so no rules, no fields, nothing to bind to -- just the one thing
+    // worth setting on a connector.
+    expect(tabsFor({ id: 'e1', type: 'flow', source: 'a', target: 'b' })).toEqual([EDGE_STYLE])
   })
 })
 
@@ -307,5 +315,76 @@ describe('the Data tab', () => {
 
   it('never appears on a zone, which has no kind at all', () => {
     expect(tabsFor({ id: 'zone-unify', type: 'zone', data: { id: 'unify' } })).not.toContain(DATA)
+  })
+})
+
+/*
+ * The Code tab.
+ *
+ * Its ordering is the substantive claim being tested. A function has a Rules tab too, and
+ * what that tab has to say about one is its resource type and its preview webhook URL --
+ * metadata about a component whose entire content is the code. So Code comes first, and a
+ * test pins it rather than leaving it to whoever next edits `tabsFor`.
+ */
+describe('the Code tab', () => {
+  const node = (kind, data = {}) => ({
+    id: `n:${kind}`,
+    type: 'segmentNode',
+    data: { kind, name: kind, ...data },
+  })
+
+  const FUNCTIONS = [
+    'source_function',
+    'source_insert_function',
+    'destination_insert_function',
+    'destination_function',
+  ]
+
+  it('appears on every function kind', () => {
+    for (const kind of FUNCTIONS) expect(tabsFor(node(kind)), kind).toContain(CODE)
+  })
+
+  it('appears for nothing that does not run code', () => {
+    /* `destination_mapping` is the one worth naming: it has a trigger and field mappings,
+       which look like logic and are not JavaScript. */
+    for (const kind of [
+      'source',
+      'destination',
+      'destination_mapping',
+      'destination_filter',
+      'audience',
+      'reverse_etl_model',
+      'sql_table',
+      'warehouse',
+    ]) {
+      expect(tabsFor(node(kind)), kind).not.toContain(CODE)
+    }
+  })
+
+  it('comes straight after Overview, ahead of Rules', () => {
+    const tabs = tabsFor(node('destination_insert_function'))
+    expect(tabs.indexOf(CODE)).toBe(tabs.indexOf(OVERVIEW) + 1)
+    expect(tabs.indexOf(CODE)).toBeLessThan(tabs.indexOf(RULES))
+  })
+
+  it('still lets Bind lead on an unbound function', () => {
+    /* A dashed placeholder is a question about which real component it is, and that has to
+       be answered before its code means anything. */
+    const tabs = tabsFor(node('source_insert_function', { bound: false }))
+    expect(tabs[0]).toBe(BIND)
+    expect(tabs).toContain(CODE)
+  })
+
+  it('appears whether or not the component has any code yet', () => {
+    /* An empty Code tab is not an empty tab: it is where the body goes, and the panel
+       explains that Segment's API does not return one. */
+    expect(tabsFor(node('destination_function', { code: '' }))).toContain(CODE)
+    expect(tabsFor(node('destination_function', { code: 'return event' }))).toContain(CODE)
+  })
+
+  it('never appears on a zone', () => {
+    expect(tabsFor({ id: 'zone-connections', type: 'zone', data: { id: 'connections' } })).not.toContain(
+      CODE,
+    )
   })
 })

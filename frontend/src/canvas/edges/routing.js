@@ -410,33 +410,53 @@ export function routeEdge({
   return { path, labelX: label.x, labelY: label.y, points }
 }
 
-/** The point halfway along the route, measured by arc length over the polyline. */
-export function midpointOf(points) {
-  if (!points.length) return { x: 0, y: 0 }
-  if (points.length === 1) return points[0]
+/**
+ * A fraction of the way along the route, measured by arc length over the polyline.
+ *
+ * By length and not by index, so a route with one long leg and one short one is traversed at a
+ * steady speed rather than spending half the journey on each -- which is what both readers of this
+ * need. The label wants the middle of the *line* and not the joint between two segments, and the
+ * travelling event has to cross a bent connector without slowing down at every corner.
+ *
+ * `t` is clamped, so a caller may hand it a progress value that has drifted a hair past 1.
+ *
+ * Measured over the polyline, which for an orthogonal or straight route is exactly the line as
+ * drawn. A curved route is a bezier through these same points, so this cuts its corners slightly --
+ * accepted here for the same reason the label already accepts it: the deviation is small, it is
+ * confined to a non-default line style, and the alternative is measuring a real `SVGPathElement`,
+ * which would put DOM in the one part of the canvas that is currently pure and tested.
+ */
+export function pointAlong(points, t) {
+  const list = points ?? []
+  if (!list.length) return { x: 0, y: 0 }
+  if (list.length === 1) return list[0]
 
   const lengths = []
   let total = 0
-  for (let index = 1; index < points.length; index += 1) {
-    const length = Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y)
+  for (let index = 1; index < list.length; index += 1) {
+    const length = Math.hypot(list[index].x - list[index - 1].x, list[index].y - list[index - 1].y)
     lengths.push(length)
     total += length
   }
-  if (total === 0) return points[0]
+  if (total === 0) return list[0]
 
-  /* By length rather than by index, so a route with one long leg and one short one puts its
-     label in the middle of the *line* and not at the joint between them. */
+  const target = total * Math.min(1, Math.max(0, Number.isFinite(t) ? t : 0))
   let travelled = 0
   for (let index = 0; index < lengths.length; index += 1) {
-    if (travelled + lengths[index] >= total / 2) {
-      const along = (total / 2 - travelled) / (lengths[index] || 1)
-      const from = points[index]
-      const to = points[index + 1]
+    if (travelled + lengths[index] >= target) {
+      const along = (target - travelled) / (lengths[index] || 1)
+      const from = list[index]
+      const to = list[index + 1]
       return { x: from.x + (to.x - from.x) * along, y: from.y + (to.y - from.y) * along }
     }
     travelled += lengths[index]
   }
-  return points[points.length - 1]
+  return list[list.length - 1]
+}
+
+/** The point halfway along the route. */
+export function midpointOf(points) {
+  return pointAlong(points, 0.5)
 }
 
 /* --- editing the route ------------------------------------------------------ */

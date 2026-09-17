@@ -173,7 +173,7 @@ export const session = {
    * `{workspace, claimed}` means connected, and `{needsChoice: true, workspaces}` means the
    * credential works but the question has not been answered yet.
    */
-  start: (token, region = 'us', { credential = 'public_api', workspaceId } = {}) =>
+  start: (token, region = 'us', { credential = 'public_api', workspaceId, workspaceSlug } = {}) =>
     request('/api/session', {
       method: 'POST',
       body: {
@@ -181,12 +181,41 @@ export const session = {
         region,
         credential,
         ...(workspaceId ? { workspace_id: workspaceId } : {}),
+        ...(workspaceSlug ? { workspace_slug: workspaceSlug } : {}),
       },
     }),
   /* A scope to save into with no token yet. Idempotent server-side, which is
      what makes it safe to call from an effect that may run twice. */
   startAnonymous: () => request('/api/session/anonymous', { method: 'POST' }),
+  /* Forget the *workspace credential*. Not the same as signing out of an account --
+     see `auth.logOut`. */
   end: () => request('/api/session', { method: 'DELETE' }),
+}
+
+/* --- Accounts ------------------------------------------------------------- */
+
+export const auth = {
+  /*
+   * Where to send the browser to sign in.
+   *
+   * A URL rather than a request, and the distinction is load-bearing: the response is a
+   * 302 to accounts.google.com, and fetch would follow it, get Google's HTML back and
+   * hand us something opaque. The browser has to *navigate*, so the caller assigns this
+   * to window.location and there is deliberately no `signIn()` here to be called by
+   * mistake.
+   */
+  signInUrl: () => '/api/auth/google/start',
+  /* Drop the account and land on a fresh anonymous session. The server rotates the
+     cookie, so the signed-in one is inert afterwards. */
+  logOut: () => request('/api/auth/logout', { method: 'POST' }),
+}
+
+export const invitations = {
+  list: () => request('/api/invitations'),
+  /* Creates a record that lets one address sign in. Sends no mail -- the response says
+     so in `emailSent`, and the UI is expected to repeat it rather than implying
+     otherwise. */
+  create: (email) => request('/api/invitations', { method: 'POST', body: { email } }),
 }
 
 /* --- Static rules -------------------------------------------------------- */

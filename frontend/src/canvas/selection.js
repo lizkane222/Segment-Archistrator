@@ -13,10 +13,13 @@
  *     browser found, and NODE_WIDTH is the fallback -- so the box a card actually occupies
  *     is not on the node under any single key. See `componentSize` in layout.js.
  *
- * Zones are excluded throughout. A zone is a region rather than a thing in the drawing:
- * aligning one moves everything inside it, and matching its size would scale its contents
- * (`scaleZoneChildren`), so a "make these the same size" aimed at two components would
- * silently rearrange a third that merely happened to be selected with them.
+ * Zones are excluded from matching size and style: matching a zone's size would scale its
+ * contents (`scaleZoneChildren`), so a "make these the same size" aimed at two components
+ * would silently rearrange a third that merely happened to be selected with them. Align and
+ * distribute are different -- a zone's box is exactly as usable as a component's for "line
+ * these up" or "space these evenly", and there is no version of that request a user could
+ * mean by selecting components instead when what they have selected is two zones. Those two
+ * take `selectedAny`; everything else here still takes `selectedComponents`.
  */
 
 import { NODE_HEIGHT, NODE_WIDTH, arrangeOf, componentSize, nodeArea } from './layout.js'
@@ -65,7 +68,7 @@ export function selectedAny(nodes, ids) {
  * after a resize, `measured` still describes the box before it, and an align that read it
  * would leave every card a gesture behind the one it was lining up with.
  */
-function boxOf(node, positions) {
+export function boxOf(node, positions) {
   const at = positions.get(node.id) ?? { x: 0, y: 0 }
   const chosen = componentSize(node)
   return {
@@ -119,7 +122,7 @@ function alignedOrigin(box, bounds, alignment) {
  * alignment is a no-op that still marks the document dirty.
  */
 export function alignNodes(nodes, ids, alignment) {
-  const members = selectedComponents(nodes, ids)
+  const members = selectedAny(nodes, ids)
   if (members.length < 2 || !ALIGNMENTS.includes(alignment)) return nodes ?? []
 
   const positions = absolutePositions(nodes)
@@ -161,7 +164,7 @@ export function alignNodes(nodes, ids, alignment) {
  * evenly-overlapping row is a legible signal to widen the run, which a refusal is not.
  */
 export function distributeNodes(nodes, ids, axis) {
-  const members = selectedComponents(nodes, ids)
+  const members = selectedAny(nodes, ids)
   if (members.length < 3 || !DISTRIBUTIONS.includes(axis)) return nodes ?? []
 
   const horizontal = axis === 'horizontal'
@@ -495,4 +498,56 @@ export function withGroupMates(nodes, ids) {
     if (node.data?.group && groups.has(node.data.group)) out.add(node.id)
   }
   return out.size === wanted.size ? (ids ?? []) : [...out]
+}
+
+/**
+ * The extra select changes that keep a group selected or released as one whole.
+ *
+ * React Flow knows nothing about groups, so a change stream that selects one member has to
+ * be extended to its mates -- and, the half that was missing, a stream that *deselects* one
+ * member has to release them too. Without the second half, shift-clicking a group member off
+ * left every other member selected and invisible to the user: the ring was gone from the card
+ * they clicked, the count in the toolbar still said four, and the next drag moved three cards
+ * they thought they had let go of.
+ *
+ * Returned as changes to append rather than applied here, because appending is what makes them
+ * survive: a plain click arrives as deselect-everything followed by select-one, so anything
+ * merged into the existing changes would be overwritten by the deselects it arrived with.
+ *
+ * Order within the result matters for the same reason. Deselects first, selects last, so the
+ * click above ends with the clicked node's group selected rather than released -- the two
+ * halves genuinely disagree about the same ids in that one stream, and the select is the half
+ * that describes what the user just did.
+ *
+ * Returns an empty array when nothing is grouped, so the caller can forward the original
+ * changes untouched -- this runs on every selection change, and a fresh array each time is a
+ * new prop identity for every node on the canvas.
+ */
+export function groupSelectionChanges(nodes, changes) {
+  const selecting = []
+  const deselecting = []
+  for (const change of changes ?? []) {
+    if (change?.type !== 'select') continue
+    ;(change.selected ? selecting : deselecting).push(change.id)
+  }
+  if (!selecting.length && !deselecting.length) return []
+
+  /* Each half filters against *its own* ids only, and that asymmetry is the whole of the
+     click case: the mates of the node being selected are usually also in the deselect list,
+     because the click deselected everything on its way in. Filtering the selects against
+     the deselects too would drop exactly the ids that have to be re-selected, which is how
+     clicking a group member came to select only that member. */
+  const chosen = new Set(selecting)
+  const selectMates = withGroupMates(nodes, selecting).filter((id) => !chosen.has(id))
+
+  const released = new Set(deselecting)
+  const keep = new Set([...selectMates, ...selecting])
+  const deselectMates = withGroupMates(nodes, deselecting).filter(
+    (id) => !released.has(id) && !keep.has(id),
+  )
+
+  return [
+    ...deselectMates.map((id) => ({ id, type: 'select', selected: false })),
+    ...selectMates.map((id) => ({ id, type: 'select', selected: true })),
+  ]
 }

@@ -194,10 +194,11 @@
  * forty cards was, as reported, "not easy to see".
  *
  * `walkthrough-here` is where the event is *now*. It has to be findable at a glance on a diagram the
- * reader is zoomed out of, so it is a pulsing halo rather than a static ring: motion is the only
- * property that survives being small, and it is the one thing no other state on this canvas uses.
- * The colour comes from `--path-colour`, set inline per scenario, so two paths pulse in their own
- * colours rather than both in a hardcoded blue.
+ * reader is zoomed out of, so it is a halo rather than a ring. The colour comes from `--path-colour`,
+ * set inline per scenario, so two paths light up in their own colours rather than both in a hardcoded
+ * blue. It appears on a component only while the event is actually *at* one -- during the beats spent
+ * crossing a connector nothing wears it, and the event itself is the moving token drawn by
+ * simulation/EventLayer.jsx.
  *
  * `walkthrough-trail` is where the event has *been*. A steady ring, no motion -- a trail that pulsed
  * would compete with the playhead and the eye would have nothing to lock onto.
@@ -208,33 +209,49 @@
  * context that makes the path mean anything, and hiding it would leave the reader looking at a line
  * floating in space.
  */
-@keyframes walkthrough-here {
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 3px var(--path-colour),
-      0 0 0 9px color-mix(in srgb, var(--path-colour) 35%, transparent),
-      0 0 22px 6px color-mix(in srgb, var(--path-colour) 55%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 0 0 4px var(--path-colour),
-      0 0 0 16px color-mix(in srgb, var(--path-colour) 12%, transparent),
-      0 0 34px 10px color-mix(in srgb, var(--path-colour) 30%, transparent);
-  }
+/*
+ * `walkthrough-here` and `walkthrough-trail` are one property with two values, deliberately: both
+ * declare `box-shadow` and both declare the same transition, so React swapping one class for the
+ * other *animates* between them. That is what makes the glow rise as the event lands and decay as it
+ * leaves, rather than snapping on and off a card at a time.
+ *
+ * It replaced an infinite pulse on `here`. The pulse existed because the glow used to be one bright
+ * thing among a dozen half-bright ones -- every hop the event had taken stayed lit -- so motion was
+ * the only way to tell the playhead from its own trail. Now that the trail carries no glow at all the
+ * contrast does that job, and a pulse would fight the fade: a halo still breathing while it is meant
+ * to be decaying reads as two animations disagreeing about whether the event is still there.
+ *
+ * 420ms, matching GLOW_FADE_MS in canvas/edges/FlowEdge.jsx, so a component and the connector feeding
+ * it hand over at the same rate. Comfortably inside the ~1s beat, or the fade would still be running
+ * when the event had moved on.
+ */
+.walkthrough-here,
+.walkthrough-trail {
+  transition:
+    box-shadow 420ms ease-out,
+    opacity 220ms ease,
+    filter 220ms ease;
 }
 
 .walkthrough-here {
-  animation: walkthrough-here 1.15s ease-in-out infinite;
+  box-shadow:
+    0 0 0 4px var(--path-colour),
+    0 0 0 14px color-mix(in srgb, var(--path-colour) 22%, transparent),
+    0 0 32px 9px color-mix(in srgb, var(--path-colour) 45%, transparent);
   /* Above its neighbours while it is the playhead: the halo extends well past the card's own box, and
      under an adjacent card it would be clipped on the side the reader is looking at. */
   z-index: 4;
 }
 
+/*
+ * Where the event has *been*. A thin ring in the path's colour and no halo.
+ *
+ * The halo is gone on purpose -- it is the one thing that says "the event is here", and a route whose
+ * every component wore one left the reader nothing to follow. The ring is enough to show which way
+ * the walkthrough came, which is the other thing a trail is for.
+ */
 .walkthrough-trail {
-  box-shadow:
-    0 0 0 2px var(--path-colour),
-    0 0 12px 2px color-mix(in srgb, var(--path-colour) 30%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--path-colour) 70%, transparent);
 }
 
 .walkthrough-aside {
@@ -257,14 +274,16 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  /* The halo still has to be findable, so the pulse becomes its own brightest frame rather than
-     nothing -- turning the animation off entirely would leave the playhead indistinguishable from
-     the trail, which is the thing this was asked to fix. */
-  .walkthrough-here {
-    animation: none;
-    box-shadow:
-      0 0 0 4px var(--path-colour),
-      0 0 0 14px color-mix(in srgb, var(--path-colour) 18%, transparent),
-      0 0 30px 8px color-mix(in srgb, var(--path-colour) 40%, transparent);
+  /*
+   * The glow stays; only the *movement* between states goes.
+   *
+   * There is no pulse left to disable -- the halo is now a static box-shadow that fades in and out --
+   * so what this suppresses is the fade, leaving the playhead to switch cleanly from one component to
+   * the next. Removing the halo instead would leave the playhead indistinguishable from its trail,
+   * which is the thing the halo was asked to fix.
+   */
+  .walkthrough-here,
+  .walkthrough-trail {
+    transition: none;
   }
 }

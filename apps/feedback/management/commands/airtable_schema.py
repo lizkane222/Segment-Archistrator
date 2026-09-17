@@ -28,7 +28,9 @@ from apps.feedback.airtable import (
     FIELD_TYPES,
     WRITTEN_FIELDS,
     AirtableClient,
+    AirtableError,
     AirtableNotConfigured,
+    fixed_values,
 )
 
 
@@ -55,11 +57,17 @@ class Command(BaseCommand):
         except AirtableNotConfigured as err:
             raise CommandError(str(err)) from err
 
-        if not settings.AIRTABLE_BASE_ID:
-            self._list_bases(client)
-            return
+        # Every Airtable call below can fail for a reason the user can act on -- a revoked token, a base
+        # that is not shared, no network. `AirtableError` already carries that sentence, so it becomes a
+        # CommandError here rather than a five-frame traceback with the message buried at the bottom.
+        try:
+            if not settings.AIRTABLE_BASE_ID:
+                self._list_bases(client)
+                return
+            schema = client.base_schema()
+        except AirtableError as err:
+            raise CommandError(str(err)) from err
 
-        schema = client.base_schema()
         if options["json"]:
             self.stdout.write(json.dumps(schema, indent=2))
             return
@@ -116,6 +124,7 @@ class Command(BaseCommand):
         the API returns success, and that column is simply empty.
         """
         actual = {field["name"]: field for field in table.get("fields") or []}
+        constants = fixed_values()
         self.stdout.write(self.style.SUCCESS("Fields this app writes:"))
 
         problems = []
@@ -134,6 +143,24 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.WARNING(f"  ! {name!r} — is {field.get('type')}, expected {' or '.join(wanted)}")
                 )
+                continue
+
+            # A single select whose options do not include the constant we write. Its own check, because
+            # the type is right and the write succeeds -- `typecast` invents the missing option -- so
+            # neither the type check above nor the submission itself would ever say anything.
+            value = constants.get(name)
+            if value and field.get("type") == "singleSelect":
+                choices = [choice.get("name") for choice in (field.get("options") or {}).get("choices") or []]
+                if value not in choices:
+                    problems.append(
+                        f"{name!r} has no option called {value!r} (it has: {', '.join(choices) or 'none'}); "
+                        "writing it would create a new one"
+                    )
+                    self.stdout.write(
+                        self.style.ERROR(f"  ✗ {name!r} — no {value!r} option; a write would create one")
+                    )
+                    continue
+                self.stdout.write(f"  ✓ {name!r} — {field.get('type')}, writes {value!r}")
                 continue
 
             self.stdout.write(f"  ✓ {name!r} — {field.get('type')}")

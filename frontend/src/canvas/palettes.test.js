@@ -20,6 +20,7 @@ import {
   paletteStyles,
   parseHex,
   readableText,
+  styleForChannels,
   styleForColor,
 } from './palettes.js'
 
@@ -314,5 +315,95 @@ describe('every styled kind is a kind the canvas draws', () => {
     for (const kind of Object.keys(paletteStyles('pastel'))) {
       expect(KIND_STYLES, kind).toHaveProperty(kind)
     }
+  })
+})
+
+/*
+ * Choosing which of the three a palette colour lands on.
+ *
+ * The default -- all three -- has to keep doing exactly what it did, because that is the behaviour
+ * every existing test and every existing diagram was made against. What is new is the subset, and the
+ * thing worth pinning there is that it writes the colour *verbatim*: the derivation exists so the
+ * three agree with each other, and someone who has named a single channel has said what they want.
+ */
+describe('styleForChannels', () => {
+  const colour = '#BEDAE3'
+
+  it('is the full derived style when all three are asked for', () => {
+    expect(styleForChannels(colour, ['bg', 'border', 'text'])).toEqual(styleForColor(colour))
+  })
+
+  it('is the full derived style when no choice has been made', () => {
+    /* A caller that has not opted in must get the old behaviour rather than nothing. */
+    expect(styleForChannels(colour, undefined)).toEqual(styleForColor(colour))
+    expect(styleForChannels(colour, [])).toEqual(styleForColor(colour))
+  })
+
+  it('writes only the channel asked for, and the colour itself', () => {
+    expect(styleForChannels(colour, ['border'])).toEqual({ border: colour.toLowerCase() })
+    expect(styleForChannels(colour, ['text'])).toEqual({ text: colour.toLowerCase() })
+  })
+
+  it('writes two when two are asked for', () => {
+    expect(styleForChannels(colour, ['bg', 'text'])).toEqual({
+      bg: colour.toLowerCase(),
+      text: colour.toLowerCase(),
+    })
+  })
+
+  it('ignores a channel it does not have', () => {
+    expect(styleForChannels(colour, ['border', 'shadow'])).toEqual({ border: colour.toLowerCase() })
+  })
+
+  it('returns null for a colour it cannot parse, like styleForColor', () => {
+    /* So a caller leaves the node alone rather than writing `undefined` into its style. */
+    expect(styleForChannels('not a colour', ['bg'])).toBe(null)
+  })
+})
+
+describe('applyPaletteToNodes, with channels', () => {
+  const nodes = () => [
+    { id: 'a', type: 'segmentNode', data: { kind: 'source', style: { bg: '#ffffff' } } },
+    { id: 's', type: 'shape', data: { kind: 'shape', shape: 'star' } },
+    { id: 'z', type: 'zone', data: { id: 'connections' } },
+  ]
+  const styleOf = (out, id) => out.find((node) => node.id === id).data.style
+
+  it('writes all three by default, exactly as it did before', () => {
+    const out = applyPaletteToNodes(nodes(), 'pastel')
+    expect(Object.keys(styleOf(out, 'a')).sort()).toEqual(['bg', 'border', 'text'])
+  })
+
+  it('writes only the channels asked for, leaving the rest of the style alone', () => {
+    const out = applyPaletteToNodes(nodes(), 'pastel', { channels: ['border'] })
+    /* The hand-set white fill survives, which is the whole point of the option: recolouring the
+       borders across a diagram someone has already coloured by hand. */
+    expect(styleOf(out, 'a').bg).toBe('#ffffff')
+    expect(styleOf(out, 'a').border).toBeTruthy()
+    expect(styleOf(out, 'a').text).toBeUndefined()
+  })
+
+  it('leaves shapes alone unless asked', () => {
+    expect(styleOf(applyPaletteToNodes(nodes(), 'pastel'), 's')).toBeUndefined()
+  })
+
+  it('themes shapes when asked, lightest filling and darkest outlining', () => {
+    const out = applyPaletteToNodes(nodes(), 'pastel', { includeShapes: true })
+    const shape = styleOf(out, 's')
+    const ordered = [...paletteByKey('pastel').colors].sort((a, b) => luminance(b) - luminance(a))
+    expect(shape.bg).toBe(ordered[0])
+    expect(shape.border).toBe(ordered[ordered.length - 1])
+    expect(shape.text).toBe(ordered[ordered.length - 1])
+  })
+
+  it('never touches a zone, whatever the options', () => {
+    /* A zone's tint says which product a region is, which is structure rather than decoration. */
+    const out = applyPaletteToNodes(nodes(), 'pastel', { includeShapes: true, channels: ['bg'] })
+    expect(styleOf(out, 'z')).toBeUndefined()
+  })
+
+  it('does nothing at all when every channel is turned off', () => {
+    const before = nodes()
+    expect(applyPaletteToNodes(before, 'pastel', { channels: [] })).toBe(before)
   })
 })

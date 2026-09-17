@@ -7,6 +7,8 @@
  * nothing. So the Rules tab appears only when there is something to put in it.
  */
 
+import { isFunctionKind } from '../functions/defaults.js'
+
 export const BIND = 'bind'
 export const OVERVIEW = 'overview'
 export const FIELDS = 'fields'
@@ -14,6 +16,16 @@ export const RULES = 'rules'
 export const STYLE = 'style'
 export const LINKS = 'links'
 export const ZONE = 'zone'
+/* A connector's own tab: colour, dash pattern, which end (or ends) wears an arrow.
+   Its own id rather than reusing STYLE, because an edge is never a `node` with a
+   `kind` -- the two tabs would have to branch internally on what they were given,
+   where two separate ones let `tabsFor` decide that once. */
+export const EDGE_STYLE = 'edge_style'
+/* The JavaScript a function runs, and a tester for it. Only the four function kinds have
+   one, and for them it is the component: everything else a function carries -- its
+   resource type, its preview webhook -- is metadata about a thing whose whole content is
+   this code. See CodeTab.jsx. */
+export const CODE = 'code'
 /* Editing the data behind a component whose *content is a table or a config block*: a SQL Table's CSV
    and query, a Data Graph's entity model. Its own tab rather than more of Overview, because a textarea
    holding forty lines of CSV alongside a name field is a panel with two different jobs. */
@@ -28,6 +40,8 @@ export const TAB_LABELS = {
   [LINKS]: 'Links',
   [ZONE]: 'Zone',
   [DATA]: 'Data',
+  [CODE]: 'Code',
+  [EDGE_STYLE]: 'Style',
 }
 
 /*
@@ -140,12 +154,26 @@ export function tabsFor(node) {
      row of tabs that all render empty. */
   if (node.type === 'zone') return [ZONE]
 
+  /* A connector, same reasoning: no kind, no fields, no rules -- only the one thing
+     worth setting on it. */
+  if (node.type === 'flow') return [EDGE_STYLE]
+
   const kind = node.data?.kind
   const tabs = []
   /* First, and therefore the default tab for a placeholder: a dashed unbound node
      is a question, and this is where it gets answered. */
   if (bindable(node)) tabs.push(BIND)
   tabs.push(OVERVIEW)
+  /*
+   * Directly after Overview, ahead of Rules, and that ordering is the point.
+   *
+   * `DATA` sits later for the same underlying reason -- "for these kinds it *is* the
+   * component" -- but a function has a Rules tab as well, and what that tab has to say
+   * about a function is its resource type and its preview webhook URL. Putting metadata
+   * in front of the code would bury the only thing on the component that decides what
+   * happens to an event.
+   */
+  if (isFunctionKind(kind)) tabs.push(CODE)
   if (FIELD_KINDS.has(kind)) tabs.push(FIELDS)
   if (rulesSubject(node)) tabs.push(RULES)
   /* Before Style and Links, because for these two kinds it *is* the component -- a Data Graph with no

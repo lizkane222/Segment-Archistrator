@@ -28,7 +28,10 @@ export default function ZoneTab({ node, onUpdate }) {
           label="Name"
           value={data.label ?? ''}
           placeholder="Untitled zone"
-          onCommit={(label) => onUpdate({ label })}
+          /* `labelRich` goes with it: it is what the header draws when it exists, so a name
+             retyped here while a formatted one was stored would leave the canvas showing the old
+             text and this field looking broken. Same rule as a component's name. */
+          onCommit={(label) => onUpdate({ label, labelRich: undefined })}
         />
         <EditableText
           resetKey={node.id}

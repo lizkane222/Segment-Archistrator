@@ -64,22 +64,22 @@ export const LEGACY_TARGET = 'w'
  * their last 20px and a reader cannot tell which line goes where. Spreading them along the border is
  * the fix, and it needs a point that is not a midpoint.
  *
- * ## Encoded in the handle id, not in a new field
+ * ## Encoded as a string, but carried in `data`, not in the handle id
  *
  * A free anchor is `free:<side>:<t>` -- `free:right:0.73` is 73% of the way down the right-hand
- * edge. It rides in `sourceHandle`/`targetHandle`, which already persist and already round-trip
- * (see `serializeEdge`), so this needs no new document key and no migration.
- *
- * The alternative was `data.sourceAnchor = {side, t}`, which reads better and would have been a
- * second place the same fact lives: React Flow puts the handle a connection was drawn from into
- * `sourceHandle` whatever we do, so an anchor stored beside it could disagree with it. One field.
+ * edge. It used to ride in `sourceHandle` itself, which seemed like the one place the fact needed
+ * to live -- until it turned out React Flow will not draw an edge end from a handle id it cannot
+ * find in the node's *registered* bounds, and a free anchor's own handle exists only for the
+ * instant it is being dragged (see ConnectionHandles.jsx). Putting the anchor there meant every
+ * connector that used one silently failed to render the moment the drag ended: not misplaced, not
+ * degraded, simply never drawn, forever. `sourceHandle`/`targetHandle` therefore always carry a
+ * fixed id (`fixedHandleForSide` below), so React Flow's own resolution always succeeds, and the
+ * precise point rides in `data.sourceAnchor` instead -- see `serializeEdge` and `toFlowEdge`.
  *
  * ## Why the *edge* has to resolve it
  *
- * The handle a free anchor names exists only while the pointer is near that border -- it follows the
- * cursor and then goes away. React Flow resolves an edge end by looking the handle id up in the
- * node's registered bounds, so a moment after the drag it would find nothing and draw that end at
- * the node's origin. So `FlowEdge` computes the point itself from the node's box; see
+ * `data.sourceAnchor` only ever names a handle that is not currently mounted, so `FlowEdge`
+ * computes the point itself from the node's box rather than asking React Flow to; see
  * `pointOnBorder`.
  */
 
@@ -90,6 +90,18 @@ const FREE_PREFIX = 'free'
 export function encodeFreeHandle(side, t) {
   const clamped = Math.min(1, Math.max(0, Number(t) || 0))
   return `${FREE_PREFIX}:${side}:${clamped.toFixed(2)}`
+}
+
+/**
+ * A registry anchor as the string an edge stores, or `undefined` when the drag left no point.
+ *
+ * `undefined` rather than `null` on purpose: the caller spreads the result into `edge.data`, and this
+ * is the value that makes an anchor *go away* -- `serializeEdge` omits a falsy one, and `anchorPoint`
+ * in edges/FlowEdge.jsx falls back to the fixed handle. Clearing matters as much as setting, because
+ * an anchor left over from where an end used to be attached outvotes the handle it was just moved to.
+ */
+export function anchorStringFor(anchor) {
+  return anchor ? encodeFreeHandle(anchor.side, anchor.t) : undefined
 }
 
 /**
@@ -114,6 +126,22 @@ export function parseFreeHandle(id) {
 const SIDE_BY_POSITION = new Map(SIDES.map((side) => [side.position, side]))
 
 /**
+ * The fixed handle id a free anchor's `side` names -- `'right'` -> `'e'` and so on.
+ *
+ * React Flow resolves an edge end by looking `sourceHandle`/`targetHandle` up in the node's
+ * *registered* handle bounds, and a free anchor's own handle is only ever mounted for the
+ * instant it is being dragged (see ConnectionHandles.jsx) -- a moment later there is nothing
+ * registered under `free:right:0.73`, and React Flow does not fall back to drawing the edge
+ * from *somewhere*, it declines to draw the edge at all. So the id that actually goes into
+ * `sourceHandle`/`targetHandle` has to be one of the four fixed ids that stay registered for
+ * the node's whole lifetime; the free anchor's precise point travels separately, in the edge's
+ * `data` (see `anchorPoint` in edges/FlowEdge.jsx).
+ */
+export function fixedHandleForSide(side) {
+  return SIDE_BY_POSITION.get(side)?.id ?? null
+}
+
+/**
  * Where on a node's border a free anchor sits, in flow coordinates.
  *
  * @param box  `{x, y, width, height}` -- the node's absolute box
@@ -132,6 +160,58 @@ export function pointOnBorder(box, { side, t }) {
     default:
       return { x: x + width * t, y: y + height, position: 'bottom' }
   }
+}
+
+/* --- how close the pointer is ------------------------------------------------ */
+
+/*
+ * Two proximity tests, because "is the pointer near this node" has two useful answers and
+ * they are not the same question.
+ *
+ * `distanceToBox` is about the node as a whole -- how far away is it? That is what a
+ * connection drag asks: a drag crossing the middle of a card is heading for that card, so
+ * its handles have to be showing by then.
+ *
+ * `alongBorder` is about the edge specifically -- is the pointer where a connector would
+ * leave? That is what an idle hover asks. The distinction matters most on a zone, which is
+ * hundreds of pixels of backdrop the pointer crosses on its way to everything else: showing
+ * its four dots because the pointer passed through the middle of Connections is what made
+ * them flicker on and off across the whole region.
+ *
+ * Both take a box and a point in the *same* coordinate space -- flow units, absolute. The
+ * caller converts, because only it knows the zoom.
+ */
+
+/** How far `point` is from `box`. Zero when it is inside. */
+export function distanceToBox(box, point) {
+  const dx = Math.max(box.x - point.x, 0, point.x - (box.x + box.width))
+  const dy = Math.max(box.y - point.y, 0, point.y - (box.y + box.height))
+  return Math.hypot(dx, dy)
+}
+
+/**
+ * Is `point` within `reach` of `box`'s border, from either side of it?
+ *
+ * Deliberately both sides. Approaching a card from outside and sliding along the inside of
+ * its edge are the same gesture to the person doing it, and a test that only counted one of
+ * them would make the handles appear at a different moment depending on which direction the
+ * pointer arrived from.
+ *
+ * The middle of a large box is not near its border, which is the whole point: `inset` is the
+ * distance to the *nearest* edge, so a point in the centre of a 900px zone is 450 from the
+ * border and fails, while every point in a 60px-tall card passes -- which is right, because
+ * on a card that small there is no middle to speak of.
+ */
+export function alongBorder(box, point, reach) {
+  if (distanceToBox(box, point) > reach) return false
+  const local = { x: point.x - box.x, y: point.y - box.y }
+  const inset = Math.min(
+    Math.max(local.x, 0),
+    Math.max(local.y, 0),
+    Math.max(box.width - local.x, 0),
+    Math.max(box.height - local.y, 0),
+  )
+  return inset <= reach
 }
 
 /**

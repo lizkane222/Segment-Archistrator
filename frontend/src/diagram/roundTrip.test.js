@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import { NODE_HEIGHT, NODE_WIDTH, buildLayout } from '../canvas/layout.js'
-import { styleFor } from '../canvas/kinds.js'
+import { styleFor, zoneStyleFor } from '../canvas/kinds.js'
 import { applyBinding, replacementPatch } from '../binding/bindMatch.js'
 import { applyPaletteToNodes, clearPaletteFromNodes, paletteStyles } from '../canvas/palettes.js'
 import { countPlaceholders, graphFingerprint, positionsFromGraph, serializeGraph } from './serialize.js'
@@ -586,8 +586,8 @@ describe('the shipped end-to-end template', () => {
 
   it('is in the fixture at all', () => {
     expect(entry).toBeDefined()
-    expect(entry.nodes).toHaveLength(17)
-    expect(entry.zones).toHaveLength(11)
+    expect(entry.nodes).toHaveLength(18)
+    expect(entry.zones).toHaveLength(12)
   })
 
   it('places every component in a zone the template also declares', () => {
@@ -640,5 +640,153 @@ describe('the shipped end-to-end template', () => {
   it('is not marked dirty by simply being opened', () => {
     const saved = serializeGraph(open(graph))
     expect(graphFingerprint(serializeGraph(open(saved)))).toBe(graphFingerprint(saved))
+  })
+})
+
+/*
+ * Rich labels, through a save and an open.
+ *
+ * The property that matters is not that formatting survives -- `serializeNode` spreads all of
+ * `data`, so it does -- but that a label *without* formatting is byte-identical to how it was
+ * stored before rich labels existed. `graphFingerprint` compares the serialized document, so an
+ * extra key on every node would report every diagram in the database as having unsaved changes
+ * the moment it was opened, with nothing on screen to account for the dot.
+ */
+describe('a formatted label', () => {
+  const graph = (nodes) => ({
+    nodes,
+    edges: [],
+    zones: [{ id: 'connections', label: 'Connections', order: 0 }],
+  })
+  const open = (g) => buildLayout(g, { existingPositions: positionsFromGraph(g) })
+
+  const plain = { id: 'a', kind: 'source', name: 'Website', zone: 'connections', position: { x: 0, y: 0 } }
+  const formatted = {
+    ...plain,
+    id: 'b',
+    name: 'Website JS',
+    nameRich: {
+      blocks: [{ runs: [{ text: 'Website ' }, { text: 'JS', b: true }] }],
+    },
+  }
+
+  it('comes back with its runs intact', () => {
+    const saved = serializeGraph(open(graph([formatted])))
+    expect(saved.nodes[0].nameRich).toEqual(formatted.nameRich)
+    /* And the plain projection alongside it, which is what everything else reads. */
+    expect(saved.nodes[0].name).toBe('Website JS')
+
+    const reloaded = serializeGraph(open(saved))
+    expect(reloaded).toEqual(saved)
+  })
+
+  it('is not marked dirty by being opened', () => {
+    const saved = serializeGraph(open(graph([formatted])))
+    expect(graphFingerprint(serializeGraph(open(saved)))).toBe(graphFingerprint(saved))
+  })
+
+  it('leaves an unformatted label carrying no extra key at all', () => {
+    const saved = serializeGraph(open(graph([plain])))
+    expect('nameRich' in saved.nodes[0]).toBe(false)
+  })
+
+  /* Clearing the formatting -- retyping the name in the inspector -- writes `undefined`, which
+     has to serialize as *absent* rather than as a key holding null. Otherwise undoing an edit
+     leaves the document permanently different from one that never had it. */
+  it('serializes a cleared label identically to one that never had formatting', () => {
+    const cleared = { ...formatted, id: 'a', name: 'Website', nameRich: undefined }
+    const before = serializeGraph(open(graph([plain])))
+    const after = serializeGraph(open(graph([cleared])))
+    expect(graphFingerprint(after)).toBe(graphFingerprint(before))
+    expect(JSON.parse(JSON.stringify(after))).toEqual(JSON.parse(JSON.stringify(before)))
+  })
+
+  it('keeps a zone’s formatted label too', () => {
+    const zoned = {
+      nodes: [],
+      edges: [],
+      zones: [
+        {
+          id: 'connections',
+          label: 'Connections EU',
+          labelRich: { blocks: [{ runs: [{ text: 'Connections ' }, { text: 'EU', i: true }] }] },
+          order: 0,
+          position: { x: 0, y: 0 },
+          width: 400,
+          height: 200,
+        },
+      ],
+    }
+    const saved = serializeGraph(open(zoned))
+    expect(saved.zones[0].labelRich).toEqual(zoned.zones[0].labelRich)
+    expect(serializeGraph(open(saved))).toEqual(saved)
+  })
+})
+
+/*
+ * A divider, through a save and an open.
+ *
+ * A divider is stored as a zone -- see canvas/nodes/ZoneOrFrame.jsx for why -- so what has to be
+ * proved is that the one field distinguishing it survives, and that a zone appearing twice comes
+ * back as two zones with their own children rather than as one that swallowed the other's.
+ */
+describe('a divided canvas', () => {
+  const graph = () => ({
+    nodes: [
+      { id: 'a', kind: 'source', name: 'Web', zone: 'connections', position: { x: 20, y: 20 } },
+      { id: 'b', kind: 'source', name: 'Web again', zone: 'connections~2', position: { x: 40, y: 30 } },
+    ],
+    edges: [],
+    zones: [
+      {
+        id: 'custom:zone:ab12',
+        label: 'Divider',
+        custom: true,
+        frame: { axis: 'cross', splitX: 0.4, splitY: 0.6, labels: [{ text: 'Before' }] },
+        order: 0,
+        position: { x: 0, y: 0 },
+        width: 1600,
+        height: 900,
+      },
+      { id: 'connections', label: 'Connections', order: 1, position: { x: 40, y: 60 }, width: 600, height: 300 },
+      {
+        id: 'connections~2',
+        label: 'Connections (2)',
+        order: 2,
+        position: { x: 700, y: 60 },
+        width: 600,
+        height: 300,
+      },
+    ],
+  })
+  const open = (g) => buildLayout(g, { existingPositions: positionsFromGraph(g) })
+
+  it('keeps the divider’s axis, splits and section titles', () => {
+    const saved = serializeGraph(open(graph()))
+    const divider = saved.zones.find((zone) => zone.id === 'custom:zone:ab12')
+    expect(divider.frame).toEqual(graph().zones[0].frame)
+    expect(divider.custom).toBe(true)
+  })
+
+  it('keeps two copies of one zone apart, each with its own component', () => {
+    const opened = open(graph())
+    expect(opened.nodes.find((node) => node.id === 'a').parentId).toBe('zone-connections')
+    expect(opened.nodes.find((node) => node.id === 'b').parentId).toBe('zone-connections~2')
+
+    const saved = serializeGraph(opened)
+    expect(saved.zones.map((zone) => zone.id)).toContain('connections~2')
+    expect(saved.nodes.find((node) => node.id === 'b').zone).toBe('connections~2')
+  })
+
+  it('comes back byte-identical, and is not marked dirty by being opened', () => {
+    const saved = serializeGraph(open(graph()))
+    const reloaded = serializeGraph(open(saved))
+    expect(reloaded).toEqual(saved)
+    expect(graphFingerprint(reloaded)).toBe(graphFingerprint(saved))
+  })
+
+  it('draws the copy in the product’s own colours', () => {
+    /* Not the custom-zone grey, which says "not Segment" -- a second Connections is Connections. */
+    expect(zoneStyleFor({ id: 'connections~2' })).toEqual(zoneStyleFor({ id: 'connections' }))
   })
 })

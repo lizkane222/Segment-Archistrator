@@ -23,6 +23,7 @@ import {
   matchStyle,
   selectedComponents,
   ungroupNodes,
+  groupSelectionChanges,
   withGroupMates,
 } from './selection.js'
 
@@ -136,17 +137,17 @@ describe('alignNodes', () => {
     expect(alignNodes(nodes, idsOf(nodes), 'diagonal')).toEqual(nodes)
   })
 
-  it('ignores a zone that was selected along with the cards', () => {
-    /* Both halves: the zone must not move, and it must not widen the bounding box either
-       -- a zone in the reference would drag both cards out to its own left edge, moving
-       everything inside it a second time on the way. */
+  it('aligns a zone caught in the selection like any other box', () => {
+    /* A zone that joins the selection is a genuine member now, not a passenger: it widens
+       the bounding box to its own edge, so a card that was already the leftmost of the two
+       cards still has to move once the zone's own further-left edge joins the reference. */
     const nodes = crossZone()
     nodes[0] = { ...nodes[0], selected: true }
-    const leftmost = left(nodes, 'a')
     const after = alignNodes(nodes, idsOf(nodes), 'left')
 
-    expect(after[0].position).toEqual({ x: 0, y: 0 })
-    expect(left(after, 'a')).toBe(leftmost)
+    expect(left(after, 'zone-connections')).toBe(0)
+    expect(left(after, 'a')).toBe(0)
+    expect(left(after, 'b')).toBe(0)
   })
 
   it('aligns to the size the user just chose, not the one the browser last measured', () => {
@@ -301,6 +302,85 @@ describe('withGroupMates', () => {
 })
 
 /*
+ * The change stream a grouped selection produces.
+ *
+ * Written against streams rather than against id lists, because the ordering is the part
+ * that was wrong: React Flow emits a plain click as deselect-everything followed by
+ * select-one, so a rule that produced the right *set* in the wrong *order* still came out
+ * as a selection the user could not see.
+ */
+describe('groupSelectionChanges', () => {
+  const grouped = () => [
+    card('a', 0, 0, { group: 'grp:1' }),
+    card('b', 0, 100, { group: 'grp:1' }),
+    card('c', 0, 200, { group: 'grp:1' }),
+    card('loner', 0, 300),
+  ]
+
+  const select = (id) => ({ id, type: 'select', selected: true })
+  const deselect = (id) => ({ id, type: 'select', selected: false })
+
+  it('adds the rest of the group when one member is selected', () => {
+    expect(groupSelectionChanges(grouped(), [select('a')])).toEqual([select('b'), select('c')])
+  })
+
+  /* The half that was missing. Without it, releasing one member left the other two
+     selected with no ring anywhere to say so, and the next drag moved all three. */
+  it('releases the rest of the group when one member is deselected', () => {
+    expect(groupSelectionChanges(grouped(), [deselect('a')])).toEqual([
+      deselect('b'),
+      deselect('c'),
+    ])
+  })
+
+  /*
+   * A plain click on a group member: React Flow deselects everything, then selects the one
+   * clicked. Both halves name mates, and they disagree -- so the result has to end with the
+   * group selected, because that is what the user just did.
+   */
+  it('resolves a click, which deselects everything and then selects one', () => {
+    const changes = [deselect('a'), deselect('b'), deselect('c'), deselect('loner'), select('a')]
+    const extra = groupSelectionChanges(grouped(), changes)
+
+    /* Nothing about `b` and `c` before the selects: they are already being deselected by
+       the stream itself, so repeating it would be noise. */
+    expect(extra).toEqual([select('b'), select('c')])
+    /* And the appended selects land after the stream's own deselects. */
+    expect([...changes, ...extra].filter((change) => change.id === 'b').at(-1)).toEqual(select('b'))
+  })
+
+  it('says nothing about a selection with no groups in it', () => {
+    expect(groupSelectionChanges(grouped(), [select('loner')])).toEqual([])
+  })
+
+  it('says nothing when the whole group is already named', () => {
+    expect(groupSelectionChanges(grouped(), [select('a'), select('b'), select('c')])).toEqual([])
+  })
+
+  it('ignores changes that are not about selection', () => {
+    const changes = [
+      { id: 'a', type: 'position', position: { x: 10, y: 10 } },
+      { id: 'a', type: 'dimensions', dimensions: { width: 10, height: 10 } },
+    ]
+    expect(groupSelectionChanges(grouped(), changes)).toEqual([])
+  })
+
+  /* A lasso that caught one member of each of two groups: both groups come along whole. */
+  it('handles several groups in one stream', () => {
+    const nodes = [
+      card('a', 0, 0, { group: 'grp:1' }),
+      card('b', 0, 100, { group: 'grp:1' }),
+      card('c', 0, 200, { group: 'grp:2' }),
+      card('d', 0, 300, { group: 'grp:2' }),
+    ]
+    expect(groupSelectionChanges(nodes, [select('a'), select('c')])).toEqual([
+      select('b'),
+      select('d'),
+    ])
+  })
+})
+
+/*
  * Distribute.
  *
  * Every case here uses cards of *different* widths, because equal-gap and equal-centre
@@ -392,10 +472,18 @@ describe('distributeNodes', () => {
     expect(left(out, 'b') - (left(out, 'a') + 100)).toBe(left(out, 'c') - (left(out, 'b') + 100))
   })
 
-  it('ignores a zone caught in the selection', () => {
-    const nodes = [zone('zone-connections', 0, 0), ...row()]
-    const out = distributeNodes(nodes, ['zone-connections', 'a', 'b', 'c'], 'horizontal')
-    expect(out.find((node) => node.id === 'zone-connections').position).toEqual({ x: 0, y: 0 })
+  it('distributes a zone caught in the selection like any other box', () => {
+    /* Same arithmetic as 'puts equal gaps between the boxes' -- widths 100, 40, 100 -- with
+       the zone standing in for the first card, to show it plays exactly that role. */
+    const nodes = [
+      { ...zone('zone-connections', 0, 0), data: { id: 'connections', size: { width: 100, height: 60 } } },
+      card('a', 150, 0, { size: { width: 40, height: 60 } }),
+      card('b', 400, 0, { size: { width: 100, height: 60 } }),
+    ]
+    const out = distributeNodes(nodes, ['zone-connections', 'a', 'b'], 'horizontal')
+    expect(left(out, 'zone-connections')).toBe(0)
+    expect(left(out, 'a')).toBe(230)
+    expect(left(out, 'b')).toBe(400)
   })
 })
 

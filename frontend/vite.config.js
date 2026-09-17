@@ -13,6 +13,14 @@ import tailwindcss from '@tailwindcss/vite'
 //    httpOnly and SameSite=Lax, so it only travels if the browser believes the
 //    API is same-origin. Pointing fetch() at http://localhost:8000 directly
 //    would silently drop it and every request would look logged out.
+//
+// 3. The proxy target's port is a variable because Django is not always on 8000 --
+//    `runserver 8010` is a normal thing to do, and with the port hardcoded the dev
+//    server proxies to nothing, every request 502s, and the only way to see a
+//    frontend change is a full `npm run build`. Set API_PORT to match whatever
+//    runserver was given.
+const API_PORT = process.env.API_PORT ?? '8000'
+
 export default defineConfig(({ command }) => ({
   plugins: [react(), tailwindcss()],
   base: command === 'build' ? '/static/' : '/',
@@ -23,7 +31,7 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 5177,
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8000' },
+      '/api': { target: `http://127.0.0.1:${API_PORT}` },
     },
   },
 }))

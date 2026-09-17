@@ -61,6 +61,38 @@ class WorkspacePrincipal:
         """False for a session that was never connected to a real workspace."""
         return self.session.has_token
 
+    # --- who, as opposed to which workspace ---------------------------------
+    #
+    # An account is the durable half of identity: it outlives the cookie, which is
+    # what makes a diagram reachable after the cookie is lost. The anonymous scope is
+    # the other half, and it does not -- it is only as good as the cookie naming it.
+
+    @property
+    def account(self):
+        """The signed-in person, or None. Anonymous use stays supported."""
+        return self.session.account
+
+    @property
+    def account_id(self):
+        """Cheaper than `account` -- no query. What `visible_to()` filters on."""
+        return self.session.account_id
+
+    @property
+    def anon_scope(self) -> str:
+        return self.session.anon_scope
+
+    @property
+    def connected_workspace_ids(self) -> list[str]:
+        """
+        Every workspace this caller holds a credential for.
+
+        One element today, because a session holds one credential. It is a *list* now
+        so that the diagram sharing rule is written against the general case from the
+        start -- when a session can hold several connections, this is the only body
+        that changes and the authorization rule is untouched.
+        """
+        return [self.session.workspace_id] if self.session.has_token else []
+
     @property
     def workspace_id(self) -> str:
         return self.session.workspace_id
@@ -128,4 +160,9 @@ class WorkspaceSessionAuthentication(authentication.BaseAuthentication):
             enforce_csrf(request)
 
         session.touch()
+        # Ask the response layer to re-issue the cookie. The server-side clock slides on
+        # every request via touch(), but `max_age` was fixed when the cookie was first
+        # written -- so an active user was signed out at 12h from *issue* regardless of
+        # having just used the app. See `SlidingSessionCookieMiddleware`.
+        request._workspace_session_to_refresh = session
         return (WorkspacePrincipal(session=session), None)

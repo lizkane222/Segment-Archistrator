@@ -108,6 +108,20 @@ query SegmentBuilderWorkspaces {
 }
 """
 
+# The singular lookup, reusing the `workspace(slug: $slug)` field already proven by
+# `GRAPH_QUERY` below -- just the four scalar fields, since this is only ever used to
+# resolve one slug typed by hand, not to read a workspace's graph.
+WORKSPACE_BY_SLUG_QUERY = """
+query SegmentBuilderWorkspaceBySlug($slug: Slug!) {
+  workspace(slug: $slug) {
+    id
+    slug
+    name
+    region
+  }
+}
+"""
+
 _turn_lock = threading.Lock()
 _last_request_at = 0.0
 
@@ -274,6 +288,26 @@ class SegmentGraphQLClient:
                 "from a browser that is logged in to the workspace you want to read."
             )
         return workspaces
+
+    def get_workspace_by_slug(self, slug: str) -> dict:
+        """
+        One workspace, by slug -- the second step of the `segment-operator` slug-search
+        gateway (see `_OPERATOR_SLUG` in `apps.auth_workspace.views`). That entry's own
+        `workspaces` row is not a connectable workspace; typing the exact slug of a real
+        one is what resolves it.
+        """
+        data = self.query(
+            WORKSPACE_BY_SLUG_QUERY, {"slug": slug}, operation="segment_builder_workspace_by_slug"
+        )
+        workspace = data.get("workspace")
+        if not workspace or not workspace.get("id"):
+            raise SegmentAuthError(f"That auth_token cannot see a workspace with slug “{slug}”.")
+        return {
+            "id": workspace["id"],
+            "slug": workspace.get("slug") or slug,
+            "name": workspace.get("name") or "",
+            "region": (workspace.get("region") or "").lower(),
+        }
 
 
 # --- reading a workspace's graph ---------------------------------------------

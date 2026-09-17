@@ -7,21 +7,28 @@
  *
  * memo() is load-bearing: React Flow re-renders every node on any store change,
  * including each frame of a drag, so an unmemoized renderer makes large diagrams
- * stutter. Hover state for the anchor is local for the same reason -- lifting it
- * would put a store write on every mouse move across the canvas.
+ * stutter. For the same reason hovering publishes into an external store rather than
+ * into React state -- see canvas/anchors.js -- so the *other* 299 cards do not
+ * re-render to find out the pointer was not on them.
+ *
+ * Nothing about a component's note is drawn here. Notes live in one lane above the
+ * canvas (simulation/NotesLane.jsx); hovering a card is what lights its note there.
  */
 
 import { memo, useMemo, useState } from 'react'
-import { NodeResizer } from '@xyflow/react'
+import { NodeResizer, useNodesData } from '@xyflow/react'
 import { ChevronDown, ChevronRight, Link2, Lock, TriangleAlert } from 'lucide-react'
 
-import AnchorTooltip from './AnchorTooltip.jsx'
 import ConnectionHandles from './ConnectionHandles.jsx'
 import DataGraphBlock from './DataGraphBlock.jsx'
 import IdentityRuleTable from './IdentityRuleTable.jsx'
+import RichEditor from './RichEditor.jsx'
+import RichLabel from './RichLabel.jsx'
 import SqlTableRows from './SqlTableRows.jsx'
 import { InternalSections } from './GroupStackNode.jsx'
 import { useChrome } from '../chrome.js'
+import { labelLayout } from '../labelStyle.js'
+import { hasFormatting } from '../richText.js'
 import {
   MAX_AUTO_NODE_WIDTH,
   MIN_NODE_HEIGHT,
@@ -30,11 +37,12 @@ import {
   NODE_WIDTH,
   componentSize,
 } from '../layout.js'
-import { SHAPES, iconFor, outlineFor, styleFor } from '../kinds.js'
+import { SHAPES, borderColorFor, iconFor, outlineFor, styleFor } from '../kinds.js'
 import { visibleCardFields } from '../../inspector/cardFields.js'
+import { profileIdentity } from '../../inspector/profileSnapshot.js'
 import { useAnchorFocused, useAnchors } from '../anchors.js'
+import { useGroupCollapse } from '../groupCollapse.js'
 import { useFlashing } from '../flash.js'
-import { describeKind, describeStep } from '../../simulation/narration.js'
 
 /*
  * Which printed fields ride on the card's existing meta line rather than getting a row of their own.
@@ -64,42 +72,40 @@ const LABELLED_FIELDS = new Set([
   'categories',
 ])
 
-function SegmentNode({ id, data, selected, dragging }) {
+function SegmentNode({ id, data, selected, dragging, parentId }) {
   const style = styleFor(data.kind, data.style)
   const outline = outlineFor(data)
   const Icon = iconFor(data.kind)
   const shapeClass = SHAPES[style.shape] ?? SHAPES.rounded
 
+  /* The containing zone's live data, read by id rather than copied onto this node --
+     a zone recoloured after this card was dropped into it has to be reflected here
+     without anything writing to the card itself. `undefined` (no parent) resolves to
+     the kind's own border in `borderColorFor`. */
+  const zoneData = useNodesData(parentId)?.data
+  const border = borderColorFor(data, zoneData)
+
   const hasChildren = (data.children?.length ?? 0) > 0
   /* Both halves of the condition, and the second is the load-bearing one: see chrome.js.
      `bound === false` alone is true of every card on a canvas with no workspace behind it. */
-  const { showFlags, rename, walkthroughActive } = useChrome()
+  const { showFlags, rename, updateData, walkthroughActive } = useChrome()
   const isPlaceholder = data.bound === false && showFlags
   const locked = Boolean(data.locked)
 
-  const { topology, showAll, focus } = useAnchors()
-  const [hovered, setHovered] = useState(false)
-  const anchor = useMemo(() => describeKind(data, { topology }), [data, topology])
-  const step = useMemo(() => describeStep(data.anchorStep, data), [data])
+  const { focus } = useAnchors()
 
-  /* True when this component's note in the gutter is the one under the cursor, or the one
-     the user clicked to hold open -- the other half of the request that moved the notes out
-     there. A boolean rather than the focused id, so the other components on the canvas do
-     not re-render to find out it was not them. See canvas/anchors.js. */
+  /* For `InternalSections` below, which asks the topology which buckets a kind has.
+     From the same context `GroupStackNode` reads it out of, rather than a new prop:
+     React Flow constructs node components itself, so a renderer cannot be handed one. */
+  const { topology } = useGroupCollapse()
+
+  /* True when this component's card in the notes lane is the one under the cursor -- or when the
+     cursor is on the card here, since both ends write to the same store. A boolean rather than the
+     focused id, so the other 299 components do not re-render to find out it was not them. See
+     canvas/anchors.js. */
   const noted = useAnchorFocused(id)
   /* Pulses when a message names this component -- see canvas/flash.js. */
   const flashing = useFlashing(id)
-
-  /*
-   * The playhead wins over everything -- an anchor pinned open by the walkthrough must not
-   * vanish because the cursor moved on. After that: while the gutter is showing, it owns
-   * the architecture note, and drawing a second copy of the same card over the component
-   * would put back exactly the overlap the gutter exists to remove.
-   *
-   * Suppressed mid-drag: a tooltip that follows the node it is describing across the
-   * canvas hides whatever the node is being dragged towards.
-   */
-  const anchorVisible = data.anchor === 'step' || (!showAll && hovered && !dragging)
 
   /*
    * Renaming in place.
@@ -113,28 +119,48 @@ function SegmentNode({ id, data, selected, dragging }) {
    * kind of loss that makes an inline field not worth using. Escape is the way to abandon
    * one, which is the only gesture that means it.
    */
-  const [editing, setEditing] = useState(null)
+  /* A boolean rather than the draft text: while a rich edit is open the draft lives in the DOM
+     (see RichEditor.jsx), and a copy here would be a second answer to what the label says. */
+  const [editing, setEditing] = useState(false)
 
-  const commit = () => {
-    const next = editing?.trim()
-    setEditing(null)
+  /* Where the name sits and how big it is, from the text toolbar's settings. Left-aligned by
+     default, unlike a shape's centred label: a name is read from the left like any other list. */
+  const label = labelLayout(data.style, { align: 'left' })
+
+  /*
+   * A finished rename, plain and formatted together.
+   *
+   * `name` stays the authoritative field -- the inspector, search, the minimap, exports and the
+   * server all read it -- and `nameRich` is stored only when there is formatting to keep, so a
+   * card whose name has merely been retyped serializes exactly as it did before rich labels
+   * existed. See `hasFormatting`.
+   */
+  const commit = ({ rich, text }) => {
+    setEditing(false)
+    const next = text.trim()
     /* Unchanged, or emptied: neither is a rename. A blank name would leave a card with no
        label and nothing to double-click to get the field back. */
-    if (!next || next === data.name) return
-    rename?.(id, next)
+    if (!next) return
+    const formatted = hasFormatting(rich) ? rich : undefined
+    if (next === data.name && !formatted && !data.nameRich) return
+    if (updateData) updateData(id, { name: next, nameRich: formatted })
+    else rename?.(id, next)
   }
 
-  /* Published only while the gutter is up, because that is the only thing listening.
-     Cleared by id rather than unconditionally -- the pointer can move from a component
-     straight onto its own note, and the mouseleave here arrives after that mouseenter. */
-  const enter = () => {
-    setHovered(true)
-    if (showAll) focus.set(id)
-  }
-  const leave = () => {
-    setHovered(false)
-    focus.clear(id)
-  }
+  /*
+   * Hovering a component lights up its card in the notes lane, and scrolls the lane to it.
+   *
+   * Published unconditionally now, where it used to be gated on the gutter being open, because the
+   * lane is always there and always listening. Nothing is drawn over the component itself -- a card
+   * pinned to a component covered the components either side of it, which is what moved the notes off
+   * the drawing in the first place.
+   *
+   * Cleared by id rather than unconditionally: the pointer can move from a component straight onto its
+   * own card, and the mouseleave here arrives *after* that mouseenter -- so an unconditional clear
+   * would blank a highlight that had already moved on.
+   */
+  const enter = () => focus.set(id)
+  const leave = () => focus.clear(id)
 
   /*
    * Scenarios that have touched this node, in their own colours.
@@ -191,8 +217,10 @@ function SegmentNode({ id, data, selected, dragging }) {
         isVisible={selected && !locked}
         minWidth={MIN_NODE_WIDTH}
         minHeight={MIN_NODE_HEIGHT}
-        color={style.border}
-        handleStyle={{ width: 8, height: 8, borderRadius: 2 }}
+        color={border}
+        /* Wider than the connection dot at the same midpoints -- see ConnectionHandles -- so
+           the resize target is a generous ring around the dot rather than a sliver outside it. */
+        handleStyle={{ width: 16, height: 16, borderRadius: 3 }}
         /*
          * The edge lines are visible and draggable now, which is what makes width-only and
          * height-only resizing possible -- the four corner handles can only ever change both at
@@ -205,7 +233,11 @@ function SegmentNode({ id, data, selected, dragging }) {
       />
 
       <div
-        className={`group relative flex items-center gap-2 border px-3 py-2 transition-shadow ${shapeClass} ${
+        /* `items-*` from the label's own vertical setting rather than fixed at centre, so the
+           toolbar's three vertical-alignment buttons do something on a card as well as in a
+           shape -- on a card someone has dragged tall, "text to the top" is the difference
+           between a title and a label floating in the middle of a box. */
+        className={`group relative flex gap-2 border px-3 py-2 transition-shadow ${label.itemsClass} ${shapeClass} ${
           selected ? 'shadow-lg ring-2 ring-twilio-blue ring-offset-1' : 'shadow-sm'
         } ${flashing ? 'flash-border' : ''} ${
           here ? 'walkthrough-here' : trail ? 'walkthrough-trail' : aside ? 'walkthrough-aside' : ''
@@ -237,7 +269,7 @@ function SegmentNode({ id, data, selected, dragging }) {
           minHeight: chosen.height ?? NODE_HEIGHT,
           background: style.bg,
           color: style.text,
-          borderColor: here?.color ?? glowing?.[0]?.color ?? style.border,
+          borderColor: here?.color ?? glowing?.[0]?.color ?? border,
           /*
            * The halo and the ring are CSS classes now, not inline shadows, because a keyframe
            * animation cannot be expressed inline -- so what is passed in is the *colour* it should
@@ -270,10 +302,24 @@ function SegmentNode({ id, data, selected, dragging }) {
         data-kind={data.kind}
         data-node-id={id}
       >
-        <AnchorTooltip visible={anchorVisible} name={data.name} anchor={anchor} step={step} />
+        {/* Nothing is drawn over the card. The note lives in the lane above the canvas, and hovering
+            here is what lights it -- see `enter` above. */}
 
-        {/* Faint until hovered: four dots on a 200px card is a lot of furniture. */}
-        <ConnectionHandles border={style.border} dim />
+        {selected && (
+          /* A wash over `style.bg`, not a swap of it -- a ring alone is easy to miss against a
+             busy diagram, but the card's own colour means something (it's per-kind) and a
+             selected component still has to read as that kind. A separate layer rather than a
+             second box-shadow: the card's box-shadow is already spoken for by the ring and by a
+             scenario's arrival glow, and whichever was written last into one shared property
+             would silently win -- `rounded-[inherit]` so the wash clips to the same corners as
+             the card without needing to know its radius. */
+          <div className="pointer-events-none absolute inset-0 rounded-[inherit] bg-twilio-blue/10" />
+        )}
+
+        {/* Invisible until the pointer is at the card's border, or a connection drag comes
+            near it -- four dots on a 200px card is a lot of furniture to carry the rest of
+            the time. See ConnectionHandles.jsx. */}
+        <ConnectionHandles border={border} />
 
         <Icon size={16} aria-hidden="true" className="shrink-0 opacity-80" />
 
@@ -282,26 +328,24 @@ function SegmentNode({ id, data, selected, dragging }) {
             would cut all four off to contain text that only overflows on a hand-shrunk
             node. */}
         <div className="min-w-0 flex-1 overflow-hidden">
-          {editing !== null ? (
-            /* `nodrag`/`nopan` so a drag inside the field selects text rather than hauling
-               the card, and `stopPropagation` on the pointer so React Flow does not treat
-               the click that places the caret as a click on the node -- which would
-               re-select and, on a group member, re-select every mate. */
-            <input
-              autoFocus
-              value={editing}
-              onChange={(event) => setEditing(event.target.value)}
-              onBlur={commit}
-              onFocus={(event) => event.target.select()}
-              onPointerDown={(event) => event.stopPropagation()}
-              onKeyDown={(event) => {
-                /* Contained here, all of it. Without this Backspace in the field reaches
-                   React Flow's `deleteKeyCode` and deletes the component being renamed. */
-                event.stopPropagation()
-                if (event.key === 'Enter') commit()
-                if (event.key === 'Escape') setEditing(null)
-              }}
-              className="nodrag nopan w-full rounded border border-twilio-blue bg-white px-1 py-0 text-[13px] font-semibold leading-tight text-twilio-navy outline-none"
+          {editing ? (
+            <RichEditor
+              value={data.nameRich}
+              text={data.name ?? ''}
+              sessionKey={`node:${id}`}
+              nodeId={id}
+              /*
+               * Single-line, unlike a shape's label: Enter commits, which is what the `<input>`
+               * this replaced did. A component's name is a name -- it goes in the inspector's
+               * field, in search, in the minimap and in the server's messages -- and a newline in
+               * one is a card that no longer fits its own box. Formatting a word inside it still
+               * works, which is what the request asked for.
+               */
+              align={label.align}
+              onCommit={commit}
+              onCancel={() => setEditing(false)}
+              className="w-full rounded border border-twilio-blue bg-white px-1 py-0 text-[13px] font-semibold leading-tight text-twilio-navy"
+              style={label.textStyle}
             />
           ) : (
             <div
@@ -319,12 +363,12 @@ function SegmentNode({ id, data, selected, dragging }) {
                  inspector's field stays the way to edit a name without hunting for the card,
                  and both write through the same `setNodes`. */
               onDoubleClick={(event) => {
-                if (!rename) return
+                if (!updateData && !rename) return
                 event.stopPropagation()
-                setEditing(data.name ?? '')
+                setEditing(true)
               }}
             >
-              {data.name}
+              <RichLabel value={data.nameRich} text={data.name} align={label.align} style={label.textStyle} />
             </div>
           )}
           {/*
@@ -379,6 +423,22 @@ function SegmentNode({ id, data, selected, dragging }) {
                 {entry.value}
               </div>
             ))}
+          {/* Which real profile this is, so two Profile nodes named "Profile" don't look
+              identical on the canvas. Read straight off the pasted, session-only
+              snapshot -- never written to `data.name` -- so it disappears on reload
+              exactly when the snapshot does. See inspector/profileSnapshot.js's
+              `profileIdentity`. */}
+          {data.kind === 'profile' &&
+            (() => {
+              const identity = profileIdentity(data.profileSnapshot)
+              return (
+                identity && (
+                  <div className="mt-1 truncate text-[10px] font-medium leading-snug text-twilio-blue">
+                    {identity.label} · {identity.value}
+                  </div>
+                )
+              )
+            })()}
           {/* The Identity Resolver's buckets and a profile's identifiers/traits/events.
               Renders nothing for a kind that has none, which is most of them. */}
           <InternalSections data={data} topology={topology} />

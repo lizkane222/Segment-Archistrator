@@ -70,8 +70,12 @@ def _zone_label(zone_id: str, graph: dict) -> str:
     for zone in graph.get("zones") or []:
         if isinstance(zone, dict) and zone.get("id") == zone_id and zone.get("label"):
             return zone["label"]
+    # By product, so a second copy of a zone on a divided canvas is named after what it is
+    # rather than by its raw `connections~2` id. A copy carries its own numbered label in
+    # the document, so the loop above usually answers first; this is the fallback.
+    product = topology.zone_product(zone_id)
     for zone in topology.ZONES:
-        if zone["id"] == zone_id:
+        if zone["id"] == product:
             return zone["label"]
     return zone_id
 
@@ -104,7 +108,7 @@ def placement_notes(graph: dict) -> list[dict]:
         # deliberate place to put something. The Segment backdrop says "inside
         # Segment" and does not claim to say which product owns it, which is the only
         # honest answer for a component that belongs to two.
-        if zone in topology.CONTAINER_ZONES:
+        if topology.zone_product(zone) in topology.CONTAINER_ZONES:
             continue
         if kind not in topology.KINDS or not zone or zone in custom_zones:
             continue

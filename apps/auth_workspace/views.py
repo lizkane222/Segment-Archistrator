@@ -17,17 +17,60 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts import google
+from apps.accounts.serializers import AccountSerializer
 from apps.diagrams.models import Diagram
 from apps.segmentapi.client import SegmentClient
 from apps.segmentapi.exceptions import SegmentAuthError, SegmentError
 from apps.segmentapi.graphql import SegmentGraphQLClient
 
 from .authentication import WorkspacePrincipal
-from .models import WorkspaceSession
-from .permissions import AllowAny, HasWorkspaceSession
+from .models import OperatorWorkspaceBookmark, WorkspaceSession
+from .permissions import AllowAny, HasSession
 from .serializers import StartSessionSerializer, WorkspaceSerializer
 
 logger = logging.getLogger(__name__)
+
+# Segment's own internal tooling workspaces. These carry no signal for anyone
+# diagramming a customer's architecture and must never appear in the picker, no
+# matter what the token can see -- unconditionally, unlike `_OPERATOR_SLUG` below.
+_HIDDEN_GRAPHQL_SLUGS = {"segment-admin", "segment-engineering", "segment"}
+
+# Segment's operator tooling workspace. Unlike the three above, it is shown in the
+# list like any other workspace -- but clicking it does not connect to it. It has no
+# fixed set of customer workspaces of its own; instead it is a gateway that asks for
+# the exact slug of the workspace actually wanted, so that a token which can reach
+# every customer via the operator tool does not get to list them all.
+_OPERATOR_SLUG = "segment-operator"
+
+
+def session_payload(session):
+    """
+    What "who am I" looks like on the wire, built in exactly one place.
+
+    Every endpoint that hands the browser a session answers with this shape -- the boot
+    read, minting an anonymous scope, and logging out. It used to be assembled inline in
+    each, and they drifted: `POST /api/session/anonymous` replied without `hasSession`, so
+    the SPA read a session it had just been given as no session at all and the sign-in
+    button disappeared.
+
+    `session` may be None, meaning no usable cookie.
+    """
+    connected = bool(session and session.has_token)
+    account = session.account if session else None
+    return {
+        # The field the client branches on. `connected` and `anonymous` are descriptive
+        # and can now both be false at once -- someone signed in who has not connected a
+        # workspace -- so neither of them can answer "does a session exist".
+        "hasSession": session is not None,
+        "account": AccountSerializer(account).data if account else None,
+        "workspace": WorkspaceSerializer(session).data if connected else None,
+        "connected": connected,
+        "anonymous": bool(session) and not connected,
+        # So the header does not draw a sign-in button on a deployment that has no Google
+        # client configured and could not honour the click.
+        "auth": {"google": google.is_configured()},
+    }
 
 
 def set_session_cookie(response, session):
@@ -58,27 +101,18 @@ class SessionView(APIView):
     def get_permissions(self):
         if self.request.method in ("GET", "POST"):
             return [AllowAny()]
-        return [HasWorkspaceSession()]
+        # HasSession, not HasWorkspaceSession. The stricter class additionally requires
+        # a credential that can read the Public API, which meant a tokenless scope and
+        # an app-session (auth_token) connection could not be disconnected at all -- a
+        # 403 on the one verb whose whole job is to let go of a session.
+        return [HasSession()]
 
     def get(self, request):
-        if request.user is None or not getattr(request.user, "is_authenticated", False):
-            return Response(
-                {"workspace": None, "connected": False, "anonymous": False},
-                status=status.HTTP_200_OK,
-            )
-        # Three states, not two: no cookie at all, a cookie for a tokenless scope,
-        # and a connected workspace. The SPA needs the middle one distinguishable
-        # so it knows a scope already exists and does not mint a second one on
-        # every reload, orphaning whatever the first one saved.
-        connected = request.user.has_token
-        return Response(
-            {
-                "workspace": WorkspaceSerializer(request.user.session).data if connected else None,
-                "connected": connected,
-                "anonymous": not connected,
-            },
-            status=status.HTTP_200_OK,
+        authenticated = request.user is not None and getattr(
+            request.user, "is_authenticated", False
         )
+        session = request.user.session if authenticated else None
+        return Response(session_payload(session), status=status.HTTP_200_OK)
 
     def post(self, request):
         serializer = StartSessionSerializer(data=request.data)
@@ -87,13 +121,46 @@ class SessionView(APIView):
         region = serializer.validated_data["region"]
         credential = serializer.validated_data["credential"]
         chosen = (serializer.validated_data.get("workspace_id") or "").strip()
+        chosen_slug = (serializer.validated_data.get("workspace_slug") or "").strip()
+
+        # Read the outgoing session before it is replaced. Holding this cookie is
+        # the only proof of ownership over an anonymous scope, so the claim has to
+        # be decided here, on this request, and never from anything the client says.
+        # Hoisted above the credential branch: the GraphQL path needs to know the
+        # account too, both to gate on its email and to merge/save its bookmarks.
+        outgoing = request.user if isinstance(request.user, WorkspacePrincipal) else None
+        anonymous_scope = outgoing.anon_scope if outgoing is not None else None
+        # Carried onto the new row, so signing in later can still claim what was drawn
+        # before either step happened. Connecting a credential is about the *subject* of
+        # a diagram now, not about who owns it, so the scope must survive.
+        carried_account = outgoing.account if outgoing is not None else None
 
         # Two ways in, and the app has no preference between them -- the caller says which it
         # is bringing. What differs is only how the workspace is derived: a Public API token
         # belongs to one workspace and `GET /` names it; an auth_token is a person, so the
         # workspace is a choice that may need asking about first.
         if credential == WorkspaceSession.CREDENTIAL_GRAPHQL:
-            outcome = self._workspace_from_graphql(token, region=region, chosen=chosen)
+            # A person's `auth_token` is their whole login session, not a scoped credential --
+            # the frontend hides this tab from anyone but a signed-in `@twilio.com` account, and
+            # this repeats the check server-side since the tab being hidden is not the same
+            # thing as the API refusing it.
+            if not (carried_account and carried_account.email.endswith("@twilio.com")):
+                return Response(
+                    {
+                        "error": {
+                            "code": "graphql_not_allowed",
+                            "message": "App session connections are limited to Twilio accounts.",
+                        }
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            outcome = self._workspace_from_graphql(
+                token,
+                region=region,
+                chosen=chosen,
+                chosen_slug=chosen_slug,
+                account=carried_account,
+            )
             if isinstance(outcome, Response):
                 return outcome
             workspace = outcome
@@ -108,30 +175,30 @@ class SessionView(APIView):
                 return outcome
             workspace = outcome
 
-        # Read the outgoing session before it is replaced. Holding this cookie is
-        # the only proof of ownership over an anonymous scope, so the claim has to
-        # be decided here, on this request, and never from anything the client says.
-        outgoing = request.user if isinstance(request.user, WorkspacePrincipal) else None
-        anonymous_scope = (
-            outgoing.workspace_id if outgoing is not None and not outgoing.has_token else None
-        )
-
         with transaction.atomic():
             session = WorkspaceSession.start(
                 token=token,
                 workspace=workspace,
                 region=region,
                 credential_kind=credential,
+                account=carried_account,
+                anon_scope=anonymous_scope or "",
             )
             claimed = 0
             if anonymous_scope:
-                claimed = Diagram.objects.reassign_workspace(
-                    from_id=anonymous_scope, to_id=session.workspace_id
-                )
-                # Drop the row too. Its scope is now empty and unreachable -- the
-                # cookie naming it is about to be overwritten -- so leaving it
-                # behind would only accumulate dead sessions.
-                WorkspaceSession.objects.filter(workspace_id=anonymous_scope).delete()
+                # Retag, not reassign: what changes is which workspace these diagrams
+                # are *about*. Who may see them is unchanged -- they stay under the same
+                # anonymous scope, which the new row carries -- because connecting a
+                # credential says nothing about who someone is.
+                claimed = Diagram.objects.filter(
+                    anon_scope=anonymous_scope, workspace_id=""
+                ).update(workspace_id=session.workspace_id)
+                # Drop any other row naming this scope. The cookie about to be
+                # overwritten pointed at one of them, and leaving the rest behind would
+                # only accumulate dead sessions.
+                WorkspaceSession.objects.filter(anon_scope=anonymous_scope).exclude(
+                    pk=session.pk
+                ).delete()
 
         logger.info(
             "Started %s session for workspace %s (%s), claimed %d diagram(s)",
@@ -179,10 +246,10 @@ class SessionView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-    def _workspace_from_graphql(self, token, *, region, chosen):
+    def _workspace_from_graphql(self, token, *, region, chosen, chosen_slug, account):
         client = SegmentGraphQLClient(token, region=region)
         try:
-            workspaces = client.list_workspaces()
+            raw = client.list_workspaces()
         except SegmentAuthError as err:
             logger.info("Rejected a Segment auth_token for region=%s", region)
             return Response(
@@ -198,8 +265,82 @@ class SessionView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        # Segment's own tooling workspaces carry no signal for diagramming a customer's
+        # architecture and are never shown, no matter what the token can see.
+        # `segment-operator` is the one exception -- it stays, but only as a gateway (below).
+        visible = [entry for entry in raw if entry["slug"] not in _HIDDEN_GRAPHQL_SLUGS]
+        raw_ids = {entry["id"] for entry in raw}
+
+        # This account's previously-resolved operator slugs, folded into the list so they
+        # do not have to be retyped on every later connect. Skipped for an anonymous caller:
+        # there is no account to save them under, so a resolved slug is good for this attempt
+        # only -- see the module docstring on `OperatorWorkspaceBookmark`.
+        bookmarks = (
+            OperatorWorkspaceBookmark.objects.filter(account=account) if account else []
+        )
+        merged = list(visible)
+        bookmark_ids = set()
+        for bookmark in bookmarks:
+            if bookmark.workspace_id in raw_ids:
+                continue
+            merged.append(
+                {
+                    "id": bookmark.workspace_id,
+                    "slug": bookmark.slug,
+                    "name": bookmark.workspace_name,
+                    "region": bookmark.region,
+                }
+            )
+            bookmark_ids.add(bookmark.workspace_id)
+
+        def sorted_list():
+            return sorted(merged, key=lambda entry: entry["name"].lower())
+
+        if chosen_slug:
+            # The second step of the `segment-operator` gateway: resolve the exact slug typed,
+            # rather than the id of the gateway entry itself.
+            try:
+                resolved = client.get_workspace_by_slug(chosen_slug)
+            except SegmentAuthError as err:
+                return Response(
+                    {"error": {"code": "workspace_not_visible", "message": str(err)}},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            except SegmentError as err:
+                logger.info("Segment GraphQL gateway error while resolving a slug: %s", err)
+                return Response(
+                    {"error": {"code": "graphql_error", "message": str(err)}},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            if account:
+                OperatorWorkspaceBookmark.objects.update_or_create(
+                    account=account,
+                    slug=resolved["slug"],
+                    defaults={
+                        "workspace_id": resolved["id"],
+                        "workspace_name": resolved["name"],
+                        "region": resolved["region"],
+                    },
+                )
+            if resolved["id"] not in {entry["id"] for entry in merged}:
+                merged.append(resolved)
+            # Re-present the choice rather than connecting outright -- the user asked to add
+            # this workspace to their list, and picking it is still a separate, deliberate click.
+            return Response(
+                {"needsChoice": True, "workspaces": sorted_list()}, status=status.HTTP_200_OK
+            )
+
         if chosen:
-            match = next((entry for entry in workspaces if entry["id"] == chosen), None)
+            operator_entry = next(
+                (entry for entry in merged if entry["slug"] == _OPERATOR_SLUG), None
+            )
+            if operator_entry is not None and operator_entry["id"] == chosen:
+                # Not a workspace to connect to -- a prompt to type the real one.
+                return Response(
+                    {"needsSlug": True, "workspaces": sorted_list()}, status=status.HTTP_200_OK
+                )
+
+            match = next((entry for entry in merged if entry["id"] == chosen), None)
             if match is None:
                 # Deliberately says how many it *can* see rather than listing them: the client
                 # has the list already (it asked, got the choice, and sent one back), and a
@@ -210,27 +351,44 @@ class SessionView(APIView):
                             "code": "workspace_not_visible",
                             "message": (
                                 "That auth_token cannot see the workspace you picked. It can "
-                                f"see {len(workspaces)}. Try connecting again."
+                                f"see {len(merged)}. Try connecting again."
                             ),
                         }
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
+
+            if match["id"] in bookmark_ids:
+                # A bookmark is cached data, not authorization: the token attached to *this*
+                # request may no longer reach the workspace it once resolved, so the bookmark
+                # is re-verified live rather than trusted to connect on its own say.
+                try:
+                    return client.get_workspace_by_slug(match["slug"])
+                except SegmentAuthError as err:
+                    return Response(
+                        {"error": {"code": "workspace_not_visible", "message": str(err)}},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                except SegmentError as err:
+                    logger.info(
+                        "Segment GraphQL gateway error while re-verifying a bookmark: %s", err
+                    )
+                    return Response(
+                        {"error": {"code": "graphql_error", "message": str(err)}},
+                        status=status.HTTP_502_BAD_GATEWAY,
+                    )
             return match
 
-        if len(workspaces) == 1:
+        if len(merged) == 1 and merged[0]["slug"] != _OPERATOR_SLUG:
             # No question to ask. The commonest case for a customer-facing login, and making
-            # the user confirm a list of one would be ceremony.
-            return workspaces[0]
+            # the user confirm a list of one would be ceremony. Excludes the operator gateway:
+            # being the only entry visible is not the same as being connectable.
+            return merged[0]
 
         # A choice, not an error -- so a 200 with the list rather than a 4xx. Sorted by name so
         # a person in two hundred workspaces gets something they can scan.
         return Response(
-            {
-                "needsChoice": True,
-                "workspaces": sorted(workspaces, key=lambda entry: entry["name"].lower()),
-            },
-            status=status.HTTP_200_OK,
+            {"needsChoice": True, "workspaces": sorted_list()}, status=status.HTTP_200_OK
         )
 
     def delete(self, request):
@@ -266,23 +424,13 @@ class AnonymousSessionView(APIView):
 
     def post(self, request):
         if isinstance(request.user, WorkspacePrincipal):
-            session = request.user.session
-            return Response(
-                {
-                    "workspace": (
-                        WorkspaceSerializer(session).data if request.user.has_token else None
-                    ),
-                    "connected": request.user.has_token,
-                    "anonymous": not request.user.has_token,
-                },
-                status=status.HTTP_200_OK,
-            )
+            return Response(session_payload(request.user.session), status=status.HTTP_200_OK)
 
         session = WorkspaceSession.start_anonymous()
-        logger.info("Started anonymous session scope %s", session.workspace_id)
+        logger.info("Started anonymous session scope %s", session.anon_scope)
         return set_session_cookie(
             Response(
-                {"workspace": None, "connected": False, "anonymous": True},
+                session_payload(session),
                 status=status.HTTP_201_CREATED,
             ),
             session,

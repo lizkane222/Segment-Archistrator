@@ -176,6 +176,33 @@ describe('describeKind', () => {
     )
   })
 
+  it.each([
+    'source_function',
+    'source_insert_function',
+    'destination_insert_function',
+    'destination_function',
+  ])('stops saying the body is unread once %s carries code', (kind) => {
+    /*
+     * The anchor and the verdict printed under it have to agree. A component whose code
+     * the walkthrough just *ran* -- see visitFunction in ./router.js -- cannot also be
+     * described as one whose body is not read; the reader would be looking at both
+     * sentences at once.
+     */
+    const bare = describeKind({ id: 'f', kind })
+    expect(bare.caveat).toContain('not read')
+    expect(bare.caveat).toContain('Code tab')
+
+    const coded = describeKind({ id: 'f', kind, code: 'async function onTrack(e) { return e }' })
+    expect(coded.caveat).not.toContain('not read')
+    expect(coded.caveat).toContain('run against the event')
+  })
+
+  it('does not count whitespace as code', () => {
+    expect(describeKind({ id: 'f', kind: 'destination_function', code: '   \n\n' }).caveat).toContain(
+      'not read',
+    )
+  })
+
   it('refuses to invent narration for a kind it does not know', () => {
     const anchor = describeKind({ id: 'x', kind: 'quantum_toaster' })
     expect(anchor.known).toBe(false)

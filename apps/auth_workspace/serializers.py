@@ -42,6 +42,17 @@ class StartSessionSerializer(serializers.Serializer):
         max_length=64,
     )
 
+    # The exact slug to resolve, when the choice offered was `segment-operator` rather than a
+    # real workspace -- see `_OPERATOR_SLUG` in views.py. That entry cannot itself be connected
+    # to, so this is the second round trip that turns "I clicked the operator gateway" into an
+    # actual workspace to add to the list.
+    workspace_slug = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+        max_length=255,
+    )
+
     def validate_token(self, value):
         # Pasted tokens routinely arrive with a "Bearer " prefix, stray quotes, or
         # both, depending on whether they were copied out of a docs page, a shell

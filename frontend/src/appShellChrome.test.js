@@ -9,7 +9,15 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { chromePlacement } from './AppShell.jsx'
+import { chromePlacement, editTable } from './AppShell.jsx'
+import {
+  cellText,
+  columnCount,
+  newTable,
+  resizeRow,
+  rowCount,
+  setCell,
+} from './canvas/tables.js'
 
 const slots = { top: {}, left: {}, right: {} }
 
@@ -51,5 +59,48 @@ describe('chromePlacement', () => {
         )
       }
     }
+  })
+})
+
+/*
+ * The right-click menu's table verbs, mapped onto the model.
+ *
+ * Six menu rows, and the mapping is where their labels either tell the truth or do not: "insert row
+ * below" and "insert row above" differ by one, which is the sort of thing that is easy to write
+ * backwards and invisible until someone notices new rows arriving on the wrong side.
+ */
+describe('editTable', () => {
+  const table = newTable({ rows: 3, columns: 3 })
+  const filled = setCell(table, 1, 1, { text: 'middle' })
+  const cell = { row: 1, column: 1, rows: 3, columns: 3 }
+
+  it('inserts above and below the row that was clicked', () => {
+    /* Above: the clicked row's text moves down a row. Below: it stays where it is. */
+    expect(cellText(editTable(filled, 'insert-row-above', cell), 2, 1)).toBe('middle')
+    expect(cellText(editTable(filled, 'insert-row-below', cell), 1, 1)).toBe('middle')
+    expect(rowCount(editTable(filled, 'insert-row-above', cell))).toBe(4)
+  })
+
+  it('inserts left and right of the column that was clicked', () => {
+    expect(cellText(editTable(filled, 'insert-column-left', cell), 1, 2)).toBe('middle')
+    expect(cellText(editTable(filled, 'insert-column-right', cell), 1, 1)).toBe('middle')
+    expect(columnCount(editTable(filled, 'insert-column-right', cell))).toBe(4)
+  })
+
+  it('deletes the row and the column that were clicked', () => {
+    expect(rowCount(editTable(filled, 'delete-row', cell))).toBe(2)
+    expect(cellText(editTable(filled, 'delete-row', cell), 1, 1)).toBe('')
+    expect(columnCount(editTable(filled, 'delete-column', cell))).toBe(2)
+  })
+
+  it('hands a row back to its own text', () => {
+    const fixed = resizeRow(table, 1, 200)
+    expect(editTable(fixed, 'fit-row', cell).rows[1]).toBe(null)
+  })
+
+  /* A menu from a newer build. Null rather than an empty table, so the caller leaves the node
+     alone instead of replacing its contents with nothing. */
+  it('says nothing for a verb it does not know', () => {
+    expect(editTable(table, 'reticulate', cell)).toBe(null)
   })
 })

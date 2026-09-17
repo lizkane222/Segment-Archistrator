@@ -27,6 +27,8 @@ import {
   orderForFlow,
   scaleFloor,
   scaleZoneChildren,
+  SELECTED_EDGE_LIFT,
+  edgeZFor,
   toFlowEdge,
   toFlowNode,
   ZONE_Z,
@@ -34,6 +36,8 @@ import {
   zoneNodeId,
   zoneSize,
 } from './layout.js'
+import { serializeEdge } from '../diagram/serialize.js'
+import { newTable } from './tables.js'
 
 const ZONES = [
   { id: 'connections', label: 'Connections', order: 0 },
@@ -492,6 +496,67 @@ describe('toFlowEdge', () => {
   it('carries the pre/post phase through for the simulator', () => {
     const edge = toFlowEdge({ id: 'e', source: 'a', target: 'b', phase: 'post' })
     expect(edge.data.phase).toBe('post')
+  })
+
+  it('leaves arrowEnd unset rather than defaulting it in', () => {
+    /* The default arrowhead is FlowEdge's own call at render time (`data.arrowEnd ?? true`),
+       resolved live off the source component's colour -- not a fact this layer bakes in.
+       So a plain edge carries no `arrowEnd` key at all, and a later change to that render-time
+       default reaches every connector that never overrode it. */
+    expect(toFlowEdge({ id: 'e', source: 'a', target: 'b' }).data).not.toHaveProperty('arrowEnd')
+  })
+
+  it('passes an explicit arrowEnd: false through, without inventing the other style fields', () => {
+    const data = toFlowEdge({ id: 'e', source: 'a', target: 'b', arrowEnd: false }).data
+    expect(data.arrowEnd).toBe(false)
+    expect(data).not.toHaveProperty('arrowStart')
+    expect(data).not.toHaveProperty('color')
+    expect(data).not.toHaveProperty('strokeStyle')
+  })
+
+  it('carries color, strokeStyle and arrowStart through when the caller set them', () => {
+    const data = toFlowEdge({
+      id: 'e',
+      source: 'a',
+      target: 'b',
+      color: '#ff0000',
+      strokeStyle: 'dashed',
+      arrowStart: true,
+    }).data
+    expect(data.color).toBe('#ff0000')
+    expect(data.strokeStyle).toBe('dashed')
+    expect(data.arrowStart).toBe(true)
+  })
+
+  it('does not persist styling fields that were never set', () => {
+    /* `serializeEdge` writes an explicit field list, so an unstyled edge round-trips
+       byte-identically. If any of these leaked in every saved diagram would read as
+       dirty on open, and there is no top-level marker any more for the same reason:
+       arrow colour is resolved live by FlowEdge, not stored. */
+    const stored = serializeEdge(toFlowEdge({ id: 'e', source: 'a', target: 'b' }))
+    expect(stored).not.toHaveProperty('markerEnd')
+    expect(stored).not.toHaveProperty('color')
+    expect(stored).not.toHaveProperty('strokeStyle')
+    expect(stored).not.toHaveProperty('arrowStart')
+    expect(stored).not.toHaveProperty('arrowEnd')
+  })
+
+  it('round-trips explicit styling through serializeEdge', () => {
+    const stored = serializeEdge(
+      toFlowEdge({
+        id: 'e',
+        source: 'a',
+        target: 'b',
+        color: '#00ff00',
+        strokeStyle: 'dotted',
+        arrowStart: true,
+        arrowEnd: false,
+      }),
+    )
+    expect(stored.color).toBe('#00ff00')
+    expect(stored.strokeStyle).toBe('dotted')
+    expect(stored.arrowStart).toBe(true)
+    expect(stored.arrowEnd).toBe(false)
   })
 })
 
@@ -1099,5 +1164,75 @@ describe('scaleFloor', () => {
   it('never exceeds 1, so a floor can only ever limit a shrink', () => {
     const tight = [sized('a', { x: 0, y: 0 }), sized('b', { x: 210, y: 0 })]
     expect(scaleFloor(tight, 'x')).toBeLessThanOrEqual(1)
+  })
+})
+
+/*
+ * Which renderer a node gets.
+ *
+ * Decided from the `kind`, and that is the point worth a test: React Flow's `type` is not stored
+ * (serialize.js strips it), so if this were driven by anything else a shape would come back from a
+ * save as a labelled card with a name where its outline used to be.
+ */
+describe('the renderer a kind asks for', () => {
+  const at = { x: 0, y: 0 }
+
+  it('draws a shape with the shape renderer', () => {
+    expect(toFlowNode({ id: 's', kind: 'shape', shape: 'star' }, null, at).type).toBe('shape')
+  })
+
+  it('draws a table with the table renderer', () => {
+    expect(toFlowNode({ id: 't', kind: 'table', table: newTable() }, null, at).type).toBe('table')
+  })
+
+  it('draws everything else as a card', () => {
+    expect(toFlowNode({ id: 'a', kind: 'source' }, null, at).type).toBe('segmentNode')
+    /* Including a kind this build has never heard of -- a document from a newer version draws as a
+       card with whatever fields it carries, rather than as nothing. */
+    expect(toFlowNode({ id: 'b', kind: 'quantum_destination' }, null, at).type).toBe('segmentNode')
+  })
+
+  it('keeps a table’s grid through the node build', () => {
+    const built = toFlowNode({ id: 't', kind: 'table', table: newTable({ rows: 2, columns: 2 }) }, null, at)
+    expect(built.data.table.columns).toHaveLength(2)
+    expect(built.data.table.cells).toHaveLength(2)
+  })
+})
+
+
+/*
+ * Which layer a connector is painted on.
+ *
+ * The bug this exists for: a connector had no z at all, so React Flow derived one as
+ * `edge.zIndex + max(z of each endpoint that has a parent)`. An edge between two components inside a
+ * zone got 10 and looked fine; an edge between two components on the bare canvas got 0 -- the same
+ * layer as the zone backdrops, whose fill is a solid hex -- and was painted over. Clicking an endpoint
+ * lifted it and it reappeared, which read as a rendering glitch rather than a layer. The canvas now
+ * runs `zIndexMode="manual"` so nothing is derived, and this is the whole scheme for edges.
+ */
+describe('edgeZFor', () => {
+  it('puts a connector in the component band, clear of every zone', () => {
+    expect(edgeZFor({ id: 'e1' })).toBe(COMPONENT_Z)
+    expect(edgeZFor({ id: 'e1' })).toBeGreaterThan(ZONE_Z)
+  })
+
+  it('does not depend on anything about the endpoints', () => {
+    /* The property the old behaviour lacked. Two edges are on the same layer whether their ends sit
+       inside a zone or on the bare canvas, which is what stops one of them vanishing. */
+    expect(edgeZFor({ id: 'inside' })).toBe(edgeZFor({ id: 'outside' }))
+  })
+
+  it('lifts the selected connector clear of the components', () => {
+    /* Load-bearing, not cosmetic: an edge's reconnect anchors sit over the very components it
+       attaches to, and under their connection handles -- which take the pointer and start drawing a
+       new connection instead of moving the existing end. React Flow granted this lift itself until
+       manual mode turned that off. */
+    const lifted = edgeZFor({ id: 'e1', selected: true })
+    expect(lifted).toBe(COMPONENT_Z + SELECTED_EDGE_LIFT)
+    expect(lifted).toBeGreaterThan(COMPONENT_Z)
+  })
+
+  it('treats a missing edge as the plain band rather than throwing', () => {
+    expect(edgeZFor(null)).toBe(COMPONENT_Z)
   })
 })

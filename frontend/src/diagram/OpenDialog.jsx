@@ -20,6 +20,7 @@ import {
   Save,
   Trash2,
   TriangleAlert,
+  Upload,
   X,
 } from 'lucide-react'
 
@@ -33,6 +34,7 @@ export default function OpenDialog({
   onOpenTemplate,
   onOpenDiagram,
   onStartBlank,
+  onImportFile,
   onDelete,
   onClose,
 }) {
@@ -146,15 +148,27 @@ export default function OpenDialog({
           <p className="text-[11px] text-twilio-gray-60">
             Opening replaces what is on the canvas.
           </p>
-          <button
-            type="button"
-            onClick={onStartBlank}
-            disabled={Boolean(busy)}
-            className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 bg-white px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
-          >
-            <FilePlus2 size={13} aria-hidden="true" />
-            Start from an empty canvas
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onImportFile}
+              disabled={Boolean(busy)}
+              title="Rebuild a diagram, including its name, from a file exported earlier"
+              className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 bg-white px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
+            >
+              <Upload size={13} aria-hidden="true" />
+              Import a diagram file
+            </button>
+            <button
+              type="button"
+              onClick={onStartBlank}
+              disabled={Boolean(busy)}
+              className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 bg-white px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
+            >
+              <FilePlus2 size={13} aria-hidden="true" />
+              Start from an empty canvas
+            </button>
+          </div>
         </footer>
       </div>
     </div>

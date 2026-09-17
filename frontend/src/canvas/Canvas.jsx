@@ -18,9 +18,10 @@
  *
  * All of them consult the server's topology payload; none has rules of its own.
  *
- * Anchor visibility and the collapse state are provided through context rather than
- * written into each node's data -- see canvas/anchors.js for why that distinction
- * matters.
+ * Which note is highlighted and the collapse state are provided through context rather
+ * than written into each node's data -- see canvas/anchors.js for why that distinction
+ * matters. The notes themselves are not drawn here at all; they live in a lane above the
+ * canvas (simulation/NotesLane.jsx), and hovering a card here is what lights one there.
  *
  * The `nodes` and `edges` handed in are a *view*: Workbench collapses the document
  * before passing it down (canvas/grouping.js). So a node here may be a `groupStack`
@@ -29,7 +30,7 @@
  * clicking one opens the group rather than the inspector.
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -45,20 +46,22 @@ import {
   useReactFlow,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { MessageSquareText, Tag } from 'lucide-react'
+import { Sparkles, Tag } from 'lucide-react'
 
 import FlowEdge from './edges/FlowEdge.jsx'
 import GroupControl from './GroupControl.jsx'
 import GroupStackNode from './nodes/GroupStackNode.jsx'
 import SegmentNode from './nodes/SegmentNode.jsx'
 import ShapeNode from './nodes/ShapeNode.jsx'
-import ZoneNode from './nodes/ZoneNode.jsx'
-import AnchorGutter from './AnchorGutter.jsx'
+import TableNode from './nodes/TableNode.jsx'
+import ZoneOrFrame from './nodes/ZoneOrFrame.jsx'
+import EventLayer from '../simulation/EventLayer.jsx'
 import { AnchorContext, createAnchorFocus } from './anchors.js'
-import { annotatedBounds } from './anchorGutter.js'
 import { GroupCollapseContext } from './groupCollapse.js'
-import { ChromeContext } from './chrome.js'
+import { ChromeContext, dragAnchor, edgeRoutes, handleReveal, textEditing } from './chrome.js'
+import { orientConnection } from './direction.js'
 import { FlashContext } from './flash.js'
+import { codeSeed } from '../functions/defaults.js'
 import { EDGE_MENU, NODE_MENU, PANE_MENU } from '../commands/registry.js'
 import { isGroupStackId, translateGroupDrag } from './grouping.js'
 import {
@@ -66,6 +69,7 @@ import {
   NODE_WIDTH,
   componentSize,
   droppedZoneSize,
+  edgeZFor,
   growZones,
   orderForFlow,
   scaleZoneChildren,
@@ -89,13 +93,23 @@ import {
   zoneOfParent,
 } from './rules.js'
 import { avoidingWaypoints } from './edges/routing.js'
-import { SIDES } from './handles.js'
+import { instanceLabel, nextZoneInstance, shiftSections } from './frames.js'
+import { columnCount, rowCount, scaleTable, tableSize } from './tables.js'
+import {
+  SIDES,
+  alongBorder,
+  anchorStringFor,
+  encodeFreeHandle,
+  fixedHandleForSide,
+} from './handles.js'
 import { styleFor } from './kinds.js'
 import SelectionToolbar from './SelectionToolbar.jsx'
+import TextToolbar from './TextToolbar.jsx'
 import {
   GROUP_ID_PREFIX,
   alignNodes,
   groupNodes,
+  groupSelectionChanges,
   matchSize,
   matchStyle,
   selectedComponents,
@@ -108,12 +122,26 @@ import {
 const NODE_TYPES = {
   segmentNode: SegmentNode,
   shape: ShapeNode,
-  zone: ZoneNode,
+  table: TableNode,
+  /* A divider is stored as a zone and drawn differently -- see nodes/ZoneOrFrame.jsx. */
+  zone: ZoneOrFrame,
   groupStack: GroupStackNode,
 }
 const EDGE_TYPES = { flow: FlowEdge }
 
 export const DRAG_MIME = 'application/segment-arch-kind'
+
+/*
+ * How close to a node's border the pointer has to be for its connection dots to appear, in
+ * screen pixels.
+ *
+ * 32 rather than a rounder number because it is half of NODE_HEIGHT plus a little: a card at
+ * the default height has no middle worth speaking of, so anywhere on one counts. A card someone
+ * has dragged taller, and every zone, has a middle that does not -- which is the case that made
+ * permanently-visible handles the lesser evil before this existed, since the pointer crosses a
+ * zone on its way to everything inside it.
+ */
+const BORDER_REVEAL = 32
 
 export default function Canvas({
   topology,
@@ -123,6 +151,7 @@ export default function Canvas({
   groups = [],
   collapsed = [],
   onCollapsedChange,
+  onAutoAlign,
   onNodesChange,
   onEdgesChange,
   setNodes,
@@ -133,12 +162,28 @@ export default function Canvas({
   onAdvise,
   onRename,
   onSetRadius,
+  /* How a node writes any field of its own data back -- a rich label commits two at once. The
+     same `updateNode` the inspector's fields call, so an edit on the card and one in the sidebar
+     land on the same undo stack. */
+  onUpdateData,
   flash,
   connected = false,
   walkthroughActive = false,
+  /* `{direction, edgeIds}` while a Flow row in the right-click menu is hovered. Passed
+     straight into the chrome context for the edges to read -- see canvas/chrome.js. */
+  flowPreview = null,
+  /* The travelling event: one timed itinerary per path (`simulation/choreography.js`), and the
+     transport's clock. Drawn by `EventLayer` inside the flow so it pans and zooms with the diagram,
+     and mounted here rather than in `AppShell` for that reason alone. */
+  eventPlans = null,
+  eventClock = null,
+  /* Which component's note is lit, shared with the notes lane above the canvas. Owned by the app
+     because the lane sits outside this component and both ends of the highlight need the same store --
+     see canvas/anchors.js for why it lives outside React. */
+  anchorFocus = null,
   exporting = false,
 }) {
-  const { screenToFlowPosition, getNode, getInternalNode, fitBounds } = useReactFlow()
+  const { screenToFlowPosition, getNode, getInternalNode, getZoom } = useReactFlow()
 
   /*
    * Whether the "Unbound" badge is drawn.
@@ -172,38 +217,28 @@ export default function Canvas({
     )
   }, [nodes])
 
-  /* Off by default: every anchor open at once is a wall of text, and the hover
-     reading answers "what is this one?" on its own. Pinning them all is for reading
-     the architecture as a document, which is why it is a mode rather than a
-     modifier key. Switched on, the notes move to the gutter outside the drawing --
-     see canvas/AnchorGutter.jsx, including why an export still does not contain them. */
-  const [showAnchors, setShowAnchors] = useState(false)
+  /*
+   * No anchor notes are drawn here at all any more, and there is no control for them.
+   *
+   * There were two homes and both had the same problem in different clothes: a tooltip over the
+   * component covered the components either side of it, and a gutter column outside the drawing lived
+   * in *flow* space, so at any zoom that fitted the diagram it sat off both edges of the screen -- the
+   * toggle appeared to do nothing until you zoomed out to find it. Notes are now a screen-space lane
+   * above the canvas (simulation/NotesLane.jsx), always present, showing whatever is in view.
+   *
+   * What survives here is the *highlight*: hovering a component lights its card in the lane, through
+   * the shared focus store below.
+   */
 
   /* Outside React on purpose. See canvas/anchors.js: a hovered id in state would put a
      whole-canvas render on every mouse move. Created once, so it costs the context value
      nothing to carry. */
-  const focus = useMemo(() => createAnchorFocus(), [])
-  const anchors = useMemo(
-    () => ({ topology, showAll: showAnchors, focus }),
-    [topology, showAnchors, focus],
-  )
-
-  /* Zoom out to include the gutter when it appears. Without this the control reads as
-     broken: the notes are a note's width outside the drawing, so at the zoom that fitted
-     the drawing they are off both edges of the screen and switching them on does nothing
-     visible. Not reversed on the way back -- the user's zoom after that is theirs. */
-  const toggleAnchors = useCallback(() => {
-    const next = !showAnchors
-    setShowAnchors(next)
-    if (!next) {
-      /* Or the pinned note's component keeps glowing with nothing on screen to explain
-         why, and the pin comes back the next time the notes do. */
-      focus.clearPin()
-      return
-    }
-    const bounds = annotatedBounds(nodes)
-    if (bounds) fitBounds(bounds, { duration: 300 })
-  }, [showAnchors, nodes, fitBounds, focus])
+  /* Supplied by the app, because the notes lane is the other end of this highlight and it sits outside
+     this component. Falls back to a store of its own so a canvas mounted on its own -- the export path,
+     a test -- still has something to call. */
+  const fallbackFocus = useMemo(() => createAnchorFocus(), [])
+  const focus = anchorFocus ?? fallbackFocus
+  const anchors = useMemo(() => ({ topology, focus }), [topology, focus])
 
   const expand = useCallback(
     (key) => onCollapsedChange?.(collapsed.filter((entry) => entry !== key)),
@@ -247,25 +282,90 @@ export default function Canvas({
    */
   const [adjustingEdgeId, setAdjustingEdgeId] = useState(null)
 
+  /* Where every connector runs, written by the edges as they draw themselves and read by
+     `EventLayer`. A stable registry rather than a value, so republishing a route on a drag frame
+     does not re-render the canvas -- see `edgeRoutes` in canvas/chrome.js. */
+  const routes = useMemo(() => edgeRoutes(), [])
+
+  /* Where a connection drag last passed near the border of the node it started on -- see
+     `dragAnchor` in canvas/chrome.js and the `onConnect` override below. Stable for the same
+     reason `routes` is: it changes every pointer-move frame of a drag, and routing that through
+     state would re-render the canvas to move a dot. */
+  const dragAnchorRegistry = useMemo(() => dragAnchor(), [])
+
+  /* Which node's connection dots are showing. Stable for the same reason the two registries
+     above are: it changes on pointer movement, and putting that through state would re-render
+     every node on the canvas to fade four dots in on one of them. See canvas/chrome.js. */
+  const reveal = useMemo(() => handleReveal(), [])
+
+  /* Which label is being edited, shared with the rich-text toolbar above the canvas. Stable for
+     the same reason: mounting an editor must not re-render the canvas, because a re-render while
+     the browser holds a live caret inside a node is how a caret gets lost. */
+  const editingText = useMemo(() => textEditing(), [])
+  /* Read here as well as in the toolbar, because *which* bar the panel draws is this component's
+     decision -- see the panel below. One render of the canvas per click into a label, which is
+     the same cost a selection change already has. */
+  const editingLabel = useSyncExternalStore(editingText.subscribe, editingText.current)
+
   const chrome = useMemo(
     () => ({
       showFlags,
       connected,
       rename: onRename ?? null,
       setRadius: onSetRadius ?? null,
+      updateData: onUpdateData ?? null,
       onWaypoints,
       adjustingEdgeId,
       walkthroughActive,
+      flowPreview,
+      routes,
+      dragAnchor: dragAnchorRegistry,
+      handleReveal: reveal,
+      textEditing: editingText,
     }),
     [
       showFlags,
       connected,
       onRename,
       onSetRadius,
+      onUpdateData,
       onWaypoints,
       adjustingEdgeId,
       walkthroughActive,
+      flowPreview,
+      routes,
+      dragAnchorRegistry,
+      reveal,
+      editingText,
     ],
+  )
+
+  /*
+   * Publish whether the pointer is at the border of the node it is over.
+   *
+   * Through React Flow's own `onNodeMouseMove` rather than a handler inside each renderer, for
+   * two reasons. It is the only version that answers the question once: the event names the node
+   * the pointer is on, so this is O(1) per frame rather than a pass over every node's box. And it
+   * keeps the three node renderers free of pointer plumbing -- an always-mounted overlay tracking
+   * hover on every card is exactly what used to sit over a zone's header and swallow its drags.
+   *
+   * The reach is divided by the zoom so it stays the same distance *to the pointer* at every
+   * zoom level, which is the same correction `BORDER_REACH` makes in ConnectionHandles.
+   */
+  const onNodeMouseMove = useCallback(
+    (event, node) => {
+      const internal = getInternalNode?.(node.id)
+      const at = internal?.internals?.positionAbsolute
+      const width = internal?.measured?.width
+      const height = internal?.measured?.height
+      if (!at || !width || !height) return
+
+      const point = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      const near = alongBorder({ x: at.x, y: at.y, width, height }, point, BORDER_REVEAL / getZoom())
+      if (near) reveal.set(node.id)
+      else reveal.clear(node.id)
+    },
+    [getInternalNode, screenToFlowPosition, getZoom, reveal],
   )
 
   /*
@@ -319,9 +419,20 @@ export default function Canvas({
     }
   }, [documentNodes, modelId])
 
+  /*
+   * Every toolbar action, applied to the *live* document rather than to this render's copy.
+   *
+   * The updater form is load-bearing and its absence was a real bug. `documentNodes` is a
+   * prop, so it is whatever the last render was handed -- and the click that built the
+   * selection queues its own `select` changes through the same `setNodes`. Passing a value
+   * here therefore replaced the store with an array from before those landed, and the
+   * selection the user had just made vanished the instant they pressed a button on the
+   * toolbar that existed *because* of it. `selection.ids` is safe to close over: it is what
+   * was selected when the button was rendered, which is exactly what the button is about.
+   */
   const runSelection = useCallback(
-    (transform) => setNodes(growZones(transform(documentNodes, selection.ids))),
-    [documentNodes, selection.ids, setNodes],
+    (transform) => setNodes((current) => growZones(transform(current, selection.ids))),
+    [selection.ids, setNodes],
   )
 
   /* `growZones` after each of these for the same reason the resize handles call it: an
@@ -348,15 +459,38 @@ export default function Canvas({
   )
   const onUngroup = useCallback(() => runSelection(ungroupNodes), [runSelection])
 
+  /*
+   * Which end the connection drag started at.
+   *
+   * The one fact that decides which way a new connector points, and it is not in the connection React
+   * Flow hands back. Every side of a card carries a source handle and a target handle stacked under one
+   * id, and a drag begun on the target handle is reported with the ends the other way round -- so
+   * without this the direction of every hand-drawn connector was set by which of two invisible handles
+   * was painted last. See `orientConnection` in canvas/direction.js.
+   *
+   * A ref, because it changes on a gesture rather than being rendered from, and it has to be readable
+   * synchronously inside `isValidConnection` while the pointer is still moving.
+   */
+  const connectFrom = useRef(null)
+
   const isValidConnection = useMemo(() => {
     const valid = makeConnectionValidator({ topology, getNode, edges })
     /* Wrapped rather than taught about stacks: `rules.js` answers questions about the
        document, and a stack is not in it. Refusing here is also what makes the handle
-       read as invalid mid-drag instead of only on release. */
-    return (connection) =>
-      !isGroupStackId(connection.source) &&
-      !isGroupStackId(connection.target) &&
-      valid(connection)
+       read as invalid mid-drag instead of only on release.
+
+       Oriented first, so the rules are asked about the connector the user is actually drawing. Asked
+       about the reported pair instead, a legal source-to-destination drag would be judged as
+       destination-to-source and refused mid-drag -- the handle going red for a connection that is
+       perfectly valid. */
+    return (candidate) => {
+      const connection = orientConnection(candidate, connectFrom.current)
+      return (
+        !isGroupStackId(connection.source) &&
+        !isGroupStackId(connection.target) &&
+        valid(connection)
+      )
+    }
   }, [topology, getNode, edges])
 
   /*
@@ -431,8 +565,28 @@ export default function Canvas({
         setNodes((current) => {
           let next = applyNodeChanges(changes, current)
           for (const change of resizes) {
-            const from = zoneSize(current.find((node) => node.id === change.id))
-            next = scaleZoneChildren(next, change.id, from, change.dimensions)
+            const before = current.find((node) => node.id === change.id)
+            const from = zoneSize(before)
+            /*
+             * A divider's contents move; a zone's contents scale.
+             *
+             * The difference is what each one *is*. A zone is a box drawn around a group of
+             * components, so stretching it should spread them out -- that is `scaleZoneChildren`.
+             * A divider is a division of the canvas into sections, and its sections hold whole
+             * diagrams: scaling those would rearrange every component inside them. What moves
+             * instead is each section, by however far its own origin moved, taking its contents
+             * with it. See `shiftSections` in canvas/frames.js.
+             */
+            if (before?.data?.frame) {
+              next = shiftSections(
+                next,
+                change.id,
+                { frame: before.data.frame, ...from },
+                { frame: before.data.frame, ...change.dimensions },
+              )
+            } else {
+              next = scaleZoneChildren(next, change.id, from, change.dimensions)
+            }
           }
           if (sized.length) {
             const byId = new Map(sized.map((change) => [change.id, change.dimensions]))
@@ -441,13 +595,26 @@ export default function Canvas({
               if (!box) return node
               /* Rounded for the same reason positions are: a sub-pixel width produces a
                  diff on every save and makes "did this change?" unanswerable by eye. */
-              return {
-                ...node,
-                data: {
-                  ...node.data,
-                  size: { width: Math.round(box.width), height: Math.round(box.height) },
-                },
+              const size = { width: Math.round(box.width), height: Math.round(box.height) }
+              /*
+               * A table's box *is* its columns and rows, so dragging its outer edge has to scale
+               * the grid -- otherwise the node is one size and the table drawn inside it another,
+               * and the handles appear to do nothing but move the border. Read from `current`
+               * rather than from `next`, because the old box is what the scale is a ratio of and
+               * `next` already has the new one.
+               */
+              if (node.data?.table) {
+                const before = current.find((entry) => entry.id === node.id)
+                return {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    size,
+                    table: scaleTable(before?.data?.table, tableSize(before?.data?.table), size),
+                  },
+                }
               }
+              return { ...node, data: { ...node.data, size } }
             })
             /* A card dragged wider than the room its zone has left overhangs the backdrop,
                which reads as a rendering bug. Same call the drag does, for the same reason. */
@@ -459,31 +626,19 @@ export default function Canvas({
       }
 
       /*
-       * Selecting one member of a group selects the group.
+       * A group is selected and released as one.
        *
        * That is the whole of what a group is here: React Flow already drags a
        * multi-selection together, so the drag path needs to know nothing about groups --
-       * see canvas/selection.js.
+       * see `groupSelectionChanges` in canvas/selection.js, which is also where the
+       * ordering rule for the appended changes is explained.
        *
        * Done on the change stream rather than in `onNodeClick` because a rubber-band
        * selection and a select-all arrive as changes and never as a click, and a group
-       * half-caught by a lasso would come apart on the next drag. Appended rather than
-       * merged, because a plain click arrives as deselect-everything followed by
-       * select-one: an extra select has to land *after* those deselects to survive them.
+       * half-caught by a lasso would come apart on the next drag.
        */
-      const selecting = changes
-        .filter((change) => change.type === 'select' && change.selected)
-        .map((change) => change.id)
-      const mates = withGroupMates(documentNodes, selecting)
-      const forwarded =
-        mates === selecting
-          ? changes
-          : [
-              ...changes,
-              ...mates
-                .filter((id) => !selecting.includes(id))
-                .map((id) => ({ id, type: 'select', selected: true })),
-            ]
+      const mates = groupSelectionChanges(documentNodes, changes)
+      const forwarded = mates.length ? [...changes, ...mates] : changes
 
       if (forwarded.length) onNodesChange(forwarded)
     },
@@ -502,54 +657,59 @@ export default function Canvas({
    * The node handed to the callback is the authority on where the drag ended; the props
    * can still be a frame behind it. So the moved positions are written in first and
    * everything else is derived from the result.
+   *
+   * ## Two things here are about *clicks*, not drags
+   *
+   * React Flow ends a drag it started, and it starts one on the smallest pointer movement.
+   * So an ordinary click on a card -- which almost never lands on exactly one pixel -- used
+   * to arrive here as a completed drag, and this callback then rewrote the entire document.
+   * That is what made clicking flaky in two ways at once, and both are fixed below:
+   *
+   *   - Nothing moved, so there is nothing to write. `nodeDragThreshold` on the flow means
+   *     most of those never reach here at all now; the guard covers the rest, and also the
+   *     drag that ends exactly where it began.
+   *   - The write goes through the updater form. `documentNodes` is a prop, and the same
+   *     click queues `select` changes through the same store -- so writing a *value* built
+   *     from the prop replaced the store with an array from before the selection landed,
+   *     and the click appeared to select nothing. `runSelection` above had the same bug.
    */
   const onNodeDragStop = useCallback(
     (_event, node, dragged) => {
       const moved = dragged?.length ? dragged : node ? [node] : []
-      const byId = new Map(moved.map((item) => [item.id, item]))
+      if (!moved.length) return
 
-      let next = documentNodes.map((entry) => {
-        const item = byId.get(entry.id)
-        return item ? { ...entry, position: item.position } : entry
+      /* Rounded, because that is the precision positions are stored at (`serializeNode`):
+         a half-pixel that will be rounded away on save is not a move, and treating it as
+         one marks the document dirty for a click. */
+      const same = (a, b) =>
+        Math.round(a?.x ?? 0) === Math.round(b?.x ?? 0) &&
+        Math.round(a?.y ?? 0) === Math.round(b?.y ?? 0)
+      const shifted = moved.some((item) => {
+        const before = documentNodes.find((entry) => entry.id === item.id)
+        /* Unknown id: a group stack, which stands for members that *are* in the document
+           and whose own position changes arrive separately. Treated as a move so the
+           members are still re-homed. */
+        return !before || !same(before.position, item.position)
       })
+      if (!shifted) return
 
-      const advisories = []
-      for (const item of moved) {
-        const live = next.find((entry) => entry.id === item.id)
-        /* A stack's id is not in the document -- it stands for several nodes that are.
-           Dragging one moves its members (translateGroupDrag), but which zone a group
-           of forty belongs to is not a question one drop can answer, so it keeps the
-           parent it had. */
-        if (!live) continue
+      /* Computed twice, deliberately, and cheaply -- once here over the props to work out
+         what to *say*, and once inside the updater below to work out what to *store*. The
+         alternative is side effects inside a state updater, which React may invoke twice.
+         Nothing a pending selection change could alter is read here: an advisory depends
+         on where the node landed and where the zones are, and neither is selection. */
+      const preview = rehomeDragged(documentNodes, moved, topology)
+      for (const advisory of preview.advisories) onAdvise?.(advisory.message, advisory.nodeId)
 
-        const target = reparentTarget(live, next, {
-          size: { width: NODE_WIDTH, height: NODE_HEIGHT },
-        })
-        if (!target) continue
-
-        const kind = kindOf(live)
-        if (kind && target.zone && !isValidPlacement(topology, kind, target.zone.data)) {
-          advisories.push({
-            nodeId: live.id,
-            message: explainMisplacement({ topology, kind, attemptedZone: target.zone.data }),
-          })
-        }
-
-        next = next.map((entry) =>
-          entry.id === live.id ? withParent(entry, target.zone, target.position) : entry,
-        )
-      }
-
-      setNodes(growZones(next))
-      for (const advisory of advisories) onAdvise?.(advisory.message, advisory.nodeId)
+      setNodes((current) => growZones(rehomeDragged(current, moved, topology).nodes))
 
       /* A mapping dropped onto its destination is a fact about the drop, not
          something the user should have to draw separately -- see attachTargetFor. */
       for (const item of moved) {
-        const live = next.find((entry) => entry.id === item.id)
+        const live = preview.nodes.find((entry) => entry.id === item.id)
         if (!live || kindOf(live) !== 'destination_mapping') continue
 
-        const attached = attachTargetFor(live, next, {
+        const attached = attachTargetFor(live, preview.nodes, {
           size: { width: NODE_WIDTH, height: NODE_HEIGHT },
         })
         if (!attached) continue
@@ -610,7 +770,46 @@ export default function Canvas({
   )
 
   const onConnect = useCallback(
-    (connection) => {
+    (candidate) => {
+      /*
+       * Pointing the way it was drawn, before anything else looks at it.
+       *
+       * First, deliberately: the validator, the refusal message, the route-avoidance and the stored
+       * edge all have to be about the same connector, and every one of them reads `source` and
+       * `target`. See `orientConnection` in canvas/direction.js for why the pair arrives backwards.
+       */
+      let connection = orientConnection(candidate, connectFrom.current)
+
+      /* A connection can only be *grabbed* from one of a node's fixed side handles now -- see
+         ConnectionHandles.jsx -- but the drag may have slid along that node's border before
+         leaving it, and wherever it was nearest when it did is what the user means by "start
+         here instead". React Flow cannot report that: `sourceHandle` above is always the fixed
+         handle the gesture technically began on. So the exact point, if there is one, is taken
+         from the registry `ConnectionHandles` wrote it into.
+         `sourceHandle` itself still gets the *fixed* id for that side, never the free-anchor
+         string -- see `fixedHandleForSide` in canvas/handles.js for why an edge that named the
+         free anchor's own ephemeral handle would never draw. The precise point rides in `data`
+         instead, read back out by `anchorPoint` in edges/FlowEdge.jsx. */
+      /* Both ends, because a connection has two and the reader placed both. The arriving end used to
+         be left to `connectionRadius`, which snaps to the nearest of four side midpoints -- so a
+         connector dropped a third of the way down a border jumped to the middle of it, and the
+         `targetAnchor` field the rest of the app already understood was written by nothing. */
+      const anchor = dragAnchorRegistry.take(connection.source)
+      const landing = dragAnchorRegistry.take(connection.target)
+      const sourceAnchor = anchor ? encodeFreeHandle(anchor.side, anchor.t) : null
+      const targetAnchor = landing ? encodeFreeHandle(landing.side, landing.t) : null
+      if (anchor || landing) {
+        connection = {
+          ...connection,
+          ...(anchor
+            ? { sourceHandle: fixedHandleForSide(anchor.side) ?? connection.sourceHandle }
+            : {}),
+          ...(landing
+            ? { targetHandle: fixedHandleForSide(landing.side) ?? connection.targetHandle }
+            : {}),
+        }
+      }
+
       /* A stack has handles because the aggregated edges have to land somewhere, but an
          edge *drawn* to one would be stored against an id the document has never
          contained -- and would then be dropped on the next expand. So the group is
@@ -654,13 +853,18 @@ export default function Canvas({
             type: 'flow',
             /* Hand-drawn, so deletable -- unlike an edge discovered from the
                customer's real workspace, which is a fact, not a choice. */
-            data: { discovered: false, ...(waypoints.length ? { waypoints } : {}) },
+            data: {
+              discovered: false,
+              ...(waypoints.length ? { waypoints, routed: 'auto' } : {}),
+              ...(sourceAnchor ? { sourceAnchor } : {}),
+              ...(targetAnchor ? { targetAnchor } : {}),
+            },
           },
           current,
         ),
       )
     },
-    [isValidConnection, setEdges, topology, getNode, edges, onNotify, avoidanceFor],
+    [isValidConnection, setEdges, topology, getNode, edges, onNotify, avoidanceFor, dragAnchorRegistry],
   )
 
   /*
@@ -700,9 +904,68 @@ export default function Canvas({
         })
         return
       }
-      setEdges((current) => reconnectEdge(oldEdge, connection, current))
+      /*
+       * The moved end forgets where it used to be attached.
+       *
+       * `reconnectEdge` preserves `data` wholesale, which is right for colour and line style and
+       * wrong for an anchor: a `sourceAnchor` of `free:right:0.8` outlives a drag that moved the end
+       * to the *top* side, and `anchorPoint` in edges/FlowEdge.jsx honours the anchor over the
+       * handle -- so the end sprang back to the old border the instant it was released, which is
+       * precisely the "it will not stay where I put it" complaint.
+       *
+       * Whichever end the gesture just placed is re-anchored from the registry if the drag left a
+       * point there, and cleared otherwise so the fixed handle decides.
+       */
+      const movedSource = connection.source !== oldEdge.source || connection.sourceHandle !== oldEdge.sourceHandle
+      const movedTarget = connection.target !== oldEdge.target || connection.targetHandle !== oldEdge.targetHandle
+      const placed = {
+        ...(movedSource
+          ? { sourceAnchor: anchorStringFor(dragAnchorRegistry.take(connection.source)) }
+          : {}),
+        ...(movedTarget
+          ? { targetAnchor: anchorStringFor(dragAnchorRegistry.take(connection.target)) }
+          : {}),
+      }
+
+      setEdges((current) =>
+        reconnectEdge(oldEdge, connection, current).map((edge) =>
+          edge.source === connection.source && edge.target === connection.target && edge.id === oldEdge.id
+            ? { ...edge, data: { ...edge.data, ...placed } }
+            : edge,
+        ),
+      )
     },
-    [edges, topology, getNode, setEdges, onNotify],
+    [edges, topology, getNode, setEdges, onNotify, dragAnchorRegistry],
+  )
+
+  /*
+   * A plain click means "just this one".
+   *
+   * React Flow does not do this, and the gap is the second half of the report about selection. Its
+   * click handler adds a node to the selection when it is *not* already in one and toggles it out
+   * when a modifier is held -- but a plain click on a node that is already selected alongside others
+   * matches neither branch, so nothing happens at all. From the user's side: pick four cards, click
+   * one to work on it, and the other three are still selected with no ring anywhere to say so. The
+   * next align, restyle or delete then lands on all four.
+   *
+   * Sent as `select` changes through the same seam every other selection change uses, so the
+   * document, the toolbar and the history all see it the way they see a click on the pane.
+   *
+   * Two things it deliberately does not do. It leaves a modified click alone -- shift and cmd are how
+   * a selection is *built*, and narrowing there would make multi-select impossible. And it keeps this
+   * node's group mates, because a group is selected as one: dropping them would take a group apart
+   * with a click, which is the opposite of what grouping is for.
+   */
+  const narrowSelection = useCallback(
+    (event, node) => {
+      if (event?.shiftKey || event?.metaKey || event?.ctrlKey) return
+      const keep = new Set(withGroupMates(documentNodes, [node.id]))
+      const drop = documentNodes
+        .filter((entry) => entry.selected && !keep.has(entry.id))
+        .map((entry) => ({ id: entry.id, type: 'select', selected: false }))
+      if (drop.length) onNodesChange(drop)
+    },
+    [documentNodes, onNodesChange],
   )
 
   /* --- the command menu ---------------------------------------------------- */
@@ -748,6 +1011,10 @@ export default function Canvas({
         y: event.clientY,
         node: stack ? null : (node ?? null),
         stack,
+        /* Which cell of a table was clicked, when it was a table. Facts rather than the model --
+           the row, the column and how many of each there are -- because the command table's
+           `enabled` is given answers, not a graph to go looking through. */
+        cell: cellFromEvent(event, node),
         subject: node ? (node.data?.name ?? node.data?.label ?? null) : null,
       })
     },
@@ -789,9 +1056,16 @@ export default function Canvas({
         return
       }
 
-      /* Centre the node on the cursor. Dropping by top-left corner feels like a
-         half-node offset error. */
-      const position = { x: dropped.x - NODE_WIDTH / 2, y: dropped.y - NODE_HEIGHT / 2 }
+      /*
+       * Centre the node on the cursor. Dropping by top-left corner feels like a half-node offset
+       * error.
+       *
+       * By the node's *own* box, not by the default card. A shape carries its size in the payload
+       * (a swimlane arrives 384px wide) and a table's is the sum of its columns, so centring
+       * everything on a 200x60 card put the wide ones visibly off the cursor.
+       */
+      const box = droppedBox(payload)
+      const position = { x: dropped.x - box.width / 2, y: dropped.y - box.height / 2 }
 
       /* Generated before the advisory below rather than inline in `toFlowNode`, because
          the note points at the component it is about and cannot name a node that does
@@ -819,6 +1093,12 @@ export default function Canvas({
           /* Catalog drops carry a slug and docs link but no workspace instance
              behind them yet, so they start unbound and render dashed. */
           bound: payload.bound ?? false,
+          /* A function drawn by hand starts with the out-of-the-box body for its type, so
+             it does something the moment it is on the canvas. A function dragged out of
+             the *workspace* tab deliberately does not: its real body is not something the
+             Public API returns, and seeding a template would make the walkthrough report
+             a guess as fact. See `codeSeed`. */
+          ...codeSeed(kind, { bound: payload.bound ?? false }),
           ...payload.data,
         },
         zoneId,
@@ -831,6 +1111,18 @@ export default function Canvas({
     [screenToFlowPosition, nodes, topology, setNodes, onInspect, onNotify, onAdvise],
   )
 
+  /*
+   * Every connector's paint layer, stated rather than derived -- see `edgeZFor` in canvas/layout.js.
+   *
+   * Here rather than in `toFlowEdge` because an edge made by a live drag never goes through
+   * `toFlowEdge`; `addEdge` builds it in `onConnect`. This is the one place every edge passes
+   * through on its way to React Flow, whatever created it.
+   */
+  const layeredEdges = useMemo(
+    () => edges.map((edge) => (edge.zIndex === edgeZFor(edge) ? edge : { ...edge, zIndex: edgeZFor(edge) })),
+    [edges],
+  )
+
   return (
     <AnchorContext.Provider value={anchors}>
       <FlashContext.Provider value={flash}>
@@ -839,9 +1131,27 @@ export default function Canvas({
         <div className="h-full w-full">
           <ReactFlow
             nodes={flowNodes}
-            edges={edges}
+            edges={layeredEdges}
             onNodesChange={handleNodesChange}
             onEdgesChange={onEdgesChange}
+            /* Where the drag began, which is what decides which way the new connector points -- see
+               `connectFrom` above. Cleared on release so a later reconnect drag, which goes through its
+               own handlers, cannot be judged against a stale origin. */
+            onConnectStart={(_event, params) => {
+              connectFrom.current = params
+              /* Whatever a previous gesture from this same node left behind, cleared before this
+                 one can write anything of its own -- so a drag that ends without ever reaching
+                 `onConnectEnd` (the pointer released somewhere React Flow does not read as a
+                 drag end) cannot leave an anchor for *this* gesture to inherit. */
+              dragAnchorRegistry.clear()
+            }}
+            onConnectEnd={() => {
+              connectFrom.current = null
+              /* A no-op if `onConnect` already consumed it; a stale one otherwise, from a drag
+                 that ended without connecting -- which must not attach itself to a later,
+                 unrelated connection drawn from the same node. */
+              dragAnchorRegistry.clear()
+            }}
             onConnect={onConnect}
             onReconnect={onReconnect}
             /* So clicking a connection shows a draggable dot at each end. Generous
@@ -858,19 +1168,44 @@ export default function Canvas({
              */
             reconnectRadius={20}
             /*
-             * The other half of making endpoint dragging work at all.
+             * How close to a handle a connection has to be *released* to land on it. The
+             * library's default is 20, which is a ring barely wider than the dot itself --
+             * so dropping a connector on a card meant hitting one of four 8px targets, and
+             * missing meant the drag was thrown away with no line drawn and nothing said.
              *
-             * Edges paint *below* nodes, so the reconnect anchor at each end sits under the very
-             * component it is attached to -- and under that component's connection handle, which
-             * takes the pointer and starts drawing a *new* connection instead. This lifts the
-             * selected edge by 1000 (`getElevatedEdgeZIndex`), which clears the components at
-             * `COMPONENT_Z` and puts its anchors on top where they can be grabbed.
-             *
-             * Only the selected edge is lifted, which is also the only one whose ends anyone is
-             * trying to move -- so the cost is that a selected connector draws over the cards it
-             * passes, during the moment you are editing it.
+             * 45 makes the catch area reach well outside the component, which is the point:
+             * aim at the card, get the nearest side. It cannot over-reach onto a neighbour,
+             * because `ConnectionMode.Loose` still resolves to the *nearest* handle within
+             * the radius, and cards on this canvas sit further apart than this.
              */
-            elevateEdgesOnSelect
+            connectionRadius={45}
+            /*
+             * How far the pointer must travel before a press becomes a drag.
+             *
+             * Zero -- the library's effective default -- means every click is also a
+             * one-pixel drag, and this canvas does real work on `onNodeDragStop`: it
+             * re-homes the dragged node, re-parents it into whichever zone it landed in and
+             * grows the zones to fit. All of that ran on every click, which is what made
+             * clicking a card sometimes clear the selection and mark the diagram dirty
+             * without moving anything. Three pixels is below the threshold of a deliberate
+             * drag and above the jitter of a click.
+             */
+            nodeDragThreshold={3}
+            /*
+             * Every layer is stated, not derived -- see the z scheme in canvas/layout.js.
+             *
+             * The default (`basic`) computes an edge's z as `edge.zIndex + max(z of each endpoint
+             * that has a parent)`, which meant the same edge landed on a different layer depending
+             * on whether its endpoints happened to live inside a zone: 10 inside one, 0 outside --
+             * and 0 is where the zone backdrops are, so those edges were painted over and vanished.
+             * No per-edge z could fix that, because the term being added is not ours.
+             *
+             * Inert for nodes, which is what makes this affordable: `calculateChildXYZ` applies its
+             * `parentZ + 1` nesting bump whatever the mode, so a sub-zone still resolves above its
+             * parent. Only *selection* elevation is gated on the mode -- and `elevateNodesOnSelect`
+             * was already off, while the edge lift it also disables is now applied by `edgeZFor`.
+             */
+            zIndexMode="manual"
             /*
              * Every side of a node is both an exit and an entrance -- see canvas/handles.js.
              *
@@ -943,6 +1278,12 @@ export default function Canvas({
             onDragOver={onDragOver}
             onNodeContextMenu={openMenu}
             onEdgeContextMenu={openEdgeMenu}
+            /* The connection dots, revealed by proximity -- see `onNodeMouseMove` above. The
+               leave handler is not redundant: the pointer can exit a node across its border,
+               where the move handler's last word was "near", and without this the dots would
+               stay up on a card the pointer has finished with. */
+            onNodeMouseMove={onNodeMouseMove}
+            onNodeMouseLeave={(_event, node) => reveal.clear(node.id)}
             /* Double-click the line to adjust its route; double-click again to put the handles away.
                A toggle rather than a one-way door, because the handles sit on top of the line and
                there has to be a way to see it plainly again without hunting for empty canvas. */
@@ -954,11 +1295,16 @@ export default function Canvas({
                components would open the pane menu and none of them would be the subject. */
             onSelectionContextMenu={(event, selected) => openMenu(event, selected?.[0] ?? null)}
             onPaneContextMenu={(event) => openMenu(event, null)}
-            onNodeClick={(_, node) => {
+            onNodeClick={(event, node) => {
               if (isGroupStackId(node.id)) return
               onInspect?.(node)
               if (node.type !== 'zone') setModelId(node.id)
+              narrowSelection(event, node)
             }}
+            /* Mirrors onNodeClick: a connector is as inspectable as a component now that
+               it has its own styling to set, and this is the only other thing on the
+               canvas `onInspect` needs to reach. */
+            onEdgeClick={(_, edge) => onInspect?.(edge)}
             onPaneClick={() => {
               onInspect?.(null)
               /* A click on bare canvas is how you finish editing a route. Without this the handles
@@ -977,6 +1323,20 @@ export default function Canvas({
                while culling was on would silently omit everything scrolled out of
                frame. */
             onlyRenderVisibleElements={!exporting}
+            /*
+             * Trackpad navigation, matching Lucidchart: a two-finger scroll pans in
+             * whichever direction it moves, and a pinch zooms. Both read the same wheel
+             * event, and the browser is what tells them apart -- a trackpad pinch is
+             * reported with `ctrlKey: true` (the same signal a Ctrl-scroll on a mouse
+             * sends, which is why that combination still zooms too). `panOnScrollMode="free"`
+             * is what allows the pan to move diagonally with the gesture instead of
+             * snapping to one axis. Click-drag panning (`panOnDrag`, on by default) is left
+             * alone, so mouse users keep their existing way to navigate.
+             */
+            panOnScroll
+            panOnScrollMode="free"
+            zoomOnScroll={false}
+            zoomOnPinch
             fitView
             fitViewOptions={{ padding: 0.15 }}
             minZoom={0.15}
@@ -986,26 +1346,18 @@ export default function Canvas({
           >
             <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#d7dbe4" />
 
-            {/* Not while exporting: the notes portal *into* the viewport, which is the
-                element the export captures, and `diagramBounds` measures nodes -- so a
-                capture with them up would crop them in half rather than include them. */}
-            {showAnchors && !exporting && <AnchorGutter nodes={nodes} />}
+            {/* The travelling event. Inside the flow so it is in flow coordinates, and not while
+                exporting -- a still of a diagram should not have a dot frozen halfway along a line,
+                which reads as part of the drawing rather than as a moment in a playthrough. */}
+            {!exporting && (
+              <EventLayer
+                plans={eventPlans}
+                clock={eventClock}
+                active={walkthroughActive && Boolean(eventPlans?.length)}
+              />
+            )}
 
             <Panel position="top-left" className="flex flex-col items-start gap-1.5">
-              <button
-                type="button"
-                onClick={toggleAnchors}
-                aria-pressed={showAnchors}
-                title="What happens to an event at each component, in a column either side of the diagram. Hover either end to see which note goes with which component."
-                className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs shadow-sm transition-colors ${
-                  showAnchors
-                    ? 'border-twilio-blue bg-twilio-blue text-white'
-                    : 'border-twilio-gray-20 bg-white text-twilio-gray-60 hover:text-twilio-navy'
-                }`}
-              >
-                <MessageSquareText size={13} aria-hidden="true" />
-                {showAnchors ? 'Hide anchor notes' : 'Show anchor notes'}
-              </button>
               <GroupControl
                 groups={groups}
                 collapsed={collapsed}
@@ -1031,22 +1383,45 @@ export default function Canvas({
                   {showFlags ? 'Hide flags' : 'Show flags'}
                 </button>
               )}
+              {/* Not gated on `connected` -- unlike the flags toggle, tidying the layout has
+                  nothing to do with whether a workspace is bound. */}
+              <button
+                type="button"
+                onClick={() => onAutoAlign?.()}
+                title="Nudge components and zones that are already almost aligned the rest of the way."
+                className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 bg-white px-2.5 py-1.5 text-xs text-twilio-gray-60 shadow-sm transition-colors hover:text-twilio-navy"
+              >
+                <Sparkles size={13} aria-hidden="true" />
+                Auto-Align
+              </button>
             </Panel>
             {/* Centred, and above rather than beside the diagram: the actions are about the
                 selection, so anchoring the bar to the selection's own bounding box would
                 put it under the cursor mid-drag and move it every time the selection
                 changed. */}
             <Panel position="top-center">
-              <SelectionToolbar
-                count={selection.ids.length}
-                modelName={selection.model?.data?.name}
-                grouped={selection.grouped}
-                onAlign={onAlign}
-                onMatchSize={onMatchSize}
-                onMatchStyle={onMatchStyle}
-                onGroup={onGroup}
-                onUngroup={onUngroup}
-              />
+              {/*
+                One bar at a time, and text wins. The two are about different things -- a caret in
+                a label, or several components picked out -- and they cannot both be what the user
+                is doing: clicking into a label is what deselects everything else. Text takes
+                precedence because it is the narrower and more recent statement of intent, and
+                because losing the formatting bar the moment a second component happens to still
+                be selected would read as it never having appeared.
+              */}
+              {editingLabel ? (
+                <TextToolbar />
+              ) : (
+                <SelectionToolbar
+                  count={selection.ids.length}
+                  modelName={selection.model?.data?.name}
+                  grouped={selection.grouped}
+                  onAlign={onAlign}
+                  onMatchSize={onMatchSize}
+                  onMatchStyle={onMatchStyle}
+                  onGroup={onGroup}
+                  onUngroup={onUngroup}
+                />
+              )}
             </Panel>
             <Controls showInteractive={false} />
             <MiniMap
@@ -1067,6 +1442,86 @@ export default function Canvas({
       </FlashContext.Provider>
     </AnchorContext.Provider>
   )
+}
+
+/**
+ * Which cell of a table a right-click landed on, or null.
+ *
+ * Read off the DOM (`data-cell`, written by TableNode) rather than computed from the pointer
+ * against the column widths: the browser has already done that hit test, and doing it again here
+ * would be the same answer derived a second way, free to disagree the first time either changes.
+ */
+function cellFromEvent(event, node) {
+  const table = node?.data?.table
+  if (!table) return null
+  const found = event.target?.closest?.('[data-cell]')?.dataset?.cell
+  if (!found) return null
+  const [row, column] = found.split(':').map(Number)
+  if (!Number.isInteger(row) || !Number.isInteger(column)) return null
+  return { row, column, rows: rowCount(table), columns: columnCount(table) }
+}
+
+/**
+ * How big the thing being dropped is, for centring it on the cursor.
+ *
+ * Three cases, in the order they can be known: a table's box is the sum of its own columns, a shape
+ * brings an explicit size, and everything else is a card.
+ */
+function droppedBox(payload) {
+  if (payload?.data?.table) return tableSize(payload.data.table)
+  return {
+    width: payload?.data?.size?.width ?? NODE_WIDTH,
+    height: payload?.data?.size?.height ?? NODE_HEIGHT,
+  }
+}
+
+/**
+ * Every dragged node moved to where it was dropped, and re-parented into whatever zone it
+ * landed in. Returns the new array and the placements worth remarking on.
+ *
+ * Pure, and separate from `onNodeDragStop`, for one reason: the callback needs this answer
+ * twice -- once against the props to decide what to say, once inside a state updater to
+ * decide what to store -- and a function is the only way to have the two agree. Inlined, the
+ * second pass would have been "the first pass's array, hopefully still current", which is
+ * exactly the staleness that made a click clear the selection.
+ *
+ * `moved` is React Flow's own report of where each drag ended, which is the authority: the
+ * props can still be a frame behind the last pointer event.
+ */
+function rehomeDragged(nodes, moved, topology) {
+  const byId = new Map(moved.map((item) => [item.id, item]))
+  let next = (nodes ?? []).map((entry) => {
+    const item = byId.get(entry.id)
+    return item ? { ...entry, position: item.position } : entry
+  })
+
+  const advisories = []
+  for (const item of moved) {
+    const live = next.find((entry) => entry.id === item.id)
+    /* A stack's id is not in the document -- it stands for several nodes that are.
+       Dragging one moves its members (translateGroupDrag), but which zone a group of
+       forty belongs to is not a question one drop can answer, so it keeps its parent. */
+    if (!live) continue
+
+    const target = reparentTarget(live, next, {
+      size: { width: NODE_WIDTH, height: NODE_HEIGHT },
+    })
+    if (!target) continue
+
+    const kind = kindOf(live)
+    if (kind && target.zone && !isValidPlacement(topology, kind, target.zone.data)) {
+      advisories.push({
+        nodeId: live.id,
+        message: explainMisplacement({ topology, kind, attemptedZone: target.zone.data }),
+      })
+    }
+
+    next = next.map((entry) =>
+      entry.id === live.id ? withParent(entry, target.zone, target.position) : entry,
+    )
+  }
+
+  return { nodes: next, advisories }
 }
 
 /**
@@ -1111,14 +1566,34 @@ function dropZone(payload, dropped, { nodes, zone, topology, onNotify, onAdvise 
   /* A product zone arrives with its id (it is being re-added after a delete); a
      custom one is minted here, colon-separated to match the `manual:` component
      ids and to stay clear of any slug Segment could hand out. */
-  const id = descriptor.id ?? `custom:zone:${crypto.randomUUID().slice(0, 8)}`
+  const asked = descriptor.id ?? `custom:zone:${crypto.randomUUID().slice(0, 8)}`
 
-  if (nodes.some((node) => node.id === zoneNodeId(id))) {
+  /*
+   * The same zone, a second time.
+   *
+   * This used to be refused: two zones with one id collide on save, because the document keys
+   * `zones` by id and a component stores a single `zone` string. That refusal is what made it
+   * impossible to lay two diagrams out side by side on one canvas -- the request this answers -- so
+   * the copy gets an id of its own and remembers which product it is a copy of. Everything that
+   * asks what a zone *is* goes through `zoneProduct` (canvas/rules.js), so the copy keeps
+   * Connections' colour, Connections' placement rules and Connections' name.
+   */
+  const id = nodes.some((node) => node.id === zoneNodeId(asked))
+    ? nextZoneInstance(
+        asked,
+        nodes.filter((node) => node.type === 'zone').map((node) => node.data?.id),
+      )
+    : asked
+  const copy = id !== asked
+
+  if (copy) {
     onNotify?.({
-      tone: 'error',
-      message: `${descriptor.label ?? id} is already on the canvas.`,
+      tone: 'info',
+      message: `Added a second ${descriptor.label ?? asked}. Components in it are tagged “${instanceLabel(
+        descriptor.label ?? asked,
+        id,
+      )}”.`,
     })
-    return null
   }
 
   /* Where the topology says this zone usually sits. Advice, not a rule: zones can be
@@ -1139,14 +1614,22 @@ function dropZone(payload, dropped, { nodes, zone, topology, onNotify, onAdvise 
     )
   }
 
-  const { width, height } = droppedZoneSize(id)
+  const { width, height } = droppedZoneSize(id, descriptor)
   const topLeft = {
     x: Math.round(dropped.x - width / 2),
     y: Math.round(dropped.y - height / 2),
   }
 
   return toZoneNode(
-    { order: nodes.filter((node) => node.type === 'zone').length, ...descriptor, id, parent },
+    {
+      order: nodes.filter((node) => node.type === 'zone').length,
+      ...descriptor,
+      id,
+      parent,
+      /* Numbered on its face, so two Connections backdrops on one canvas can be told apart at the
+         zoom someone screen-shares at. */
+      ...(copy ? { label: instanceLabel(descriptor.label ?? asked, id) } : {}),
+    },
     {
       position: zone ? toZoneLocal(zone, topLeft, nodes) : topLeft,
       width,

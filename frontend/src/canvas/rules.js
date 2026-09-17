@@ -16,6 +16,7 @@
  * it as a rule for a user-drawn edge.
  */
 
+import { zoneProductOf } from './frames.js'
 import { componentSize, zoneNodeId, zoneSize } from './layout.js'
 
 /* Kinds with no topology entry, so no zone and no adjacency table. A custom
@@ -41,13 +42,33 @@ export function zoneOfParent(parentId) {
   return parentId?.startsWith('zone-') ? parentId.slice('zone-'.length) : null
 }
 
+/**
+ * Which product a zone *is*, as opposed to which copy of it this is.
+ *
+ * The same string for every zone that appears once, which is all of them until someone drops a
+ * second Connections beside the first. The copy's id is `connections~2` (see canvas/frames.js) and
+ * every question in this file is about the product: which zones it nests inside, which kinds belong
+ * in it, what it is called. Asked by id instead, a copy would answer "the topology has never heard
+ * of this" and every component in it would earn a placement advisory on every save.
+ *
+ * Takes a zone's `data`, matching `isValidPlacement`, because the id is not the only thing a caller
+ * has -- and a caller with only the id can pass `{id}`.
+ */
+export function zoneProduct(zone) {
+  return zoneProductOf(zone?.id ?? null)
+}
+
 /** The zone a kind is allowed to live in, or null if the kind is unknown. */
 export function expectedZone(topology, kind) {
   return topology?.kinds?.[kind]?.zone ?? null
 }
 
 export function zoneLabel(topology, zoneId) {
-  return topology?.zones?.find((zone) => zone.id === zoneId)?.label ?? zoneId
+  /* By product, so a copy of Connections is named "Connections" rather than falling through to its
+     raw `connections~2` id. The *canvas* shows the numbered label the drop wrote onto the zone
+     itself; this is the topology's name for what it is. */
+  const product = zoneProductOf(zoneId)
+  return topology?.zones?.find((zone) => zone.id === product)?.label ?? zoneId
 }
 
 /**
@@ -62,7 +83,22 @@ export function zoneLabel(topology, zoneId) {
 export function zoneChain(topology, zone) {
   const chain = []
   const seen = new Set()
-  let current = zone
+  /*
+   * Started from the *topology's* entry for this zone's product, not from the zone as handed in.
+   *
+   * Two reasons, and the second is the one this fixes. The chain is meant to be the table's tree
+   * rather than the document's claim about it -- said in the paragraph above -- and taking the first
+   * link off the passed object was the one place that was not true. And a copy of a zone
+   * (`connections~2`) is not in the table at all, so a chain started from it stopped after one link
+   * and every component inside the copy was reported as misplaced.
+   *
+   * Falls back to the zone as given, which is what a custom zone needs: the topology has never heard
+   * of it, so its own `parent` is the only answer there is.
+   */
+  const product = zoneProduct(zone)
+  let current = zone?.id
+    ? (topology?.zones?.find((entry) => entry.id === product) ?? { ...zone, id: product })
+    : zone
   while (current?.id && !seen.has(current.id)) {
     seen.add(current.id)
     chain.push(current.id)
@@ -132,13 +168,13 @@ export function isValidPlacement(topology, kind, zone) {
      is the only honest answer for something that belongs to two -- Profiles Sync, or
      a Reverse ETL model spanning the customer's warehouse and Segment's delivery.
      Mirrors CONTAINER_ZONES in topology.py. */
-  if (CONTAINER_ZONES.has(zone?.id)) return true
+  if (CONTAINER_ZONES.has(zoneProduct(zone))) return true
   if (RULE_FREE_KINDS.has(kind)) return true
   const expected = expectedZone(topology, kind)
   if (expected === null) return false
   return (
     zoneChain(topology, zone).includes(expected) ||
-    placementZones(topology, kind).includes(zone?.id ?? null)
+    placementZones(topology, kind).includes(zoneProduct(zone))
   )
 }
 

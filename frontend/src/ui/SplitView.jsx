@@ -90,55 +90,62 @@ export default function SplitView({ orientation = SPLIT_VERTICAL, children }) {
     [vertical],
   )
 
-  /*
-   * One pane fills the frame.
-   *
-   * A *block* wrapper, deliberately, and not `flex` -- which is what this was and is what broke the
-   * whole window's layout. The pane's own root is a full-height flex column; as a direct flex *item*
-   * of a row it has no `flex-grow`, so it shrink-wrapped to its content and the workbench rendered as
-   * a narrow column with most of the window empty beside it. As a block child it is full width for
-   * free, which is also exactly how the two panes below get their width.
-   *
-   * No `overflow-hidden` either, unlike the split panes below. There the clip is what keeps one
-   * pane's contents out of the other; here there is nothing to clip against, and adding one would
-   * silently change what a single workbench is allowed to overflow -- which it did not have to worry
-   * about before this component existed.
-   */
-  if (panes.length < 2) {
-    return (
-      <div ref={frame} className={SOLO_PANE}>
-        {panes[0] ?? null}
-      </div>
-    )
-  }
+  const solo = panes.length < 2
 
+  /*
+   * One shape for both cases, and this is load-bearing rather than tidy.
+   *
+   * These two states used to be separate `return`s: a lone `<div className={SOLO_PANE}>` holding the
+   * pane, versus a flex row whose *first child was a wrapper div*. Going from two panes to one --
+   * closing a tab in a split, or turning the split off -- therefore changed the element at child index
+   * 0 from a `div` to the pane itself. React reconciles by position and type, so a type change there
+   * unmounts the whole subtree and mounts a fresh one.
+   *
+   * That is not a cosmetic flicker. A Workbench captures its live graph and document in an unmount
+   * cleanup and reloads them from the tab record on mount, and the capture lands in state *after* the
+   * render that created the replacement -- so the remounted pane re-applied the graph as it was before
+   * the edits, and reverted the diagram's name with it. Closing one pane silently discarded the work
+   * in the other.
+   *
+   * So the pane always sits inside a wrapper div at child index 0, and only the wrapper's class and
+   * its two siblings change. The panes are then reconciled in place and nothing unmounts.
+   *
+   * `false` in a children array still occupies a slot, which is why the two conditional siblings are
+   * written as `{!solo && ...}` rather than being spread in or omitted.
+   */
   return (
     <div
       ref={frame}
       className={`flex min-h-0 min-w-0 flex-1 ${vertical ? 'flex-row' : 'flex-col'}`}
     >
-      {/* `flexBasis` with `flexGrow: 0`, not a width: the panes are flex children, and a width on a
-          flex child is a suggestion that `flex-1` on its sibling overrides. `minWidth: 0` is the
-          other half -- without it a flex child refuses to shrink below its content, and a React Flow
-          canvas reports a very wide content. */}
-      <div className={FIRST_PANE} style={{ flex: `0 0 ${fraction * 100}%` }}>
-        {panes[0]}
+      {/* Split: `flexBasis` with `flexGrow: 0`, not a width -- the panes are flex children, and a
+          width on a flex child is a suggestion that `flex-1` on its sibling overrides. `min-w-0` is
+          the other half: without it a flex child refuses to shrink below its content, and a React
+          Flow canvas reports a very wide content.
+          Solo: `flex-1` and no inline basis, so it simply fills the frame. */}
+      <div
+        className={solo ? SOLO_PANE : FIRST_PANE}
+        style={solo ? undefined : { flex: `0 0 ${fraction * 100}%` }}
+      >
+        {panes[0] ?? null}
       </div>
 
-      <div
-        role="separator"
-        aria-orientation={vertical ? 'vertical' : 'horizontal'}
-        aria-label="Resize the split"
-        onPointerDown={startDrag}
-        /* `nodrag nopan` even though this is outside the canvas: in a split the divider sits between
-           two React Flow instances, and a pointerdown that reached either of them would start a
-           pan while the divider was being dragged. */
-        className={`nodrag nopan shrink-0 bg-twilio-gray-20 transition-colors hover:bg-twilio-blue ${
-          vertical ? 'w-1 cursor-col-resize' : 'h-1 cursor-row-resize'
-        }`}
-      />
+      {!solo && (
+        <div
+          role="separator"
+          aria-orientation={vertical ? 'vertical' : 'horizontal'}
+          aria-label="Resize the split"
+          onPointerDown={startDrag}
+          /* `nodrag nopan` even though this is outside the canvas: in a split the divider sits between
+             two React Flow instances, and a pointerdown that reached either of them would start a
+             pan while the divider was being dragged. */
+          className={`nodrag nopan shrink-0 bg-twilio-gray-20 transition-colors hover:bg-twilio-blue ${
+            vertical ? 'w-1 cursor-col-resize' : 'h-1 cursor-row-resize'
+          }`}
+        />
+      )}
 
-      <div className={SECOND_PANE}>{panes[1]}</div>
+      {!solo && <div className={SECOND_PANE}>{panes[1]}</div>}
     </div>
   )
 }

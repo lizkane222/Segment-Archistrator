@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 import responses as responses_lib
 
-from apps.auth_workspace.models import WorkspaceSession
+from apps.auth_workspace.models import OperatorWorkspaceBookmark, WorkspaceSession
 from apps.segmentapi import graphql as gql
 from apps.segmentapi.exceptions import SegmentAuthError, SegmentError
 from apps.segmentapi.graphql import SegmentGraphQLClient
@@ -263,10 +263,10 @@ def test_a_workspace_missing_an_id_is_skipped_rather_than_crashing(mock_segment)
 # --- the connect flow ------------------------------------------------------
 
 
-def test_one_visible_workspace_connects_without_asking(client, mock_segment):
+def test_one_visible_workspace_connects_without_asking(twilio_client, mock_segment):
     """The commonest case for a customer-facing login. A list of one is ceremony."""
     graphql_reply(mock_segment, ONE)
-    response = connect(client)
+    response = connect(twilio_client)
 
     assert response.status_code == 201
     assert response.json()["workspace"]["slug"] == "solo-co"
@@ -275,7 +275,7 @@ def test_one_visible_workspace_connects_without_asking(client, mock_segment):
     assert session.workspace_id == "ws_solo"
 
 
-def test_several_visible_workspaces_ask_which_one(client, mock_segment):
+def test_several_visible_workspaces_ask_which_one(twilio_client, mock_segment):
     """
     A choice, not an error -- so a 200 with the list, and no session yet.
 
@@ -283,44 +283,47 @@ def test_several_visible_workspaces_ask_which_one(client, mock_segment):
     workspace, which is the one outcome here that would be actively harmful.
     """
     graphql_reply(mock_segment, MANY)
-    response = connect(client)
+    response = connect(twilio_client)
 
     assert response.status_code == 200
     body = response.json()
     assert body["needsChoice"] is True
     # Sorted by name, so a person in two hundred workspaces gets something scannable.
     assert [entry["slug"] for entry in body["workspaces"]] == ["acme", "beta"]
-    assert WorkspaceSession.objects.count() == 0
+    # Not zero: the account's own tokenless session already exists. No *connected* one, though.
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
 
 
-def test_the_chosen_workspace_is_the_one_connected(client, mock_segment):
+def test_the_chosen_workspace_is_the_one_connected(twilio_client, mock_segment):
     graphql_reply(mock_segment, MANY)
-    response = connect(client, workspace_id="ws_a")
+    response = connect(twilio_client, workspace_id="ws_a")
 
     assert response.status_code == 201
     assert WorkspaceSession.objects.get().workspace_id == "ws_a"
 
 
-def test_a_workspace_the_token_cannot_see_is_refused(client, mock_segment):
-    """Not silently substituted, and not a 500. The credential changed under the client."""
+def test_a_workspace_the_token_cannot_see_is_refused(twilio_client, mock_segment):
+    """Not silently substituted, and not a 500. The credential changed under the twilio_client."""
     graphql_reply(mock_segment, MANY)
-    response = connect(client, workspace_id="ws_someone_elses")
+    response = connect(twilio_client, workspace_id="ws_someone_elses")
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "workspace_not_visible"
-    assert WorkspaceSession.objects.count() == 0
+    # Not zero: the account's own tokenless session already exists. No *connected* one, though.
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
 
 
-def test_a_rejected_auth_token_leaves_no_session(client, mock_segment):
+def test_a_rejected_auth_token_leaves_no_session(twilio_client, mock_segment):
     graphql_reply(mock_segment, status=401, body={})
-    response = connect(client)
+    response = connect(twilio_client)
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_token"
-    assert WorkspaceSession.objects.count() == 0
+    # Not zero: the account's own tokenless session already exists. No *connected* one, though.
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
 
 
-def test_a_gateway_fault_is_not_reported_as_a_bad_token(client, mock_segment):
+def test_a_gateway_fault_is_not_reported_as_a_bad_token(twilio_client, mock_segment):
     """
     502, not 401.
 
@@ -328,13 +331,13 @@ def test_a_gateway_fault_is_not_reported_as_a_bad_token(client, mock_segment):
     send them to re-copy something that is fine.
     """
     graphql_reply(mock_segment, errors=[{"message": "downstream service timed out"}])
-    response = connect(client)
+    response = connect(twilio_client)
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "graphql_error"
 
 
-def test_the_workspaces_own_region_wins_over_the_dialogs_guess(client, mock_segment):
+def test_the_workspaces_own_region_wins_over_the_dialogs_guess(twilio_client, mock_segment):
     """
     A person's auth_token can see workspaces in both regions, so the radio button is a guess and
     the gateway's answer is the fact. Storing the guess would point every later read at the
@@ -346,20 +349,20 @@ def test_the_workspaces_own_region_wins_over_the_dialogs_guess(client, mock_segm
         json={"data": {"workspaces": [{**ONE[0], "region": "eu"}]}},
         status=200,
     )
-    connect(client, region="us")
+    connect(twilio_client, region="us")
     assert WorkspaceSession.objects.get().region == "eu"
 
 
-def test_the_auth_token_is_never_returned_to_the_browser(client, mock_segment):
+def test_the_auth_token_is_never_returned_to_the_browser(twilio_client, mock_segment):
     graphql_reply(mock_segment, ONE)
-    body = connect(client).content.decode()
+    body = connect(twilio_client).content.decode()
     assert FAKE_AUTH_TOKEN not in body
     # Nor any leading chunk of it. A JWT's header is shared between all of them, so a prefix
     # check has to be long enough to be about *this* token.
     assert FAKE_AUTH_TOKEN[:40] not in body
 
 
-def test_a_long_jwt_is_not_truncated_by_the_serializer(client, mock_segment):
+def test_a_long_jwt_is_not_truncated_by_the_serializer(twilio_client, mock_segment):
     """
     A Public API token is short; an auth_token is a JWT carrying a session's claims and runs
     past 1KB. Truncating one surfaces as "Segment rejected that token", which sends the user to
@@ -367,7 +370,7 @@ def test_a_long_jwt_is_not_truncated_by_the_serializer(client, mock_segment):
     """
     long_token = "eyJhbGciOiJIUzI1NiJ9." + ("x" * 1500) + ".sig"
     graphql_reply(mock_segment, ONE)
-    response = client.post(
+    response = twilio_client.post(
         "/api/session",
         {"token": long_token, "region": "us", "credential": "graphql"},
         format="json",
@@ -379,7 +382,7 @@ def test_a_long_jwt_is_not_truncated_by_the_serializer(client, mock_segment):
 # --- the boundary of what a GraphQL session can do -------------------------
 
 
-def test_a_graphql_session_reads_the_connections_spine(client, mock_segment):
+def test_a_graphql_session_reads_the_connections_spine(twilio_client, mock_segment):
     """
     A GraphQL session can now load a workspace -- the Connections spine of it.
 
@@ -388,7 +391,7 @@ def test_a_graphql_session_reads_the_connections_spine(client, mock_segment):
     and their connections, so the refusal has become a partial answer.
     """
     graphql_reply(mock_segment, ONE)
-    connect(client)
+    connect(twilio_client)
 
     graphql_reply(
         mock_segment,
@@ -418,7 +421,7 @@ def test_a_graphql_session_reads_the_connections_spine(client, mock_segment):
         },
     )
 
-    response = client.get("/api/workspace/graph")
+    response = twilio_client.get("/api/workspace/graph")
     assert response.status_code == 200
     graph = response.json()
 
@@ -431,14 +434,14 @@ def test_a_graphql_session_reads_the_connections_spine(client, mock_segment):
     assert len(graph["edges"]) == 2
 
 
-def test_the_graphql_graph_says_what_it_could_not_read(client, mock_segment):
+def test_the_graphql_graph_says_what_it_could_not_read(twilio_client, mock_segment):
     """
     The load-bearing half. Four of the six resource families have no GraphQL equivalent here, and
     shipping the other two silently would leave someone concluding the workspace has no Unify --
     a wrong fact about the customer rather than a gap in this tool.
     """
     graphql_reply(mock_segment, ONE)
-    connect(client)
+    connect(twilio_client)
     graphql_reply(
         mock_segment,
         body={
@@ -448,20 +451,20 @@ def test_the_graphql_graph_says_what_it_could_not_read(client, mock_segment):
         },
     )
 
-    warnings = " ".join(client.get("/api/workspace/graph").json()["warnings"])
+    warnings = " ".join(twilio_client.get("/api/workspace/graph").json()["warnings"])
     assert "GraphQL" in warnings
     for absent in ("functions", "Reverse ETL", "Unify", "audiences", "computed traits"):
         assert absent in warnings, absent
     assert "this tool's limitation" in warnings
 
 
-def test_an_edge_to_something_the_query_did_not_return_is_dropped(client, mock_segment):
+def test_an_edge_to_something_the_query_did_not_return_is_dropped(twilio_client, mock_segment):
     """
     An edge to a node that is not in the graph renders as a line to nothing, which reads as a broken
     diagram rather than a partial one -- and the save-time validator rejects it outright.
     """
     graphql_reply(mock_segment, ONE)
-    connect(client)
+    connect(twilio_client)
     graphql_reply(
         mock_segment,
         body={
@@ -489,7 +492,7 @@ def test_an_edge_to_something_the_query_did_not_return_is_dropped(client, mock_s
         },
     )
 
-    graph = client.get("/api/workspace/graph").json()
+    graph = twilio_client.get("/api/workspace/graph").json()
     known = {node["id"] for node in graph["nodes"]}
     for edge in graph["edges"]:
         assert edge["source"] in known and edge["target"] in known
@@ -500,11 +503,11 @@ def test_a_public_api_session_still_reads_the_workspace(auth_client, workspace_o
     assert auth_client.get("/api/session").json()["workspace"]["canReadWorkspace"] is True
 
 
-def test_the_session_payload_says_which_credential_it_holds(client, mock_segment):
+def test_the_session_payload_says_which_credential_it_holds(twilio_client, mock_segment):
     graphql_reply(mock_segment, ONE)
-    connect(client)
+    connect(twilio_client)
 
-    workspace = client.get("/api/session").json()["workspace"]
+    workspace = twilio_client.get("/api/session").json()["workspace"]
     assert workspace["credential"] == "graphql"
     assert workspace["canReadWorkspace"] is False
 
@@ -520,3 +523,183 @@ def test_the_default_credential_is_the_public_api_one(client, workspace_ok):
     response = client.post("/api/session", {"token": FAKE_TOKEN, "region": "us"}, format="json")
     assert response.status_code == 201
     assert WorkspaceSession.objects.get().credential_kind == "public_api"
+
+
+# --- the GraphQL credential is limited to Twilio accounts -------------------
+
+
+def test_graphql_is_refused_for_a_signed_out_visitor(client, mock_segment):
+    """No account at all -- the commonest way to reach this gate."""
+    response = connect(client)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "graphql_not_allowed"
+    assert len(mock_segment.calls) == 0
+
+
+def test_graphql_is_refused_for_a_non_twilio_account(account_client, mock_segment):
+    """Signed in, but `account`'s email is `@example.com` -- still refused."""
+    response = connect(account_client)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "graphql_not_allowed"
+    assert len(mock_segment.calls) == 0
+
+
+def test_graphql_is_allowed_for_a_twilio_account(twilio_client, mock_segment):
+    graphql_reply(mock_segment, ONE)
+    assert connect(twilio_client).status_code == 201
+
+
+def test_the_public_api_credential_is_not_gated_by_email(client, workspace_ok):
+    """The gate is specific to `credential=graphql` -- a Public API token needs no account at all."""
+    from tests.conftest import FAKE_TOKEN
+
+    response = client.post("/api/session", {"token": FAKE_TOKEN, "region": "us"}, format="json")
+    assert response.status_code == 201
+
+
+# --- Segment's own tooling workspaces are never shown ------------------------
+
+TOOLING = [
+    {"id": "ws_admin", "slug": "segment-admin", "name": "Segment Admin", "region": "us"},
+    {"id": "ws_eng", "slug": "segment-engineering", "name": "Segment Engineering", "region": "us"},
+    {"id": "ws_seg", "slug": "segment", "name": "Segment", "region": "us"},
+]
+OPERATOR = {"id": "ws_op", "slug": "segment-operator", "name": "Segment Operator", "region": "us"}
+
+
+def test_admin_engineering_and_segment_never_appear_in_the_list(twilio_client, mock_segment):
+    graphql_reply(mock_segment, [*MANY, *TOOLING])
+    body = connect(twilio_client).json()
+
+    slugs = {entry["slug"] for entry in body["workspaces"]}
+    assert slugs == {"acme", "beta"}
+
+
+def test_a_hidden_slug_cannot_be_connected_to_even_by_id(twilio_client, mock_segment):
+    """Not just hidden from the list -- refused outright if somehow chosen."""
+    graphql_reply(mock_segment, [*ONE, *TOOLING])
+    response = connect(twilio_client, workspace_id="ws_admin")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "workspace_not_visible"
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
+
+
+# --- segment-operator is a gateway, not a workspace --------------------------
+
+
+def test_segment_operator_appears_in_the_list_like_any_other_workspace(twilio_client, mock_segment):
+    graphql_reply(mock_segment, [*MANY, OPERATOR])
+    body = connect(twilio_client).json()
+    assert "segment-operator" in {entry["slug"] for entry in body["workspaces"]}
+
+
+def test_clicking_segment_operator_asks_for_a_slug_instead_of_connecting(twilio_client, mock_segment):
+    graphql_reply(mock_segment, [OPERATOR])
+    response = connect(twilio_client, workspace_id="ws_op")
+
+    assert response.status_code == 200
+    assert response.json()["needsSlug"] is True
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
+
+
+def test_resolving_a_slug_bookmarks_it_and_reoffers_the_choice(twilio_client, mock_segment, twilio_account):
+    graphql_reply(mock_segment, [OPERATOR])
+    graphql_reply(mock_segment, body={"data": {"workspace": {**ONE[0]}}})
+
+    response = connect(twilio_client, workspace_slug="solo-co")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["needsChoice"] is True
+    assert "solo-co" in {entry["slug"] for entry in body["workspaces"]}
+    # No session yet -- resolving the slug adds it to the list, it does not connect.
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
+
+    bookmark = OperatorWorkspaceBookmark.objects.get(account=twilio_account)
+    assert bookmark.slug == "solo-co"
+    assert bookmark.workspace_id == "ws_solo"
+
+
+def test_an_unresolvable_slug_is_refused_without_being_bookmarked(twilio_client, mock_segment, twilio_account):
+    graphql_reply(mock_segment, [OPERATOR])
+    graphql_reply(mock_segment, body={"data": {"workspace": None}})
+
+    response = connect(twilio_client, workspace_slug="not-a-real-workspace")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "workspace_not_visible"
+    assert not OperatorWorkspaceBookmark.objects.filter(account=twilio_account).exists()
+
+
+def test_a_bookmarked_workspace_reappears_on_a_later_connect(twilio_client, mock_segment, twilio_account):
+    OperatorWorkspaceBookmark.objects.create(
+        account=twilio_account,
+        slug="solo-co",
+        workspace_id="ws_solo",
+        workspace_name="Solo Co",
+        region="us",
+    )
+    # This token's raw list doesn't include it -- the bookmark is what puts it in the merged list.
+    graphql_reply(mock_segment, [OPERATOR])
+    body = connect(twilio_client).json()
+    assert "solo-co" in {entry["slug"] for entry in body["workspaces"]}
+
+
+def test_a_bookmarked_workspace_is_re_verified_before_connecting(twilio_client, mock_segment, twilio_account):
+    """
+    A bookmark is cached, not authorization. The token attached to *this* request has to be
+    able to see it right now, not merely have been able to at some point in the past.
+    """
+    OperatorWorkspaceBookmark.objects.create(
+        account=twilio_account,
+        slug="solo-co",
+        workspace_id="ws_solo",
+        workspace_name="Solo Co",
+        region="us",
+    )
+    graphql_reply(mock_segment, [OPERATOR])
+    graphql_reply(mock_segment, body={"data": {"workspace": {**ONE[0]}}})
+
+    response = connect(twilio_client, workspace_id="ws_solo")
+
+    assert response.status_code == 201
+    assert WorkspaceSession.objects.get(encrypted_token__isnull=False).workspace_id == "ws_solo"
+
+
+def test_a_bookmarked_workspace_no_longer_reachable_is_rejected(twilio_client, mock_segment, twilio_account):
+    OperatorWorkspaceBookmark.objects.create(
+        account=twilio_account,
+        slug="solo-co",
+        workspace_id="ws_solo",
+        workspace_name="Solo Co",
+        region="us",
+    )
+    graphql_reply(mock_segment, [OPERATOR])
+    # The re-verification call finds nothing this time -- access was revoked since it was bookmarked.
+    graphql_reply(mock_segment, body={"data": {"workspace": None}})
+
+    response = connect(twilio_client, workspace_id="ws_solo")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "workspace_not_visible"
+    assert WorkspaceSession.objects.filter(encrypted_token__isnull=False).count() == 0
+
+
+def test_a_signed_out_visitor_resolving_a_slug_gets_it_this_time_only(mock_segment):
+    """
+    No account, so nothing to save the bookmark under -- but the resolve itself still succeeds
+    for this attempt. (The gate on `credential=graphql` needing a Twilio account still applies;
+    this exercises the merge/bookmark logic in isolation.)
+    """
+    from apps.auth_workspace.views import SessionView
+
+    graphql_reply(mock_segment, [OPERATOR])
+    graphql_reply(mock_segment, body={"data": {"workspace": {**ONE[0]}}})
+
+    outcome = SessionView()._workspace_from_graphql(
+        FAKE_AUTH_TOKEN, region="us", chosen="", chosen_slug="solo-co", account=None
+    )
+    assert OperatorWorkspaceBookmark.objects.count() == 0
+    assert outcome.data["needsChoice"] is True
+    assert "solo-co" in {entry["slug"] for entry in outcome.data["workspaces"]}

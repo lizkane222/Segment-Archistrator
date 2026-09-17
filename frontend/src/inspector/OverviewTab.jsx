@@ -56,6 +56,16 @@ export default function OverviewTab({ node, topology, zoneName, onUpdate, onNoti
                  to the workspace resource a reader would search for. */
               segmentName:
                 data.bound === false ? undefined : (data.segmentName ?? data.name),
+              /*
+               * And drop the formatted version of the old name.
+               *
+               * `nameRich` is what the card draws when it exists (see nodes/RichLabel.jsx), so a
+               * name retyped here while a formatted one was stored would leave the canvas showing
+               * the previous text -- the field would appear to do nothing. Typing a fresh name is
+               * replacing the label, formatting included; the way to keep the formatting and
+               * change a word is to edit it on the card.
+               */
+              nameRich: undefined,
             })
           }
         />
@@ -108,7 +118,14 @@ export default function OverviewTab({ node, topology, zoneName, onUpdate, onNoti
               field={eye('enabled')}
             />
             {data.status && <Row label="State" value={data.status} field={eye('status')} />}
-            {data.size !== null && data.size !== undefined && (
+            {/*
+              Only a *scalar* size, which is the one this row was written for: the row count or byte
+              size a warehouse reports. `data.size` is also where the canvas keeps a node's chosen
+              box (`{width, height}` -- see `componentSize`), and the two share the field name, so
+              anything that has been resized -- and every shape and table, which arrive with a box
+              -- was printing "Size [object Object]" in the inspector.
+            */}
+            {data.size !== null && data.size !== undefined && typeof data.size !== 'object' && (
               <Row label="Size" value={data.size.toLocaleString?.() ?? data.size} />
             )}
             {data.computeCadence && (

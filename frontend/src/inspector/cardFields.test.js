@@ -59,30 +59,32 @@ describe('the table', () => {
     }
   })
 
-  it('defaults everything on except the zone', () => {
-    /* Asked for directly. Zone is the exception because the card is drawn *inside* its zone, so the
-       name repeats what the position already says. */
+  it('defaults everything on except description and the zone', () => {
+    /* Description and zone are both asked-for exceptions. The zone is drawn *inside* its zone, so
+       the name repeats what the position already says; description is prose meant for the
+       inspector, and printing it on every card by default crowds a diagram that has more than a
+       couple of components on it. */
     const off = CARD_FIELDS.filter((field) => !field.defaultOn).map((field) => field.id)
-    expect(off).toEqual(['zone'])
+    expect(off).toEqual(['description', 'zone'])
   })
 })
 
 describe('fieldShown', () => {
   it('follows the table when nothing is stored', () => {
-    expect(fieldShown(source(), 'description')).toBe(true)
+    expect(fieldShown(source(), 'description')).toBe(false)
     expect(fieldShown(source(), 'zone')).toBe(false)
   })
 
   it('follows an explicit override either way', () => {
     expect(fieldShown(source({ showFields: { zone: true } }), 'zone')).toBe(true)
-    expect(fieldShown(source({ showFields: { description: false } }), 'description')).toBe(false)
+    expect(fieldShown(source({ showFields: { description: true } }), 'description')).toBe(true)
   })
 
   it('ignores a stored value that is not a boolean', () => {
     /* Hand-edited documents happen. A truthy string must not be read as "on" by accident, because
        the round trip through `toggleField` would then never be able to clear it. */
     expect(fieldShown(source({ showFields: { zone: 'yes' } }), 'zone')).toBe(false)
-    expect(fieldShown(source({ showFields: { description: 0 } }), 'description')).toBe(true)
+    expect(fieldShown(source({ showFields: { description: 0 } }), 'description')).toBe(false)
   })
 
   it('says no for a field it has never heard of', () => {
@@ -90,14 +92,14 @@ describe('fieldShown', () => {
   })
 
   it('survives being handed nothing', () => {
-    expect(fieldShown(null, 'description')).toBe(true)
+    expect(fieldShown(null, 'description')).toBe(false)
     expect(fieldShown(undefined, 'zone')).toBe(false)
   })
 })
 
 describe('toggleField', () => {
   it('stores only a decision that differs from the default', () => {
-    expect(toggleField(source(), 'description', false)).toEqual({ description: false })
+    expect(toggleField(source(), 'description', true)).toEqual({ description: true })
     expect(toggleField(source(), 'zone', true)).toEqual({ zone: true })
   })
 
@@ -114,11 +116,11 @@ describe('toggleField', () => {
   })
 
   it('round-trips to nothing', () => {
-    /* Off, on, off again -- and the document is exactly as it started, not carrying an empty object. */
+    /* On, off again -- and the document is exactly as it started, not carrying an empty object. */
     let data = source()
-    data = { ...data, showFields: toggleField(data, 'description', false) }
-    expect(data.showFields).toEqual({ description: false })
     data = { ...data, showFields: toggleField(data, 'description', true) }
+    expect(data.showFields).toEqual({ description: true })
+    data = { ...data, showFields: toggleField(data, 'description', false) }
     expect(data.showFields).toBeUndefined()
   })
 
@@ -136,9 +138,13 @@ describe('toggleField', () => {
 })
 
 describe('what a card prints', () => {
-  it('prints the description, which is what the request was about', () => {
-    const rows = visibleCardFields(source())
+  it('prints the description once turned on', () => {
+    const rows = visibleCardFields(source({ showFields: { description: true } }))
     expect(rows.find((row) => row.id === 'description')?.value).toBe('The marketing site')
+  })
+
+  it('leaves the description off until it is asked for', () => {
+    expect(visibleCardFields(source()).some((row) => row.id === 'description')).toBe(false)
   })
 
   it('leaves the zone off until it is asked for', () => {
@@ -158,9 +164,11 @@ describe('what a card prints', () => {
 
   it('treats an empty string as absent', () => {
     /* Real in a hand-edited document, and the reason `read` trims. */
-    expect(visibleCardFields(source({ description: '   ' })).some((r) => r.id === 'description')).toBe(
-      false,
-    )
+    expect(
+      visibleCardFields(
+        source({ description: '   ', showFields: { description: true } }),
+      ).some((r) => r.id === 'description'),
+    ).toBe(false)
   })
 
   it('keeps the table order, so two cards read the same way', () => {

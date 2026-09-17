@@ -39,15 +39,25 @@ const RUNTIME_NODE_KEYS = new Set([
   'targetPosition',
   'positionAbsolute',
   'internals',
-  /* Where the walkthrough's playhead is, the trace step it is showing, and which
-     scenarios are lighting this node. Runtime in the same sense as `selected`:
-     leaving them in would put a simulation's transient state in Postgres, and --
-     because `graphFingerprint` reads node data -- would mark the document dirty
-     simply for playing an event through it. The scenarios themselves *are* stored;
-     one frame of one playthrough of them is not. */
+  /* Which scenarios are lighting this node, and the verdict each of them reached here.
+     Runtime in the same sense as `selected`: leaving them in would put a simulation's
+     transient state in Postgres, and -- because `graphFingerprint` reads node data --
+     would mark the document dirty simply for playing an event through it. The scenarios
+     themselves *are* stored; one frame of one playthrough of them is not.
+
+     `anchor` and `anchorStep` are no longer written by anything: the walkthrough used to
+     pin a note open on the playhead's component, and those notes now stack in a lane above
+     the diagram instead (simulation/NotesLane.jsx). Kept in the list, and under test, because
+     the cost is two strings and the failure they guard against is silent. */
   'anchor',
   'anchorStep',
   'paths',
+  /* A profile pasted in from the real Profile API -- see inspector/ProfilePreview.jsx.
+     Deliberately never saved: it is real customer traits and identifiers, and this is
+     the same rule `PROFILE_SECTIONS` in canvas/grouping.js was written under -- a
+     diagram that gets exported to PDF is not where that belongs. It survives a reload
+     no better than `paths` does, and for the same reason. */
+  'profileSnapshot',
 ])
 
 /* Mirrors apps/diagrams/models.py SECRET_KEY_PATTERN. The server strips these on
@@ -157,6 +167,10 @@ export function serializeEdge(edge) {
      */
     ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
     ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
+    /* Where along that side, when a connector was dragged to a precise point rather than the
+       midpoint -- see `fixedHandleForSide` in canvas/handles.js. */
+    ...(edge.data?.sourceAnchor ? { sourceAnchor: edge.data.sourceAnchor } : {}),
+    ...(edge.data?.targetAnchor ? { targetAnchor: edge.data.targetAnchor } : {}),
     /*
      * How the line is drawn, and the bends the user dragged into it.
      *
@@ -180,6 +194,17 @@ export function serializeEdge(edge) {
           })),
         }
       : {}),
+    /*
+     * Line colour, dash pattern and arrow direction -- the same omit-when-absent reasoning as
+     * `line`/`waypoints` above, so an edge nobody has styled serializes byte-identically to how
+     * it did before styling existed. `arrowEnd` is the one exception: its *default* is `true`
+     * (every connector wears an arrow unless told otherwise), so it is only written when the
+     * user turned it off, not when it is merely absent.
+     */
+    ...(edge.data?.color ? { color: edge.data.color } : {}),
+    ...(edge.data?.strokeStyle ? { strokeStyle: edge.data.strokeStyle } : {}),
+    ...(edge.data?.arrowStart ? { arrowStart: edge.data.arrowStart } : {}),
+    ...(edge.data?.arrowEnd === false ? { arrowEnd: false } : {}),
     phase: edge.data?.phase ?? null,
     discovered: edge.data?.discovered ?? false,
   }

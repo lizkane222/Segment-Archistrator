@@ -34,7 +34,13 @@ const SUBMENU_WIDTH = 176
 const IS_MAC =
   typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform ?? '')
 
-export default function ContextMenu({ at, context, onRun, onClose }) {
+/**
+ * @param onPreview  called with a command's `preview` value while the pointer or the focus is
+ *   on its row, and with `null` when it leaves. Used by the flow directions to animate the
+ *   connector the way it would run before anything is committed -- a menu row cannot show the
+ *   consequence of turning a line round, and the canvas can.
+ */
+export default function ContextMenu({ at, context, onRun, onClose, onPreview }) {
   const card = useRef(null)
   const [offset, setOffset] = useState(null)
 
@@ -75,6 +81,11 @@ export default function ContextMenu({ at, context, onRun, onClose }) {
     }
   }, [onClose])
 
+  /* Clear the preview when the menu goes, however it goes -- Escape, a click outside, a
+     command running, or the pointer leaving mid-hover. Without this a menu dismissed while a
+     flow row was hovered leaves the canvas animating a direction nobody chose. */
+  useEffect(() => () => onPreview?.(null), [onPreview])
+
   const items = commandsFor(at.menu, context)
   if (!items.length) return null
 
@@ -111,7 +122,7 @@ export default function ContextMenu({ at, context, onRun, onClose }) {
         const divided = index > 0 && items[index - 1].group !== item.group
         return (
           <div key={item.id} className={divided ? 'mt-1 border-t border-twilio-gray-20 pt-1' : ''}>
-            <MenuItem item={item} onRun={onRun} onClose={onClose} />
+            <MenuItem item={item} onRun={onRun} onClose={onClose} onPreview={onPreview} />
           </div>
         )
       })}
@@ -126,7 +137,7 @@ export default function ContextMenu({ at, context, onRun, onClose }) {
  * and a parent that ran its own first child on click would make a mis-aimed pointer silently
  * rearrange the diagram.
  */
-function MenuItem({ item, onRun, onClose }) {
+function MenuItem({ item, onRun, onClose, onPreview }) {
   const branch = Boolean(item.children?.length)
   /* Opened on hover *and* kept open by focus, so the submenu is reachable by keyboard.
      Held here rather than in the parent so hovering one branch closes the others for free --
@@ -150,8 +161,17 @@ function MenuItem({ item, onRun, onClose }) {
     <div
       ref={row}
       className="relative"
-      onMouseEnter={() => branch && item.enabled && setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      onMouseEnter={() => {
+        if (branch && item.enabled) setOpen(true)
+        /* A leaf's own preview, so a top-level flow row would work the same way as a nested
+           one. A branch has none of its own -- "Flow" is not a direction -- and previewing on
+           the parent would show one arbitrary child's answer. */
+        if (!branch && item.enabled && item.preview) onPreview?.(item.preview)
+      }}
+      onMouseLeave={() => {
+        setOpen(false)
+        if (!branch && item.preview) onPreview?.(null)
+      }}
     >
       <button
         type="button"
@@ -206,6 +226,13 @@ function MenuItem({ item, onRun, onClose }) {
                   onRun(child.id)
                   onClose()
                 }}
+                /* Hover *and* focus, so the preview is not mouse-only: the flow rows are
+                   reachable by keyboard and the animation is the only thing that explains what
+                   the row will do. Cleared on the way out either way. */
+                onMouseEnter={() => child.enabled && child.preview && onPreview?.(child.preview)}
+                onMouseLeave={() => child.preview && onPreview?.(null)}
+                onFocus={() => child.enabled && child.preview && onPreview?.(child.preview)}
+                onBlur={() => child.preview && onPreview?.(null)}
                 className={`flex w-full items-baseline gap-3 px-3 py-1 text-left ${
                   child.enabled
                     ? 'text-twilio-navy hover:bg-twilio-blue-light'

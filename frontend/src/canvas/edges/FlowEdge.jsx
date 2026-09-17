@@ -26,11 +26,20 @@
  * would be competing with the handles of the four edges near it.
  */
 
-import { useCallback, useRef, useState } from 'react'
-import { BaseEdge, EdgeLabelRenderer, useInternalNode, useReactFlow } from '@xyflow/react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  BaseEdge,
+  EdgeLabelRenderer,
+  useInternalNode,
+  useNodesData,
+  useReactFlow,
+} from '@xyflow/react'
 
 import { useChrome } from '../chrome.js'
+import { flowsAlong } from '../direction.js'
 import { parseFreeHandle, pointOnBorder } from '../handles.js'
+import { borderColorFor } from '../kinds.js'
+import { zoneNodeId } from '../layout.js'
 import {
   cleanWaypoints,
   cornerHandles,
@@ -54,6 +63,16 @@ import {
  * whichever one came last and silently hide the comparison.
  */
 const SEGMENT = 11
+
+/*
+ * How long the line takes to take up its travelled colour, and to give it back.
+ *
+ * Comfortably shorter than the ~1s beat it sits inside, or the change would still be running when
+ * the event had moved on. Long enough to be a fade rather than a cut: this is the trail the event
+ * leaves, and a trail that snapped into place would read as the line switching on -- which is the
+ * thing the moving event replaced.
+ */
+const GLOW_FADE_MS = 420
 
 /*
  * What one drag gesture resolves to, given where the pointer is.
@@ -83,18 +102,41 @@ function anchorPoint(node, handleId) {
   return pointOnBorder({ x: at.x, y: at.y, width, height }, anchor)
 }
 
+/**
+ * A node's centre in flow coordinates, or null while it is unmeasured.
+ *
+ * Centres rather than the border anchors the line is actually drawn between, because the menu
+ * command that commits the change works from centres too (it has positions and chosen sizes,
+ * not measured handle geometry). Both have to agree or the preview would animate one way and
+ * the click would do the other -- which is the one thing a preview must not do.
+ */
+function centre(node) {
+  const at = node?.internals?.positionAbsolute
+  const width = node?.measured?.width
+  const height = node?.measured?.height
+  if (!at || !width || !height) return null
+  return { x: at.x + width / 2, y: at.y + height / 2 }
+}
+
 function resolveDrag(gesture, point) {
   if (gesture.mode === 'slide') return dragSegment(gesture.points, gesture.index, point)
   if (gesture.mode === 'corner') return dragCorner(gesture.points, gesture.index, point)
   return moveWaypoint(gesture.list, gesture.index, point)
 }
 
+/* The three patterns the Edge Style tab offers. `undefined` for solid, matching how
+   every other "unstyled" property in this app resolves -- an absent dash array is
+   what a plain line is, not a fourth case for the renderer to carry. */
+function dashArrayFor(strokeStyle) {
+  if (strokeStyle === 'dashed') return '10 6'
+  if (strokeStyle === 'dotted') return '2 4'
+  return undefined
+}
+
 export default function FlowEdge({
   id,
   source,
   target,
-  sourceHandleId,
-  targetHandleId,
   sourceX,
   sourceY,
   targetX,
@@ -102,12 +144,11 @@ export default function FlowEdge({
   sourcePosition,
   targetPosition,
   data,
-  markerEnd,
   style,
   selected,
 }) {
   const { screenToFlowPosition } = useReactFlow()
-  const { onWaypoints, adjustingEdgeId, walkthroughActive } = useChrome()
+  const { onWaypoints, adjustingEdgeId, walkthroughActive, flowPreview, routes } = useChrome()
   /* Double-clicking the line puts it in adjust mode -- see Canvas's `onEdgeDoubleClick`. Held there
      rather than here so only one connector is ever in it: two edges showing handles at once means two
      sets of dots competing for the same few pixels wherever the lines cross. */
@@ -117,27 +158,44 @@ export default function FlowEdge({
   const waypoints = cleanWaypoints(data?.waypoints)
 
   /*
+   * The line's own colour, and the arrowheads that have to match it -- one fact, not two,
+   * because an arrow in a different colour from the line it tips would read as a second
+   * decision rather than a detail of the first.
+   *
+   * `data.color` is a manual override; short of that it is the *source* component's own
+   * resolved border colour (see `borderColorFor`), read live off React Flow's store via
+   * `useNodesData` rather than copied onto the edge -- so a source recoloured by dragging
+   * it into a different zone changes every line leaving it without anything writing to
+   * the edges themselves.
+   */
+  const sourceData = useNodesData(source)?.data
+  const sourceZoneData = useNodesData(sourceData?.zone ? zoneNodeId(sourceData.zone) : null)?.data
+  const color = data?.color ?? borderColorFor(sourceData, sourceZoneData)
+  const dashArray = dashArrayFor(data?.strokeStyle)
+  const arrowEnd = data?.arrowEnd ?? true
+  const arrowStart = data?.arrowStart ?? false
+
+  /*
    * A hand-placed anchor somewhere along a node's border, resolved here rather than by React Flow.
    *
-   * It has to be here. The handle a free anchor names follows the cursor and then stops existing, so
-   * React Flow's own lookup finds nothing a moment after the drag and puts that end of the edge at the
-   * node's origin -- which is the line snapping to the top-left corner of the card. See
-   * canvas/handles.js.
+   * It has to be here, and it has to come from `data.sourceAnchor` rather than `sourceHandleId`:
+   * `sourceHandle`/`targetHandle` always name one of the four fixed handles now (see
+   * `fixedHandleForSide` in canvas/handles.js) precisely so React Flow's own lookup always finds
+   * something -- naming the free anchor's own handle there instead used to mean the edge never
+   * drew at all, because that handle exists only for the instant it is being dragged. The precise
+   * point still has to come from somewhere once the drag is over, which is `data`.
    *
    * `useInternalNode` is what makes it possible: it gives the node's absolute position and measured
-   * size, which is exactly what `pointOnBorder` needs. A fixed handle parses as null and falls
-   * straight through to the coordinates React Flow already worked out.
+   * size, which is exactly what `pointOnBorder` needs. No anchor parses as null and falls straight
+   * through to the coordinates React Flow already worked out.
    */
   const fromNode = useInternalNode(source)
   const toNode = useInternalNode(target)
-  const fromAnchor = anchorPoint(fromNode, sourceHandleId)
-  const toAnchor = anchorPoint(toNode, targetHandleId)
+  const fromAnchor = anchorPoint(fromNode, data?.sourceAnchor)
+  const toAnchor = anchorPoint(toNode, data?.targetAnchor)
 
-  /* `?? 0` on the coordinates, not just on the anchor. When a handle id names a handle that is not
-     currently mounted -- which is every free anchor, a moment after the drag that made it -- React
-     Flow cannot resolve the end and passes `null` for all four coordinates (`nullPosition`) rather
-     than skipping the edge. So the anchor is the real answer here and these are only a floor that
-     keeps `NaN` out of the path string, which would make the whole edge vanish. */
+  /* `?? 0` on the coordinates, not just on the anchor -- a floor that keeps `NaN` out of the path
+     string on the frame before a node is measured, which would make the whole edge vanish. */
   const start = fromAnchor ?? { x: sourceX ?? 0, y: sourceY ?? 0, position: sourcePosition }
   const end = toAnchor ?? { x: targetX ?? 0, y: targetY ?? 0, position: targetPosition }
 
@@ -199,19 +257,73 @@ export default function FlowEdge({
   const drawnPoints = live ? live.points : points
 
   /*
-   * One pointer-capture drag, for both moving an existing waypoint and creating a new one.
+   * Publish where this connector runs, for the travelling event to follow.
    *
-   * `setPointerCapture` rather than window listeners: the pointer stays with this element even
-   * when it leaves it, which is what makes a fast drag not fall off the handle -- and the capture
-   * is released for us if the gesture is interrupted, so there is no listener to leak.
+   * Centre to centre, not the border-to-border line that is actually stroked. The event has to
+   * arrive at a component, dwell there and leave from the same point, and a token that stopped at
+   * the near border and resumed at the far one would jump the width of the card at every hop. The
+   * segments inside the two cards are never drawn -- the token is simply over the card while it
+   * covers them, which reads as the event being *in* the component.
+   *
+   * `drawnPoints` and not `points`, so a route being dragged carries the event with it: the line and
+   * the thing travelling it must not be able to disagree about where it goes, which is the entire
+   * reason this is published rather than re-derived. See `edgeRoutes` in canvas/chrome.js.
+   */
+  const fromCentre = centre(fromNode)
+  const toCentre = centre(toNode)
+
+  /* No dependency array, deliberately. The route is derived from this render's own output -- a fresh
+     points array and two freshly computed centres -- so every value it depends on is a new object
+     every time and a dependency list would be a list that always fires while pretending to be a
+     filter. Writing one entry into a Map is cheaper than the comparison would be. */
+  useEffect(() => {
+    if (!routes) return
+    /* Nothing published while a node is unmeasured (the frame after it mounts), rather than a route
+       through NaN. The overlay falls back to a straight line between what it can find, which is
+       wrong for one frame instead of wrong permanently. */
+    if (!fromCentre || !toCentre) routes.forget(id)
+    else routes.publish(id, [fromCentre, ...drawnPoints, toCentre])
+  })
+
+  /* Unmount only, so a deleted connector cannot leave a route behind for the overlay to keep
+     drawing an event along. */
+  useEffect(() => () => routes?.forget(id), [routes, id])
+
+  /*
+   * The Flow preview: what this connector would do if the hovered menu row were chosen.
+   *
+   * `forward` is the whole answer. The path string always runs source-to-target, so a preview
+   * that agrees with the connector's current direction travels along it and one that does not
+   * travels back up it -- and travelling back up it is exactly the information the reader
+   * wants, because it means choosing this row will turn the line round.
+   *
+   * Reversed with `keyPoints` rather than by building a second reversed path string. The path
+   * may carry hand-dragged bends and a rounded polyline, and re-deriving it backwards would be
+   * a second implementation of the router that could disagree with the line on screen.
+   */
+  const previewing =
+    flowPreview && (flowPreview.edgeIds === null || flowPreview.edgeIds.includes(id))
+  const previewForward = previewing
+    ? flowsAlong(fromCentre, toCentre, flowPreview.direction)
+    : true
+
+  /*
+   * One drag, for both moving an existing waypoint and creating a new one.
+   *
+   * Listeners on `window`, not on the handle itself. The handle a gesture starts on is not
+   * guaranteed to still be mounted a moment later -- every other handle of its kind is hidden
+   * by `!dragging` while one is live, and a `bend` drag replaces its own segment-handle div with
+   * a waypoint dot the instant `dragging` becomes truthy. `setPointerCapture` on that element
+   * would be silently dropped the moment it leaves the DOM, orphaning the very listeners meant
+   * to finish the gesture -- which is why the corner and segment handles used to be draggable in
+   * name only. `window` keeps receiving pointer events regardless of what, if anything, is
+   * currently under the pointer.
    */
   const startDrag = useCallback(
     (event, gesture) => {
       /* Or React Flow takes the gesture as a click on the edge and then a pan of the pane. */
       event.stopPropagation()
       event.preventDefault()
-      const element = event.currentTarget
-      element.setPointerCapture?.(event.pointerId)
 
       const at = (moveEvent) => screenToFlowPosition({ x: moveEvent.clientX, y: moveEvent.clientY })
       /* The result of the gesture, given a pointer position -- one function so the frame-by-frame
@@ -220,20 +332,17 @@ export default function FlowEdge({
 
       const onMove = (moveEvent) => setDragging({ ...gesture, point: at(moveEvent) })
       const onUp = (upEvent) => {
-        element.removeEventListener('pointermove', onMove)
-        element.removeEventListener('pointerup', onUp)
-        element.removeEventListener('pointercancel', onUp)
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
         setDragging(null)
         /* Committed once, on release. A write per frame would put one undo entry on the history
            stack per pixel dragged and re-run the whole change pipeline mid-gesture. */
         onWaypoints?.(id, resolveDrag(gesture, at(upEvent)))
       }
-      /* On the element rather than the window, because the pointer capture above routes events
-         here even once the pointer has left it -- and a capture that is broken by the browser
-         releases these with it, so there is no listener to leak. */
-      element.addEventListener('pointermove', onMove)
-      element.addEventListener('pointerup', onUp)
-      element.addEventListener('pointercancel', onUp)
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
     },
     [screenToFlowPosition, onWaypoints, id],
   )
@@ -244,16 +353,45 @@ export default function FlowEdge({
 
   return (
     <>
+      {/* Edge-scoped rather than one shared definition: the colour is per-connector, and a
+          marker id built from anything less would have two differently-coloured lines fighting
+          over one arrowhead. Same geometry as React Flow's own ArrowClosed marker (down to the
+          viewBox and the polyline points), so a styled connector's arrow is the same size and
+          shape it always was -- only the colour is no longer fixed. `orient="auto-start-reverse"`
+          is what lets the one definition serve both ends: referenced from `markerStart` it is
+          drawn rotated 180 degrees automatically, so it points outward there too. */}
+      <defs>
+        <marker
+          id={`${id}-arrow`}
+          markerWidth="12.5"
+          markerHeight="12.5"
+          viewBox="-10 -10 20 20"
+          markerUnits="strokeWidth"
+          orient="auto-start-reverse"
+          refX="0"
+          refY="0"
+        >
+          <polyline
+            points="-5,-4 0,0 -5,4 -5,-4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ stroke: color, fill: color, strokeWidth: 1 }}
+          />
+        </marker>
+      </defs>
       <BaseEdge
         id={id}
         path={drawnPath}
-        markerEnd={markerEnd}
+        markerStart={arrowStart ? `url(#${id}-arrow)` : undefined}
+        markerEnd={arrowEnd ? `url(#${id}-arrow)` : undefined}
         style={{
           /* Faded under its own overlays so the colours read against it. Edges no scenario
              touched are left alone: dimming those would need this component to know that
              something is playing somewhere else, and an edge should not depend on the state of
              edges it cannot see. */
           ...style,
+          stroke: color,
+          strokeDasharray: dashArray,
           /* Three cases. Under its own overlays it fades so the colours read against it; with a
              walkthrough running and no path on it, it recedes with the rest of the diagram the event
              never touched; otherwise it is left alone. */
@@ -265,43 +403,90 @@ export default function FlowEdge({
         }}
       />
 
+      {/*
+        * The Flow preview, drawn above the base line and below the scenario overlays.
+        *
+        * Three dots rather than one, evenly spaced around the cycle: a single dot on a long
+        * connector is off-screen most of the time at the zoom a whole architecture is read at,
+        * and the direction is the entire message. Dashed stroke moving with them for the same
+        * reason -- on a short line the dots are what reads, on a long one the dashes are.
+        *
+        * `flowPreviewDash` animates the offset so the dashes crawl the same way the dots do.
+        * Sign flips with `previewForward`, which is what makes a preview that would turn the
+        * line round visibly run against it.
+        */}
+      {previewing && (
+        <g style={{ pointerEvents: 'none' }} aria-hidden="true">
+          <path
+            d={drawnPath}
+            fill="none"
+            stroke="#0263e0"
+            strokeWidth={2.5}
+            strokeLinecap="round"
+            strokeDasharray="6 8"
+            strokeOpacity={0.75}
+          >
+            <animate
+              attributeName="stroke-dashoffset"
+              values={previewForward ? '14;0' : '0;14'}
+              dur="0.6s"
+              repeatCount="indefinite"
+            />
+          </path>
+          {[0, 1, 2].map((slot) => (
+            <circle key={slot} r={3} fill="#0263e0">
+              <animateMotion
+                dur="1.5s"
+                repeatCount="indefinite"
+                path={drawnPath}
+                keyPoints={previewForward ? '0;1' : '1;0'}
+                keyTimes="0;1"
+                calcMode="linear"
+                begin={`${slot * 0.5}s`}
+              />
+            </circle>
+          ))}
+        </g>
+      )}
+
       {paths?.map((entry, index) => (
         <g key={entry.scenarioId} style={{ pointerEvents: 'none' }}>
-          {/* A wide, faint copy underneath the coloured stroke: the trail has to read as *lit* against
-              the dimmed diagram around it, and a 2px line does not glow however saturated it is.
-              Only on the hop being travelled and the ones already travelled -- a dropped hop is
-              exactly where the event stopped, and lighting it up would say the opposite. */}
-          {entry.status !== 'dropped' && (
-            <path
-              d={drawnPath}
-              fill="none"
-              stroke={entry.color}
-              strokeWidth={entry.status === 'active' ? 12 : 8}
-              strokeLinecap="round"
-              strokeOpacity={entry.status === 'active' ? 0.28 : 0.14}
-            />
-          )}
+          {/*
+            * The line the event came along, and nothing more.
+            *
+            * There used to be a wide faint copy underneath, switched on for the hop being crossed and
+            * off again once it was done. That halo is gone, and its removal is the point: a band of
+            * colour appearing under a whole connector at once and vanishing a second later is a line
+            * being turned on, not an event moving along it. The event is now a thing with a position
+            * of its own (simulation/EventLayer.jsx), so the connector's only job is to say afterwards
+            * that the event went this way -- which a coloured stroke does on its own.
+            *
+            * Still transitioned, because the thickening as the event enters a connector is the cue
+            * that it has *begun* to cross it, and a step change there reads as a flicker.
+            */}
           <path
             d={drawnPath}
             fill="none"
             stroke={entry.color}
-            strokeWidth={entry.status === 'active' ? 3.5 : 2.5}
             strokeLinecap="round"
-            /* Dropped is dimmed rather than recoloured: the colour is the scenario's identity,
-               and turning it red to mean "dropped" would make one path look like another. */
-            strokeOpacity={entry.status === 'dropped' ? 0.5 : 1}
             strokeDasharray={
               paths.length > 1 ? `${SEGMENT} ${SEGMENT * (paths.length - 1)}` : undefined
             }
             strokeDashoffset={paths.length > 1 ? -index * SEGMENT : undefined}
+            style={{
+              strokeWidth: entry.status === 'active' ? 3.5 : 2.5,
+              /* Dropped is dimmed rather than recoloured: the colour is the scenario's identity,
+                 and turning it red to mean "dropped" would make one path look like another. */
+              strokeOpacity: entry.status === 'dropped' ? 0.5 : 1,
+              transition: `stroke-width ${GLOW_FADE_MS}ms ease-out, stroke-opacity ${GLOW_FADE_MS}ms ease-out`,
+            }}
           />
-          {/* The event itself, on the hop it is making right now. animateMotion rather than a CSS
-              dash animation, which would fight the interleaving offset above. */}
-          {entry.status === 'active' && (
-            <circle r={3.5} fill={entry.color}>
-              <animateMotion dur="0.9s" repeatCount="indefinite" path={drawnPath} />
-            </circle>
-          )}
+          {/* No event drawn here. It used to be a `<circle>` with an `animateMotion`, mounted only
+              while this connector's beat was current -- which meant it did not exist during the
+              arrival beat that followed, so for a full second there was no event anywhere on screen
+              and a component appeared to light up by itself. An event that exists for half of a run
+              cannot be watched travelling, so it moved out to a layer of its own that spans the whole
+              route: simulation/EventLayer.jsx. */}
         </g>
       ))}
 

@@ -230,11 +230,28 @@ export default function RulesTab({ node, onNotify }) {
           {data.previewWebhookUrl && (
             <Row label="Preview webhook" value={data.previewWebhookUrl} mono copy />
           )}
-          <EmptyNote>
-            The function body is not read by this tool — reproducing code in a
-            diagram invites it going stale against the deployed version. Open it in
-            the workspace from the Links tab instead.
-          </EmptyNote>
+          {/* This used to say the body is not read by this tool, full stop, on the grounds
+              that code reproduced in a diagram goes stale against the deployed version.
+              That reasoning still holds and is now the caveat rather than the whole
+              answer: the body lives in the Code tab, and because the walkthrough *runs*
+              it, a stale copy shows up as a wrong verdict on screen rather than as a risk
+              carried quietly. */}
+          {data.code?.trim() ? (
+            <EmptyNote>
+              The body is on the Code tab, and the walkthrough runs it against the event —
+              so what this component does to a payload is simulated rather than assumed.
+              Nothing checks it against the deployed version, so a diagram whose code has
+              drifted will confidently show the wrong thing. The Links tab opens the real
+              one.
+            </EmptyNote>
+          ) : (
+            <EmptyNote>
+              No body on this component, so the walkthrough says only that this stage may
+              reshape the event. Segment&rsquo;s API does not return a function&rsquo;s
+              code; paste it into the Code tab to have it run, or open the function in the
+              workspace from the Links tab.
+            </EmptyNote>
+          )}
         </Section>
       )
 

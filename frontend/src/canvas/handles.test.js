@@ -17,7 +17,11 @@ import {
   LEGACY_SOURCE,
   LEGACY_TARGET,
   SIDES,
+  alongBorder,
+  anchorStringFor,
+  distanceToBox,
   encodeFreeHandle,
+  fixedHandleForSide,
   nearestBorder,
   parseFreeHandle,
   pointOnBorder,
@@ -96,6 +100,39 @@ describe('a connector remembers which side it uses', () => {
     expect('sourceHandle' in back).toBe(false)
     expect('targetHandle' in back).toBe(false)
   })
+
+  it('saves a free anchor alongside its fixed handle', () => {
+    const saved = serializeEdge(
+      edge({ sourceHandle: 'e', data: { discovered: false, phase: null, sourceAnchor: 'free:right:0.73' } }),
+    )
+    expect(saved.sourceHandle).toBe('e')
+    expect(saved.sourceAnchor).toBe('free:right:0.73')
+  })
+
+  it('omits the anchor keys entirely when no free anchor was placed', () => {
+    /* Same reasoning as the handles themselves: an edge nobody dragged a precise point onto has
+       to serialize byte-identically to before free anchors existed. */
+    const saved = serializeEdge(edge({ sourceHandle: 'e', targetHandle: 'w' }))
+    expect('sourceAnchor' in saved).toBe(false)
+    expect('targetAnchor' in saved).toBe(false)
+  })
+
+  it('round-trips a free anchor through save and load', () => {
+    const routed = serializeEdge(
+      edge({
+        sourceHandle: 'e',
+        targetHandle: 'n',
+        data: { discovered: false, phase: null, sourceAnchor: 'free:right:0.73', targetAnchor: 'free:top:0.1' },
+      }),
+    )
+    const back = toFlowEdge(routed)
+    expect(back.sourceHandle).toBe('e')
+    expect(back.targetHandle).toBe('n')
+    expect(back.data.sourceAnchor).toBe('free:right:0.73')
+    expect(back.data.targetAnchor).toBe('free:top:0.1')
+    /* And back out again unchanged -- a save, an open and a second save must produce the same bytes. */
+    expect(serializeEdge(back)).toEqual(routed)
+  })
 })
 
 /*
@@ -162,10 +199,13 @@ describe('a connector remembers how it was routed', () => {
 /*
  * Free anchors: a connector that meets a component anywhere along its border.
  *
- * The encoding rides in `sourceHandle`/`targetHandle`, which already persist -- so what needs pinning
- * is that a *fixed* handle never parses as a free one (or every existing edge would be re-resolved
- * from a fraction it does not have) and that a malformed one fails closed rather than drawing an edge
- * end into empty space.
+ * The encoding rides in `data.sourceAnchor`/`data.targetAnchor`, not in `sourceHandle`/
+ * `targetHandle` -- those two always carry a fixed id (`fixedHandleForSide`), because React Flow
+ * only ever resolves an edge end from a handle currently registered in the node's bounds, and a
+ * free anchor's own handle is mounted for the instant of the drag and no longer (see the note in
+ * handles.js). So what needs pinning here is that a *fixed* handle never parses as a free one (or
+ * every existing edge would be re-resolved from a fraction it does not have) and that a malformed
+ * one fails closed rather than drawing an edge end into empty space.
  */
 describe('free border anchors', () => {
   it('round-trips a side and a fraction', () => {
@@ -197,6 +237,20 @@ describe('free border anchors', () => {
     for (const id of ['free:sideways:0.5', 'free:right:abc', 'free:right:2', 'free:right:-1', 'free:']) {
       expect(parseFreeHandle(id), id).toBeNull()
     }
+  })
+})
+
+describe('fixedHandleForSide', () => {
+  it('names the fixed handle that stays registered for a free anchor on that side', () => {
+    expect(fixedHandleForSide('right')).toBe('e')
+    expect(fixedHandleForSide('left')).toBe('w')
+    expect(fixedHandleForSide('top')).toBe('n')
+    expect(fixedHandleForSide('bottom')).toBe('s')
+  })
+
+  it('returns null for a side that is not one of the four', () => {
+    expect(fixedHandleForSide('sideways')).toBeNull()
+    expect(fixedHandleForSide(undefined)).toBeNull()
   })
 })
 
@@ -256,5 +310,110 @@ describe('nearestBorder', () => {
     expect(Number.isFinite(zero.t)).toBe(true)
     expect(zero.t).toBeGreaterThanOrEqual(0)
     expect(zero.t).toBeLessThanOrEqual(1)
+  })
+})
+
+/*
+ * When the connection dots appear.
+ *
+ * Two tests rather than one, because the two callers mean different things by "near" -- a
+ * connection drag is about the node, an idle hover is about its edge -- and the distinction is
+ * what stops a zone flashing its handles every time the pointer crosses it. See the note above
+ * these two in handles.js.
+ */
+describe('distanceToBox', () => {
+  const box = { x: 100, y: 100, width: 200, height: 60 }
+
+  it('is zero anywhere inside', () => {
+    expect(distanceToBox(box, { x: 200, y: 130 })).toBe(0)
+    expect(distanceToBox(box, { x: 100, y: 100 })).toBe(0)
+    expect(distanceToBox(box, { x: 300, y: 160 })).toBe(0)
+  })
+
+  it('measures straight out from the nearest edge', () => {
+    expect(distanceToBox(box, { x: 90, y: 130 })).toBe(10)
+    expect(distanceToBox(box, { x: 320, y: 130 })).toBe(20)
+    expect(distanceToBox(box, { x: 200, y: 70 })).toBe(30)
+    expect(distanceToBox(box, { x: 200, y: 200 })).toBe(40)
+  })
+
+  it('measures diagonally from a corner', () => {
+    /* 3-4-5, so the answer is not the sum of the two axes -- which is what a Manhattan
+       distance would give, and would make the reveal radius square. */
+    expect(distanceToBox(box, { x: 97, y: 96 })).toBeCloseTo(5)
+  })
+})
+
+describe('alongBorder', () => {
+  /* The reach the canvas passes (BORDER_REVEAL), so these cases are the ones the user gets. */
+  const REACH = 32
+  const card = { x: 0, y: 0, width: 200, height: 60 }
+  const tall = { x: 0, y: 0, width: 200, height: 300 }
+  const zone = { x: 0, y: 0, width: 900, height: 500 }
+
+  it('counts the pointer just inside an edge', () => {
+    expect(alongBorder(card, { x: 5, y: 30 }, REACH)).toBe(true)
+    expect(alongBorder(card, { x: 195, y: 30 }, REACH)).toBe(true)
+  })
+
+  it('counts the pointer just outside an edge', () => {
+    /* Approaching from outside and sliding along the inside are the same gesture to the person
+       doing it, so the moment the dots appear must not depend on which way they came. */
+    expect(alongBorder(card, { x: -10, y: 30 }, REACH)).toBe(true)
+    expect(alongBorder(card, { x: 210, y: 30 }, REACH)).toBe(true)
+  })
+
+  /* A card at the default height is 60px tall, so its centre is 30 from the nearest edge and
+     the whole of it counts. That is deliberate -- see the note on BORDER_REVEAL. */
+  it('counts every point on a card of the default height', () => {
+    expect(alongBorder(card, { x: 100, y: 30 }, REACH)).toBe(true)
+  })
+
+  /* The case that made permanently-visible handles the lesser evil before this existed: a zone
+     is a backdrop the pointer crosses on its way to everything else. */
+  it('does not count the middle of a zone', () => {
+    expect(alongBorder(zone, { x: 450, y: 250 }, REACH)).toBe(false)
+    expect(alongBorder(zone, { x: 450, y: 8 }, REACH)).toBe(true)
+    expect(alongBorder(zone, { x: 12, y: 250 }, REACH)).toBe(true)
+  })
+
+  it('does not count the middle of a card someone has dragged tall', () => {
+    expect(alongBorder(tall, { x: 100, y: 150 }, REACH)).toBe(false)
+    expect(alongBorder(tall, { x: 100, y: 12 }, REACH)).toBe(true)
+  })
+
+  it('does not count a point well outside', () => {
+    expect(alongBorder(card, { x: -80, y: 30 }, REACH)).toBe(false)
+    expect(alongBorder(zone, { x: 450, y: 700 }, REACH)).toBe(false)
+  })
+})
+
+/*
+ * Turning a tracked anchor into the string an edge stores -- and, as much to the point, into nothing.
+ *
+ * Clearing matters as much as setting. `reconnectEdge` preserves `data` wholesale, so an anchor left
+ * over from where an end *used* to be attached outlived the drag that moved it, and `anchorPoint` in
+ * edges/FlowEdge.jsx honours an anchor over the handle -- so the end sprang back to the old border the
+ * instant it was released. `undefined` is what makes it go away: `serializeEdge` omits a falsy anchor,
+ * and the fixed handle decides again.
+ */
+describe('anchorStringFor', () => {
+  it('encodes a tracked anchor', () => {
+    expect(anchorStringFor({ side: 'left', t: 0.33 })).toBe('free:left:0.33')
+  })
+
+  it('gives undefined for no anchor, so the field is cleared rather than set to a value', () => {
+    expect(anchorStringFor(null)).toBeUndefined()
+    expect(anchorStringFor(undefined)).toBeUndefined()
+  })
+
+  it('produces something serializeEdge omits', () => {
+    const cleared = serializeEdge({
+      id: 'e1',
+      source: 'a',
+      target: 'b',
+      data: { discovered: false, phase: null, sourceAnchor: anchorStringFor(null) },
+    })
+    expect('sourceAnchor' in cleared).toBe(false)
   })
 })

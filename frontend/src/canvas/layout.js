@@ -76,9 +76,52 @@ export const MAX_AUTO_NODE_WIDTH = 340
  * Zones stay at 0 rather than being spread out as well, so which of two *zones* is on top
  * is decided by array order in `orderForFlow` -- where the rule can be about their sizes,
  * which is what was asked for, rather than about a number fixed when they were built.
+ *
+ * ## Connectors are in the component band, and had to be told so
+ *
+ * A connector used to have no z at all, and the result was the worst kind of bug: correct most of
+ * the time. React Flow derived one as `edge.zIndex + max(z of each endpoint that has a parent)`, so
+ * an edge between two components inside a zone landed at 10 and was fine, while an edge between two
+ * components on the bare canvas landed at *0* -- the same as a zone backdrop, whose fill is a solid
+ * hex and not a tint. At a tie the painter takes DOM order, and React Flow renders the node layer
+ * after the edge layer, so the backdrop covered the line. Clicking either end lifted the edge and it
+ * reappeared, which is what made it look like a rendering glitch rather than a layer.
+ *
+ * So the canvas runs `zIndexMode="manual"` and every band is stated rather than derived. Two things
+ * make that cheap: node z is unaffected (the `parentZ + 1` nesting bump in `calculateChildXYZ` is not
+ * gated on the mode -- only selection elevation is, and `elevateNodesOnSelect` was already off), and
+ * a connector in the same band as a component is what a reader expects, because a connector should
+ * not be crossing a component in the first place. Where one does, that is the router's problem to
+ * solve and not the paint order's to hide.
  */
 export const ZONE_Z = 0
 export const COMPONENT_Z = 10
+
+/*
+ * How far a *selected* connector rises above its band.
+ *
+ * Load-bearing, and the reason `zIndexMode="manual"` could not simply be switched on and left there.
+ * An edge's reconnect anchors sit at its two ends, directly over the components it attaches to and
+ * over those components' own connection handles -- which take the pointer first and start drawing a
+ * new connection instead of moving the existing end. React Flow used to grant this lift itself via
+ * `elevateEdgesOnSelect`; under manual mode it returns `edge.zIndex` untouched, so the lift is ours
+ * to apply. Losing it silently would have broken endpoint dragging, which is the thing this whole
+ * change exists to make work.
+ *
+ * Only the selected edge rises, which is the only one whose ends anyone is trying to grab.
+ */
+export const SELECTED_EDGE_LIFT = 1000
+
+/**
+ * A connector's paint layer: the component band, lifted while it is selected.
+ *
+ * Applied where the edges are handed to React Flow rather than in `toFlowEdge`, because an edge
+ * created by a live drag never passes through `toFlowEdge` at all -- it is built by `addEdge` in
+ * `onConnect`. Doing it at the boundary means every edge gets a z whatever made it.
+ */
+export function edgeZFor(edge) {
+  return edge?.selected ? COMPONENT_Z + SELECTED_EDGE_LIFT : COMPONENT_Z
+}
 
 const COLUMN_GAP = 90
 const ROW_GAP = 26
@@ -119,6 +162,14 @@ const COLUMN = {
 }
 
 export const zoneNodeId = (zoneId) => `zone-${zoneId}`
+
+/* Which kinds are drawn by something other than `SegmentNode`. A table, like a shape, is
+   deliberately a `kind` rather than a React Flow `type`: the type is not stored, so the kind is what
+   makes the choice survive a save. Anything absent here is a labelled card. */
+const NODE_TYPE_FOR_KIND = {
+  shape: 'shape',
+  table: 'table',
+}
 
 function columnFor(kind) {
   return COLUMN[kind] ?? 0
@@ -192,8 +243,17 @@ const FULL_SPAN_ZONE = 'segment'
  * label -- MIN_ZONE_HEIGHT exists for that reason -- and it was the width that was asked
  * about.
  */
-export function droppedZoneSize(zoneId) {
+export function droppedZoneSize(zoneId, descriptor) {
   const full = zoneSpanSize(DEFAULT_ZONE_SPAN)
+  /*
+   * A divider arrives big, on both axes, and it is the one case where that is right: it is a
+   * division of the working surface rather than a region within it, so every section has to have
+   * room for a whole diagram from the moment it lands. A quarter-width divider would have to be
+   * dragged out before anything could be put either side of the line.
+   */
+  if (descriptor?.frame) {
+    return { width: full.width * 2, height: Math.max(full.height * 2, MIN_ZONE_HEIGHT * 4) }
+  }
   if (zoneId === FULL_SPAN_ZONE) return full
   return {
     width: Math.max(MIN_ZONE_WIDTH, Math.round(full.width / 4)),
@@ -902,10 +962,13 @@ export function toFlowNode(node, zoneId, position) {
   const chosen = componentSize(node)
   return {
     id: node.id,
-    /* A shape has its own renderer: its outline is the content, where a component's box is furniture
-       around fields. See canvas/nodes/ShapeNode.jsx. The `kind` is what decides, so a shape survives a
-       save and reload as one -- `type` is React Flow's and is not stored. */
-    type: node.kind === 'shape' ? 'shape' : 'segmentNode',
+    /* Two kinds have a renderer of their own, and the `kind` is what decides -- so each survives a
+       save and reload as itself, since `type` is React Flow's and is not stored.
+         - a shape, whose outline *is* the content where a component's box is furniture around
+           fields (canvas/nodes/ShapeNode.jsx)
+         - a table, whose content is a grid of editable cells rather than a label
+           (canvas/nodes/TableNode.jsx) */
+    type: NODE_TYPE_FOR_KIND[node.kind] ?? 'segmentNode',
     position,
     ...(zone ? { parentId: zoneNodeId(zone) } : {}),
     /* Only when the user chose one. React Flow prefers a top-level `width` over
@@ -934,6 +997,25 @@ export function toFlowNode(node, zoneId, position) {
   }
 }
 
+/*
+ * The arrowhead every connector wears.
+ *
+ * A connector is directed -- the walkthrough walks `source -> target` and nothing else --
+ * and until this existed nothing on screen said which way. That is not a missing nicety: the
+ * four-sided handles need `ConnectionMode.Loose`, and under Loose React Flow makes `source`
+ * whichever end the *drag started from*, so drawing a line from a destination back to the
+ * source that feeds it stores it reversed. Both gestures look identical, so a diagram fills
+ * up with connectors pointing the wrong way and the first symptom is a walkthrough that
+ * stops halfway with nothing to explain why. The arrowhead is what makes that visible while
+ * it is being drawn rather than days later; canvas/direction.js is what fixes one.
+ *
+ * There is no top-level `markerEnd` here any more: the arrowhead's colour has to match the
+ * line's, and the line's colour is a live fact about the source component (see
+ * `borderColorFor`), not something this function can resolve once at load time. FlowEdge
+ * draws its own marker per edge instead, and defaults `arrowEnd` below so a connector
+ * with no explicit choice still wears one -- which is what preserves the guarantee this
+ * used to provide.
+ */
 export function toFlowEdge(edge) {
   return {
     id: edge.id,
@@ -959,6 +1041,19 @@ export function toFlowEdge(edge) {
          would then persist, marking every diagram dirty on open. */
       ...(edge.line ? { line: edge.line } : {}),
       ...(edge.waypoints?.length ? { waypoints: edge.waypoints } : {}),
+      /* The precise point along `sourceHandle`'s side a free anchor sits at -- see
+         `fixedHandleForSide` in canvas/handles.js for why the fixed id above and this exact
+         point are two separate facts rather than one. */
+      ...(edge.sourceAnchor ? { sourceAnchor: edge.sourceAnchor } : {}),
+      ...(edge.targetAnchor ? { targetAnchor: edge.targetAnchor } : {}),
+      /* Same omit-when-absent reasoning for the styling fields: an unstyled connector has to
+         serialize byte-identically to one that was never touched, or every diagram reads as
+         dirty on open. FlowEdge supplies the actual defaults (source colour, solid, arrowEnd
+         only) when these are missing. */
+      ...(edge.color ? { color: edge.color } : {}),
+      ...(edge.strokeStyle ? { strokeStyle: edge.strokeStyle } : {}),
+      ...(edge.arrowStart ? { arrowStart: edge.arrowStart } : {}),
+      ...(edge.arrowEnd === false ? { arrowEnd: false } : {}),
     },
   }
 }

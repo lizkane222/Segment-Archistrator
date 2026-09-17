@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.postgres",  # ArrayField lookups on CatalogComponent.categories
     "rest_framework",
+    "apps.accounts",
     "apps.auth_workspace",
     "apps.catalog",
     "apps.diagrams",
@@ -30,8 +31,10 @@ INSTALLED_APPS = [
     "apps.nuances",
 ]
 
-# django.contrib.auth is deliberately absent: this app has no user accounts.
-# The Segment Public API token is the identity -- see apps/auth_workspace/.
+# django.contrib.auth is still deliberately absent, even though apps.accounts now
+# gives this app real user accounts. Google holds the passwords, so there is nothing
+# to hash and no reset flow to build; there is no admin to gate and no use of the
+# permission framework. See the docstring in apps/accounts/models.py.
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -39,6 +42,9 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Last, so it sees the final response and can decline to touch a cookie a view has
+    # already set or cleared.
+    "apps.auth_workspace.middleware.SlidingSessionCookieMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -105,6 +111,23 @@ WORKSPACE_SESSION_IDLE_HOURS = env.int("WORKSPACE_SESSION_IDLE_HOURS", default=1
 # Comma-separated Fernet keys, newest first, wrapped in MultiFernet so a key can
 # be rotated without invalidating existing ciphertext.
 SEGMENT_TOKEN_ENCRYPTION_KEYS = env.list("SEGMENT_TOKEN_ENCRYPTION_KEYS", default=[])
+
+# --- Accounts / sign-in -----------------------------------------------------
+#
+# Google OAuth. Unset means sign-in is unavailable and the app says so rather than
+# offering a button that leads to a Google error page -- anonymous use still works.
+GOOGLE_OAUTH_CLIENT_ID = env("GOOGLE_OAUTH_CLIENT_ID", default="")
+GOOGLE_OAUTH_CLIENT_SECRET = env("GOOGLE_OAUTH_CLIENT_SECRET", default="")
+# Normally derived from the request so localhost, previews and production all work
+# from one setting. Pin it when a proxy makes the request's own scheme/host wrong,
+# since it must match the Google console byte for byte.
+GOOGLE_OAUTH_REDIRECT_URI = env("GOOGLE_OAUTH_REDIRECT_URI", default="")
+
+# Who may sign in without an invitation. Empty is a supported state and means
+# invitation-only -- see `manage.py invite_user`, which is how a fresh deployment
+# admits its first person. Exact domains, not suffixes: example.com does not admit
+# mail.example.com.
+ALLOWED_EMAIL_DOMAINS = env.list("ALLOWED_EMAIL_DOMAINS", default=[])
 
 # --- Segment API ------------------------------------------------------------
 SEGMENT_API_BASE_URLS = {

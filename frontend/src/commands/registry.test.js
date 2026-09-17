@@ -17,6 +17,7 @@ import {
   runCommand,
   selectionOf,
 } from './registry.js'
+import { FLOW_DIRECTIONS } from '../canvas/direction.js'
 
 const node = (id = 'destination:1', data = {}) => ({
   id,
@@ -63,9 +64,17 @@ describe('the table', () => {
        Submenu parents are the exception, and only for `run`: "Align" is a branch, not an
        action, and giving it one would mean a mis-aimed click on the parent silently
        rearranging the diagram. They still need an `enabled`, because the branch's gate is
-       what refuses the whole thing once with a reason. */
+       what refuses the whole thing once with a reason.
+
+       So is a row marked `inert`, which exists to be read rather than run -- "3 more…" under
+       Add to path, saying where the paths that do not fit can be reached. Giving it a `run`
+       to satisfy this check would be inventing an action to pass a test. It is still gated,
+       and its gate always refuses, which is what makes it safe to have no `run`. */
     for (const command of flattenCommands()) {
-      if (!command.children) expect(typeof command.run, command.id).toBe('function')
+      if (command.inert) {
+        expect(command.run, command.id).toBeUndefined()
+        expect(command.enabled({}), command.id).not.toBe(true)
+      } else if (!command.children) expect(typeof command.run, command.id).toBe('function')
       else expect(command.run, command.id).toBeUndefined()
       expect(typeof command.enabled, command.id).toBe('function')
       expect(command.label, command.id).toBeTruthy()
@@ -88,12 +97,56 @@ describe('the table', () => {
   it('leaves no command with no way to invoke it', () => {
     /* A command in no menu and under no shortcut is unreachable code that still reads as a
        feature from the table. `menus: null` is legal -- save and select-all are both -- but
-       only because those two have keystrokes. */
+       only because those two have keystrokes. `standalone: true` is the third way out: a
+       command whose home is a dedicated always-on button (auto-align, in Canvas.jsx) rather
+       than a menu row or a keystroke. */
     for (const command of COMMANDS) {
       const reachable =
-        Boolean(command.menus?.length) || Boolean(command.shortcut) || Boolean(command.children)
+        Boolean(command.menus?.length) ||
+        Boolean(command.shortcut) ||
+        Boolean(command.children) ||
+        Boolean(command.standalone)
       expect(reachable, command.id).toBe(true)
     }
+  })
+})
+
+describe('the Flow directions', () => {
+  /*
+   * The menu spells its own labels but must not invent its own direction ids.
+   *
+   * canvas/direction.js owns what "down" means geometrically; the registry owns how to say it
+   * to a reader. Keeping the labels out of the geometry module is deliberate -- a phrase is not
+   * a fact about coordinates -- and this is what stops the two lists drifting apart, which
+   * would show up as a menu row that silently does nothing.
+   */
+  const ids = (menu, parent) =>
+    commandsFor(menu, { edge: { id: 'e1' }, edges: [{ id: 'e1' }], actions: {} })
+      .find((command) => command.id === parent)
+      ?.children.map((child) => child.id.replace(/^flow-(all-)?/, ''))
+
+  it('offers exactly the directions the geometry module defines, in its order', () => {
+    const expected = FLOW_DIRECTIONS.map((entry) => entry.id)
+    expect(ids('edge', 'flow')).toEqual(expected)
+    expect(ids('pane', 'flow-all')).toEqual(expected)
+  })
+
+  it('previews the direction it would apply, so hovering can show it on the canvas', () => {
+    const [first] = commandsFor('edge', {
+      edge: { id: 'e1' },
+      actions: {},
+    }).find((command) => command.id === 'flow').children
+    expect(first.preview).toEqual({ direction: 'right', edgeIds: ['e1'] })
+  })
+
+  it('previews every connector for the bulk form', () => {
+    /* `edgeIds: null` is what makes the whole diagram animate, which is the point of the bulk
+       row: you can see how much of it already agrees before asserting anything. */
+    const [first] = commandsFor('pane', {
+      edges: [{ id: 'e1' }],
+      actions: {},
+    }).find((command) => command.id === 'flow-all').children
+    expect(first.preview).toEqual({ direction: 'right', edgeIds: null })
   })
 })
 
@@ -120,7 +173,30 @@ describe('the wiring to the app', () => {
     /* Guards the regex itself: a rename that broke the match would otherwise assert over an
        empty list and pass. */
     expect(named).toContain('duplicate')
-    expect(named.length).toBeGreaterThanOrEqual(COMMANDS.length - 2)
+
+    /*
+     * Every action any `run` actually calls has to be in that list.
+     *
+     * Read off the `run` functions rather than compared against `COMMANDS.length`, which this
+     * used to do with a tolerance of two. That was a proxy for "the regex found roughly
+     * everything" and it drifted the moment the table gained another branch: a branch is not
+     * clickable and calls no action, so every one of them widened the gap the tolerance was
+     * absorbing until the number meant nothing. This asks the precise question instead, and
+     * needs no tolerance -- two commands sharing one action is fine, and a branch contributes
+     * nothing because it has no `run`.
+     */
+    const called = new Set()
+    const walk = (list) => {
+      for (const command of list) {
+        if (command.run) {
+          for (const match of String(command.run).matchAll(/actions\.(\w+)/g)) called.add(match[1])
+        }
+        if (command.children) walk(command.children)
+      }
+    }
+    walk(COMMANDS)
+    expect(called.size).toBeGreaterThan(0)
+    for (const name of called) expect(named, name).toContain(name)
 
     /* Just the actions object, so a `duplicate` mentioned anywhere else in a 1000-line file
        -- the callback that defines it, a comment, a prop -- cannot stand in for the key. */
@@ -617,5 +693,168 @@ describe('the connector menu', () => {
       expect(item.enabled, item.id).toBe(false)
       expect(item.reason, item.id).toBeTruthy()
     }
+  })
+})
+
+/*
+ * "Add to path", and why its rows are numbered slots with resolved labels.
+ *
+ * The rows have to be named after the user's own paths, but `runCommand` looks an id up in a static
+ * table -- so a row invented per render could never be run from a keystroke. The ids are therefore
+ * positional and only the labels vary, and these tests pin that arrangement because the failure mode
+ * is a menu row that appears to work and cannot be dispatched.
+ */
+describe('Add to path', () => {
+  const paths = [
+    { id: 'path:a', name: 'Happy path', sourceId: 'src' },
+    { id: 'path:b', name: 'Insert function off', sourceId: 'src' },
+  ]
+  const onNode = (overrides = {}) => ({
+    node: { id: 'n1' },
+    nodes: [{ id: 'n1' }],
+    scenarios: paths,
+    actions: {},
+    ...overrides,
+  })
+  const rows = (menu, ctx) =>
+    commandsFor(menu, ctx).find((command) => command.id === 'add-to-path')?.children ?? []
+
+  it('offers one row per path, named after it', () => {
+    expect(rows('node', onNode()).map((row) => row.label)).toEqual([
+      'Happy path',
+      'Insert function off',
+    ])
+  })
+
+  it('keeps the ids positional, so a keystroke can still dispatch them', () => {
+    expect(rows('node', onNode()).map((row) => row.id)).toEqual(['add-to-path-0', 'add-to-path-1'])
+  })
+
+  it('shows no empty slots for paths that do not exist', () => {
+    expect(rows('node', onNode({ scenarios: [paths[0]] }))).toHaveLength(1)
+  })
+
+  /* Nothing to add to is not a disabled action, it is an absent one -- and the drawer is where a
+     path gets made, not this menu. */
+  it('does not appear at all when the diagram has no paths', () => {
+    expect(idsIn('node', onNode({ scenarios: [] }))).not.toContain('add-to-path')
+    expect(idsIn('edge', { edge: { id: 'e1' }, scenarios: [], actions: {} })).not.toContain(
+      'add-to-path',
+    )
+  })
+
+  it('is offered on a connector as well as a component', () => {
+    expect(idsIn('edge', { edge: { id: 'e1' }, scenarios: paths, actions: {} })).toContain(
+      'add-to-path',
+    )
+  })
+
+  /* A path with no start cannot have anything be reachable *from* anywhere, so the refusal names
+     the thing to go and do rather than greying out without explanation. */
+  it('refuses a path that has no start yet, with a reason', () => {
+    const [row] = rows('node', onNode({ scenarios: [{ id: 'path:c', name: 'New path' }] }))
+    expect(row.enabled).toBe(false)
+    expect(row.reason).toMatch(/start/i)
+  })
+
+  it('hands the path and the subject to the app', () => {
+    const includeInPath = vi.fn()
+    runCommand('add-to-path-1', onNode({ actions: { includeInPath } }))
+    expect(includeInPath).toHaveBeenCalledWith('path:b', { nodeId: 'n1', edgeId: null })
+  })
+
+  it('asks about a connector by way of the component it feeds', () => {
+    /* Getting the event *to* its target is what puts the line on the path -- it is the same
+       question one hop further along, so there is no separate answer for a connector. */
+    const includeInPath = vi.fn()
+    runCommand('add-to-path-0', {
+      edge: { id: 'e1', source: 'a', target: 'b' },
+      scenarios: paths,
+      actions: { includeInPath },
+    })
+    expect(includeInPath).toHaveBeenCalledWith('path:a', { nodeId: null, edgeId: 'e1' })
+  })
+
+  describe('past the sixth path', () => {
+    const many = Array.from({ length: 8 }, (_, index) => ({
+      id: `path:${index}`,
+      name: `Path ${index}`,
+      sourceId: 'src',
+    }))
+
+    it('says how many it is not showing rather than truncating in silence', () => {
+      const listed = rows('node', onNode({ scenarios: many }))
+      expect(listed).toHaveLength(7)
+      expect(listed.at(-1).label).toBe('2 more…')
+    })
+
+    it('leaves that row disabled, pointing at the drawer', () => {
+      const last = rows('node', onNode({ scenarios: many })).at(-1)
+      expect(last.enabled).toBe(false)
+      expect(last.reason).toMatch(/drawer/i)
+    })
+  })
+})
+
+/*
+ * The Table submenu.
+ *
+ * It is the only branch gated on *where* the click landed rather than on what is selected, because
+ * a table is one node: selecting it says nothing about which of its nine cells an "insert row" is
+ * about, and the pointer does. So the interesting cases are all about `ctx.cell`.
+ */
+describe('the table submenu', () => {
+  const tableNode = () => ({
+    id: 'table:1',
+    type: 'table',
+    data: { id: 'table:1', kind: 'table', name: 'Table', table: { columns: [100], rows: [null] } },
+  })
+  const onCell = (cell) => context({ node: tableNode(), selection: ['table:1'], cell })
+
+  it('is absent from the menu for anything that is not a table', () => {
+    expect(idsIn(NODE_MENU, context())).not.toContain('table')
+  })
+
+  it('is absent when the click missed the cells', () => {
+    /* Right-clicking a table's own border rather than a cell. Hidden rather than greyed: six rows
+       about rows and columns, all dead, is worse than not offering them. */
+    expect(idsIn(NODE_MENU, context({ node: tableNode() }))).not.toContain('table')
+  })
+
+  it('offers the six grid edits on a cell', () => {
+    const menu = find(NODE_MENU, onCell({ row: 1, column: 1, rows: 3, columns: 3 }), 'table')
+    expect(menu.children.map((child) => child.id)).toEqual([
+      'table-insert-row-above',
+      'table-insert-row-below',
+      'table-insert-column-left',
+      'table-insert-column-right',
+      'table-delete-row',
+      'table-delete-column',
+      'table-fit-row',
+    ])
+    for (const child of menu.children) expect(child.enabledReason ?? true).toBeTruthy()
+  })
+
+  it('refuses to delete the last row or the last column, and says why', () => {
+    const menu = find(NODE_MENU, onCell({ row: 0, column: 0, rows: 1, columns: 1 }), 'table')
+    const row = menu.children.find((child) => child.id === 'table-delete-row')
+    const column = menu.children.find((child) => child.id === 'table-delete-column')
+    expect(row.enabled).toBe(false)
+    expect(row.reason).toMatch(/at least one row/)
+    expect(column.enabled).toBe(false)
+    /* And adding is still available at the floor, which is the way back out of it. */
+    expect(menu.children.find((child) => child.id === 'table-insert-row-below').enabled).toBe(true)
+  })
+
+  it('runs with the node and the cell that were clicked', () => {
+    const ctx = onCell({ row: 2, column: 1, rows: 3, columns: 3 })
+    ctx.actions.tableEdit = vi.fn()
+    runCommand('table-delete-row', ctx)
+    expect(ctx.actions.tableEdit).toHaveBeenCalledWith('table:1', 'delete-row', {
+      row: 2,
+      column: 1,
+      rows: 3,
+      columns: 3,
+    })
   })
 })

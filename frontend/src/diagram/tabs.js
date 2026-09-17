@@ -171,15 +171,32 @@ export function useTabs(initial) {
 
   const visible = useMemo(() => visibleTabs(tabs, activeId, { split }), [tabs, activeId, split])
 
-  /** Store a pane's current graph and document against its tab. */
+  /**
+   * Store a pane's current graph and document against its tab.
+   *
+   * A no-op when neither has actually changed, and that is a correctness requirement rather than an
+   * optimization. A pane reports its document on every change, so a version of this that always
+   * replaced the tab object would hand that pane a new `tab` prop, which would re-run the effect that
+   * reported it, for ever. Returning the identical array -- and the identical tab objects within it --
+   * is what makes "tell me again" free.
+   *
+   * Compared by reference on purpose. Both values are rebuilt wholesale by their owners rather than
+   * mutated, so identity is the honest test, and a deep comparison of a three-hundred-node graph on
+   * every report would cost more than the write it avoided.
+   */
   const capture = useCallback((tabId, { graph, doc }) => {
-    setTabs((current) =>
-      current.map((tab) =>
-        tab.id === tabId
-          ? { ...tab, ...(graph !== undefined ? { graph } : {}), ...(doc ? { doc } : {}) }
-          : tab,
-      ),
-    )
+    setTabs((current) => {
+      let changed = false
+      const next = current.map((tab) => {
+        if (tab.id !== tabId) return tab
+        const graphChanged = graph !== undefined && graph !== tab.graph
+        const docChanged = Boolean(doc) && doc !== tab.doc
+        if (!graphChanged && !docChanged) return tab
+        changed = true
+        return { ...tab, ...(graphChanged ? { graph } : {}), ...(docChanged ? { doc } : {}) }
+      })
+      return changed ? next : current
+    })
   }, [])
 
   const open = useCallback((tab) => {

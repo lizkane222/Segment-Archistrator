@@ -75,11 +75,21 @@ class Command(BaseCommand):
 
         from apps.auth_workspace.models import WorkspaceSession
 
-        session = WorkspaceSession.objects.order_by("-last_seen_at").first()
+        # Must be a session whose credential can actually read the Public API. Taking
+        # the most recent row unfiltered picked a signed-out visitor's tokenless
+        # session almost every time -- one is created on every first page load -- and
+        # `reveal_token()` then raised. An app-session (auth_token) credential is no
+        # better here: it would hand back a token the Public API rejects.
+        session = (
+            WorkspaceSession.objects.exclude(encrypted_token=None)
+            .filter(credential_kind=WorkspaceSession.CREDENTIAL_PUBLIC_API)
+            .order_by("-last_seen_at")
+            .first()
+        )
         if session is None:
             raise CommandError(
-                "No token available. Pass --token, set SEGMENT_CATALOG_TOKEN, or start "
-                "a session in the app first."
+                "No token available. Pass --token, set SEGMENT_CATALOG_TOKEN, or connect "
+                "a workspace with a Public API token in the app first."
             )
         self.stdout.write(
             self.style.WARNING(

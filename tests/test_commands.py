@@ -123,3 +123,51 @@ def test_rotation_is_idempotent(session):
     call_command("reencrypt_tokens")
     stored = WorkspaceSession.objects.get(pk=session.pk).encrypted_token
     assert decrypt_token(stored) == FAKE_TOKEN
+
+
+# --- Regressions in the commands themselves ---------------------------------
+
+
+def test_reencrypt_skips_sessions_that_have_no_token(session):
+    """
+    An anonymous session has `encrypted_token = NULL`, and `MultiFernet.rotate(None)`
+    raises TypeError -- which `rotate_token` does not catch, because it only expects
+    InvalidToken. So a single signed-out visitor used to abort the entire rotation, and
+    one is created on every first page load.
+    """
+    WorkspaceSession.start_anonymous()
+    WorkspaceSession.start_anonymous()
+
+    call_command("reencrypt_tokens")
+
+    # The real token still round-trips, and the tokenless rows were left alone.
+    session.refresh_from_db()
+    assert decrypt_token(session.encrypted_token) == FAKE_TOKEN
+    assert WorkspaceSession.objects.filter(encrypted_token=None).count() == 2
+
+
+def test_sync_catalog_will_not_borrow_a_tokenless_session(db):
+    """
+    The fallback used to take the most recent session with no filter at all. Anonymous
+    sessions are minted constantly, so it almost always picked one and then raised
+    ValueError from reveal_token() instead of saying what was wrong.
+    """
+    from django.core.management.base import CommandError
+
+    WorkspaceSession.start_anonymous()
+    with pytest.raises(CommandError, match="No token available"):
+        call_command("sync_catalog")
+
+
+def test_sync_catalog_will_not_borrow_a_graphql_session(db):
+    """An app-session credential would hand back a token the Public API rejects."""
+    from django.core.management.base import CommandError
+
+    WorkspaceSession.start(
+        token="eyJhbGciOiJIUzI1NiJ9.fake.jwt",
+        workspace=WORKSPACE,
+        region="us",
+        credential_kind=WorkspaceSession.CREDENTIAL_GRAPHQL,
+    )
+    with pytest.raises(CommandError, match="No token available"):
+        call_command("sync_catalog")

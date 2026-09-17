@@ -14,11 +14,17 @@
  * and is drawn in `currentColor`. So an icon with no colours of its own takes the component's, and a
  * Twilio red one keeps its red. That is the behaviour worth having: the branded icons should look
  * branded, and the line-art ones should follow the card they are on.
+ *
+ * `BRAND_COLORS` is a second, narrower override on top of that: a few icons kept real vector
+ * geometry but lost their literal fill in the export (it came through as the card's own background
+ * colour, indistinguishable from the tile behind it). See brandColors.js for which ones and why only
+ * some of the affected icons are listed there.
  */
 
 import { memo } from 'react'
 
 import LUCID from './lucid.json'
+import { BRAND_COLORS } from './brandColors.js'
 
 const BY_ID = new Map(LUCID.map((shape) => [shape.id, shape]))
 
@@ -33,6 +39,8 @@ export const LucidArt = memo(function LucidArt({ id, className, style }) {
      shows instead, which is honest about not knowing. */
   if (!shape) return null
 
+  const overrides = BRAND_COLORS[shape.id]
+
   return (
     <svg
       viewBox="0 0 1 1"
@@ -46,7 +54,7 @@ export const LucidArt = memo(function LucidArt({ id, className, style }) {
         <path
           key={index}
           d={path.d}
-          fill={path.fill ?? 'currentColor'}
+          fill={overrides?.[index] ?? path.fill ?? 'currentColor'}
           stroke={path.stroke ?? 'none'}
           /* Non-scaling, because the viewBox is 1x1 and a stroke width in those units would be
              hundreds of pixels wide once stretched to a card. */

@@ -90,6 +90,23 @@ FIELD_TYPES = {
 }
 
 
+def fixed_values() -> dict:
+    """
+    The fields this app writes a *constant* into, and the constant.
+
+    Both are single selects in the base, and `typecast` turns a value that matches no existing option
+    into a *new option* rather than an error. So "New" against a base whose first status is called
+    "Triage" would quietly grow a second, near-duplicate choice, and every report would land under it
+    while the team's own views filtered on the old one. Checked by `manage.py airtable_schema` against
+    the options the base actually has, which is the only place that mismatch is visible before it
+    happens.
+
+    A function rather than a dict constant because `AIRTABLE_APP_NAME` is a setting, and reading it at
+    import time would freeze whatever it was when the module first loaded.
+    """
+    return {FIELD_STATUS: STATUS_NEW, FIELD_APP: settings.AIRTABLE_APP_NAME}
+
+
 class AirtableNotConfigured(RuntimeError):
     """No token, or no base. The feedback form is unavailable rather than broken."""
 

@@ -10,6 +10,7 @@
  * inspector writes and the renderer prefers over these defaults.
  */
 
+import { zoneProductOf } from './frames.js'
 import {
   ArrowRightLeft,
   Box,
@@ -65,51 +66,58 @@ const DEFAULT = {
   borderWidth: 1,
 }
 
+/*
+ * Backgrounds are deliberately absent below: every component draws on `DEFAULT.bg`
+ * (white) unless the user sets one explicitly in `data.style.bg`. `border` stays
+ * per-kind here as the *fallback* a component uses when it sits outside any zone --
+ * see `borderColorFor` -- but for anything inside a zone, the zone's own colour wins
+ * over these. The icon/shape/text pairings below are what still say which product a
+ * card belongs to now that colour is the zone's job.
+ */
 export const KIND_STYLES = {
   /* --- Connections --------------------------------------------------------- */
-  source: { icon: Globe, shape: 'rounded', bg: '#ffffff', border: '#0263e0', text: '#121c2d' },
-  source_function: { icon: Braces, shape: 'notched', bg: '#e4f7ff', border: '#0263e0', text: '#043cb5' },
-  source_insert_function: { icon: Braces, shape: 'notched', bg: '#e4f7ff', border: '#0263e0', text: '#043cb5' },
+  source: { icon: Globe, shape: 'rounded', border: '#0263e0', text: '#121c2d' },
+  source_function: { icon: Braces, shape: 'notched', border: '#0263e0', text: '#043cb5' },
+  source_insert_function: { icon: Braces, shape: 'notched', border: '#0263e0', text: '#043cb5' },
   /* Notched like the other processing steps, and in the source's blue rather than
      Protocols' teal: the gate is a setting on the source, and what it enforces is
      the teal thing pointing at it. */
-  source_schema_control: { icon: ShieldCheck, shape: 'notched', bg: '#e4f7ff', border: '#0263e0', text: '#043cb5' },
+  source_schema_control: { icon: ShieldCheck, shape: 'notched', border: '#0263e0', text: '#043cb5' },
 
-  destination_filter: { icon: Filter, shape: 'notched', bg: '#fff8e1', border: '#e67e22', text: '#7a4a12' },
-  destination_insert_function: { icon: Braces, shape: 'notched', bg: '#fff8e1', border: '#e67e22', text: '#7a4a12' },
-  destination_function: { icon: Braces, shape: 'notched', bg: '#fff8e1', border: '#e67e22', text: '#7a4a12' },
-  destination_mapping: { icon: ArrowRightLeft, shape: 'notched', bg: '#fff8e1', border: '#e67e22', text: '#7a4a12' },
-  destination: { icon: Send, shape: 'rounded', bg: '#ffffff', border: '#0e7c3a', text: '#121c2d' },
+  destination_filter: { icon: Filter, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
+  destination_insert_function: { icon: Braces, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
+  destination_function: { icon: Braces, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
+  destination_mapping: { icon: ArrowRightLeft, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
+  destination: { icon: Send, shape: 'rounded', border: '#0e7c3a', text: '#121c2d' },
 
-  warehouse: { icon: Warehouse, shape: 'sharp', bg: '#ffffff', border: '#354052', text: '#121c2d' },
-  reverse_etl_model: { icon: Database, shape: 'sharp', bg: '#f4f4f6', border: '#354052', text: '#354052' },
+  warehouse: { icon: Warehouse, shape: 'sharp', border: '#354052', text: '#121c2d' },
+  reverse_etl_model: { icon: Database, shape: 'sharp', border: '#354052', text: '#354052' },
 
   /* --- Protocols ----------------------------------------------------------- */
   /* Teal, matching the Protocols zone border: these three describe what the data
      should be, and none of them is a stage an event passes through. */
-  tracking_plan: { icon: ClipboardList, shape: 'rounded', bg: '#ffffff', border: '#0f7c8a', text: '#121c2d' },
-  event_library: { icon: ListChecks, shape: 'sharp', bg: '#e8f6f7', border: '#0f7c8a', text: '#0b5b66' },
-  property_library: { icon: Tags, shape: 'sharp', bg: '#e8f6f7', border: '#0f7c8a', text: '#0b5b66' },
+  tracking_plan: { icon: ClipboardList, shape: 'rounded', border: '#0f7c8a', text: '#121c2d' },
+  event_library: { icon: ListChecks, shape: 'sharp', border: '#0f7c8a', text: '#0b5b66' },
+  property_library: { icon: Tags, shape: 'sharp', border: '#0f7c8a', text: '#0b5b66' },
 
   /* --- Unify --------------------------------------------------------------- */
-  space: { icon: Layers, shape: 'rounded', bg: '#ffffff', border: '#6f42c1', text: '#121c2d' },
-  identity_resolution: { icon: Fingerprint, shape: 'notched', bg: '#f3ecff', border: '#6f42c1', text: '#4c2a91' },
-  computed_trait: { icon: Sigma, shape: 'rounded', bg: '#f3ecff', border: '#6f42c1', text: '#4c2a91' },
-  profile_api: { icon: Split, shape: 'pill', bg: '#ffffff', border: '#6f42c1', text: '#4c2a91' },
+  space: { icon: Layers, shape: 'rounded', border: '#6f42c1', text: '#121c2d' },
+  identity_resolution: { icon: Fingerprint, shape: 'notched', border: '#6f42c1', text: '#4c2a91' },
+  computed_trait: { icon: Sigma, shape: 'rounded', border: '#6f42c1', text: '#4c2a91' },
+  profile_api: { icon: Split, shape: 'pill', border: '#6f42c1', text: '#4c2a91' },
   /* A source's icon in Unify's colours, because that is what it is: the source
      from Connections, seen as something that feeds profiles. */
-  profile_source: { icon: Globe, shape: 'rounded', bg: '#f3ecff', border: '#6f42c1', text: '#4c2a91' },
-  profile: { icon: User, shape: 'rounded', bg: '#ffffff', border: '#6f42c1', text: '#121c2d' },
+  profile_source: { icon: Globe, shape: 'rounded', border: '#6f42c1', text: '#4c2a91' },
+  profile: { icon: User, shape: 'rounded', border: '#6f42c1', text: '#121c2d' },
   /* Unify's purple even though what it carries out is partly Engage's, because the
      sync is configured in Unify and a component should be the colour of the product
      you go to when it stops working. */
-  profile_sync: { icon: RefreshCw, shape: 'notched', bg: '#f3ecff', border: '#6f42c1', text: '#4c2a91' },
+  profile_sync: { icon: RefreshCw, shape: 'notched', border: '#6f42c1', text: '#4c2a91' },
   /* Purple although it lives in an Engage sub-zone: identity resolution is a Unify
      concept, and the colour should say which product's settings these are. */
   identity_setting: {
     icon: Fingerprint,
     shape: 'sharp',
-    bg: '#ffffff',
     border: '#6f42c1',
     text: '#4c2a91',
     /* Wider than the 200px default because this one draws a three-column table rather
@@ -119,26 +127,22 @@ export const KIND_STYLES = {
   },
 
   /* --- Engage -------------------------------------------------------------- */
-  audience: { icon: Users, shape: 'rounded', bg: '#ffffff', border: '#db131a', text: '#121c2d' },
+  audience: { icon: Users, shape: 'rounded', border: '#db131a', text: '#121c2d' },
   /* Journeys are never API-discovered, so they are always hand-drawn. */
-  journey: { icon: Route, shape: 'rounded', bg: '#fdeced', border: '#db131a', text: '#8f0d12' },
-  /* Engage's red, like an audience, because that is what it is -- but filled, since like a journey it
-     is always hand-drawn and never read from the API. The fill is what says "somebody asserted this"
-     across the whole canvas. */
+  journey: { icon: Route, shape: 'rounded', border: '#db131a', text: '#8f0d12' },
+  /* Engage's red, like an audience, because that is what it is. */
   linked_audience: {
     icon: Network,
     shape: 'rounded',
-    bg: '#fdeced',
     border: '#db131a',
     text: '#8f0d12',
   },
 
-  /* Unify's violet, and both wider than the default: a Data Graph's content is a config block and a
-     SQL table's is columns, so neither is a label in a box. */
+  /* Both wider than the default: a Data Graph's content is a config block and a SQL
+     table's is columns, so neither is a label in a box. */
   data_graph: {
     icon: Share2,
     shape: 'sharp',
-    bg: '#ffffff',
     border: '#6f42c1',
     text: '#4c2a91',
     defaultWidth: 300,
@@ -146,7 +150,6 @@ export const KIND_STYLES = {
   sql_table: {
     icon: Table2,
     shape: 'sharp',
-    bg: '#ffffff',
     border: '#6f42c1',
     text: '#4c2a91',
     defaultWidth: 320,
@@ -159,7 +162,7 @@ export const KIND_STYLES = {
      which is exactly what the server's tolerance of unknown kinds already
      provides. Neutral grey and square, so it does not read as any Segment
      product. */
-  custom: { icon: Box, shape: 'sharp', bg: '#f4f4f6', border: '#606b85', text: '#354052' },
+  custom: { icon: Box, shape: 'sharp', border: '#606b85', text: '#354052' },
 }
 
 /* Labels for kinds the topology has never heard of, so nothing on the server can
@@ -214,6 +217,29 @@ export function outlineFor(data) {
   }
 }
 
+/**
+ * The border colour a component actually draws, now that it is a fact about where
+ * the component sits rather than a fixed property of its kind.
+ *
+ * An explicit override wins outright -- that is the whole promise of "only when no
+ * manual override exists" for the drag/duplicate auto-colour behaviour below. Next is
+ * the colour of the zone the component is parked in, read live off that zone's own
+ * node data (see `zoneStyleFor`), so a card takes on whichever region it is dropped
+ * into. Only a component sitting outside every zone falls back to the kind's own
+ * border, which is what keeps a bare-canvas source recognisable rather than uniformly
+ * grey.
+ *
+ * `zoneData` is the containing zone node's `data` (its `id`/`color`), or `null`/`undefined`
+ * for a component with no parent zone -- callers resolve that lookup themselves (see
+ * SegmentNode.jsx and FlowEdge.jsx), since it is a React Flow node-data read and this
+ * file stays framework-free.
+ */
+export function borderColorFor(data, zoneData) {
+  if (data?.style?.border) return data.style.border
+  if (zoneData) return zoneStyleFor(zoneData).border
+  return KIND_STYLES[data?.kind]?.border ?? DEFAULT.border
+}
+
 /* A sub-zone sits on top of its parent's tint, so tinting it again would darken by
    accumulation -- Profiles would end up a deeper purple than Unify and read as a
    fourth product. It borrows the parent's border colour instead, which is what says
@@ -260,7 +286,11 @@ export const ZONE_SWATCHES = ['#606b85', '#0263e0', '#6f42c1', '#0e7c3a', '#e67e
  */
 export function zoneStyleFor({ id, color } = {}) {
   if (color) return { bg: tint(color, 0.06), border: color }
-  return ZONE_STYLES[id] ?? CUSTOM_ZONE
+  /* By product, not by id, so a second copy of Connections is Connections blue. The two are the
+     same string for every zone that appears once -- see `zoneProductOf` in canvas/frames.js -- and
+     without this the copy would fall through to the custom-zone grey, which says "not Segment"
+     about a backdrop that is Connections. */
+  return ZONE_STYLES[id] ?? ZONE_STYLES[zoneProductOf(id)] ?? CUSTOM_ZONE
 }
 
 function tint(hex, alpha) {

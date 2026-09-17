@@ -24,7 +24,17 @@ pytestmark = pytest.mark.django_db
 def test_starting_an_anonymous_session_sets_the_cookie(client):
     response = client.post("/api/session/anonymous")
     assert response.status_code == 201
-    assert response.json() == {"workspace": None, "connected": False, "anonymous": True}
+    # The same shape `GET /api/session` answers with, and `hasSession` in particular.
+    # This used to reply without it, so the SPA read the session it had just been handed
+    # as no session at all -- which hid the sign-in button and reported the state wrong.
+    assert response.json() == {
+        "hasSession": True,
+        "account": None,
+        "workspace": None,
+        "connected": False,
+        "anonymous": True,
+        "auth": {"google": False},
+    }
 
     cookie = response.cookies["sab_session"]
     assert cookie.value
@@ -39,9 +49,13 @@ def test_starting_an_anonymous_session_sets_the_cookie(client):
 def test_anonymous_sessions_do_not_share_a_scope(db):
     a = WorkspaceSession.start_anonymous()
     b = WorkspaceSession.start_anonymous()
-    # A shared workspace_id would put every anonymous visitor's diagrams in one
-    # pile that they could all read, which is the failure this is guarding.
-    assert a.workspace_id != b.workspace_id
+    # A shared scope would put every anonymous visitor's diagrams in one pile that
+    # they could all read, which is the failure this is guarding.
+    assert a.anon_scope != b.anon_scope
+    assert a.anon_scope and b.anon_scope
+    # And the scope is no longer smuggled through workspace_id, which now means only
+    # "a real Segment workspace".
+    assert a.workspace_id == ""
 
 
 def test_starting_again_reuses_the_session_you_already_have(anon_client, anon_session):
@@ -64,9 +78,15 @@ def test_starting_anonymously_never_downgrades_a_connected_session(auth_client, 
 
 def test_get_session_reports_the_anonymous_state(anon_client):
     assert anon_client.get("/api/session").json() == {
+        # True even though both flags below are false: the SPA branches on this to
+        # decide whether to mint a session, and "connected or anonymous" stopped being
+        # the same question once an account could exist without a workspace.
+        "hasSession": True,
+        "account": None,
         "workspace": None,
         "connected": False,
         "anonymous": True,
+        "auth": {"google": False},
     }
 
 
@@ -128,7 +148,11 @@ def test_anonymous_session_can_save_and_read_its_own_diagrams(anon_client, anon_
         format="json",
     )
     assert created.status_code == 201
-    assert Diagram.objects.get().workspace_id == anon_session.workspace_id
+    saved = Diagram.objects.get()
+    # Owned by the scope, and about no workspace: nothing has been connected.
+    assert saved.anon_scope == anon_session.anon_scope
+    assert saved.workspace_id == ""
+    assert saved.owner_id is None
 
     names = [item["name"] for item in anon_client.get("/api/diagrams").json()["items"]]
     assert names == ["Drawn before connecting"]
@@ -136,12 +160,12 @@ def test_anonymous_session_can_save_and_read_its_own_diagrams(anon_client, anon_
 
 def test_one_anonymous_scope_cannot_read_another(anon_client, db):
     """
-    The synthetic workspace_id is a real scope, not a shared bucket: the isolation
-    test that exists for two token-holders has to hold between two visitors too.
+    An anonymous scope is a real scope, not a shared bucket: the isolation test that
+    exists for two token-holders has to hold between two visitors too.
     """
     other = WorkspaceSession.start_anonymous()
     theirs = Diagram.objects.create(
-        workspace_id=other.workspace_id, name="Theirs", graph={"nodes": []}
+        anon_scope=other.anon_scope, name="Theirs", graph={"nodes": []}
     )
 
     assert anon_client.get(f"/api/diagrams/{theirs.id}").status_code == 404
@@ -156,7 +180,7 @@ def test_saving_a_diagram_still_needs_a_session(client):
 
 def test_connecting_claims_the_diagrams_drawn_anonymously(anon_client, anon_session, workspace_ok):
     drawn = Diagram.objects.create(
-        workspace_id=anon_session.workspace_id, name="Drawn first", graph={"nodes": []}
+        anon_scope=anon_session.anon_scope, name="Drawn first", graph={"nodes": []}
     )
 
     response = anon_client.post(
@@ -166,7 +190,11 @@ def test_connecting_claims_the_diagrams_drawn_anonymously(anon_client, anon_sess
     assert response.json()["claimed"] == 1
 
     drawn.refresh_from_db()
+    # What connecting establishes is what the diagram is *about*. Who may see it is
+    # unchanged -- still this scope, which the new session row carries forward -- because
+    # pasting a credential says nothing about who someone is.
     assert drawn.workspace_id == WORKSPACE["id"]
+    assert drawn.anon_scope == anon_session.anon_scope
     # The spent scope goes with it: its cookie is being overwritten by this very
     # response, so the row could never be reached again.
     assert not WorkspaceSession.objects.filter(pk=anon_session.pk).exists()
@@ -175,7 +203,7 @@ def test_connecting_claims_the_diagrams_drawn_anonymously(anon_client, anon_sess
 def test_connecting_claims_only_the_scope_you_hold(anon_client, anon_session, workspace_ok):
     stranger = WorkspaceSession.start_anonymous()
     theirs = Diagram.objects.create(
-        workspace_id=stranger.workspace_id, name="Someone else's", graph={"nodes": []}
+        anon_scope=stranger.anon_scope, name="Someone else's", graph={"nodes": []}
     )
 
     response = anon_client.post(
@@ -184,17 +212,18 @@ def test_connecting_claims_only_the_scope_you_hold(anon_client, anon_session, wo
     assert response.json()["claimed"] == 0
 
     theirs.refresh_from_db()
-    assert theirs.workspace_id == stranger.workspace_id
+    assert theirs.anon_scope == stranger.anon_scope
+    assert theirs.workspace_id == ""
     assert WorkspaceSession.objects.filter(pk=stranger.pk).exists()
 
 
 def test_connecting_with_no_prior_cookie_claims_nothing(client, workspace_ok):
     orphan = WorkspaceSession.start_anonymous()
-    Diagram.objects.create(workspace_id=orphan.workspace_id, name="Orphan", graph={"nodes": []})
+    Diagram.objects.create(anon_scope=orphan.anon_scope, name="Orphan", graph={"nodes": []})
 
     response = client.post("/api/session", {"token": FAKE_TOKEN, "region": "us"}, format="json")
     assert response.json()["claimed"] == 0
-    assert Diagram.objects.get().workspace_id == orphan.workspace_id
+    assert Diagram.objects.get().anon_scope == orphan.anon_scope
 
 
 def test_a_rejected_token_leaves_the_anonymous_work_alone(anon_client, anon_session, mock_segment):
@@ -204,7 +233,7 @@ def test_a_rejected_token_leaves_the_anonymous_work_alone(anon_client, anon_sess
     """
     mock_segment.add(responses_lib.GET, f"{API_BASE}/", json={}, status=401)
     drawn = Diagram.objects.create(
-        workspace_id=anon_session.workspace_id, name="Drawn first", graph={"nodes": []}
+        anon_scope=anon_session.anon_scope, name="Drawn first", graph={"nodes": []}
     )
 
     assert anon_client.post(
@@ -212,7 +241,8 @@ def test_a_rejected_token_leaves_the_anonymous_work_alone(anon_client, anon_sess
     ).status_code == 401
 
     drawn.refresh_from_db()
-    assert drawn.workspace_id == anon_session.workspace_id
+    assert drawn.anon_scope == anon_session.anon_scope
+    assert drawn.workspace_id == ""
     assert WorkspaceSession.objects.filter(pk=anon_session.pk).exists()
 
 
@@ -233,7 +263,7 @@ def test_claiming_survives_a_csrf_enforced_client(anon_session, workspace_ok):
     client = APIClient(enforce_csrf_checks=True)
     client.cookies["sab_session"] = str(anon_session.id)
     Diagram.objects.create(
-        workspace_id=anon_session.workspace_id, name="Drawn first", graph={"nodes": []}
+        anon_scope=anon_session.anon_scope, name="Drawn first", graph={"nodes": []}
     )
 
     token = client.get("/api/session").cookies["csrftoken"].value

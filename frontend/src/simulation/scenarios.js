@@ -20,7 +20,7 @@
  * lifted to many runs at once.
  */
 
-import { STATUS, componentNodes, defaultSourceId, frameAt, hasArrived, simulate } from './router.js'
+import { STATUS, componentNodes, frameAtPhase, hasArrived, simulate } from './router.js'
 
 /*
  * Path colours.
@@ -63,18 +63,73 @@ export function newScenario({ id, name, event, sourceId = null, color, existing 
     color: color ?? nextColor(existing),
     sourceId,
     event: event ?? null,
-    /* Both empty rather than absent, so the editor never has to guard and so a
+    /* All empty rather than absent, so the editor never has to guard and so a
        saved scenario reads as a complete description of its own run. */
     functionBehaviour: {},
     disabled: [],
+    /*
+     * Components left out of this path: the event steps over them rather than stopping.
+     *
+     * Separate from `disabled` because they answer different questions, and merging them would
+     * lose the distinction the whole feature turns on. `disabled` is "what if this were switched
+     * off" -- a claim about the architecture, which stops the event dead. `excluded` is "this path
+     * is not about that component" -- a claim about the story, which must not truncate everything
+     * downstream of it.
+     */
+    excluded: [],
+    /*
+     * Forks this path takes one arm at a time, and in what order:
+     * `{[forkNodeId]: [childNodeId, ...]}`.
+     *
+     * An object rather than an array because it is a per-fork answer. Empty rather than absent for the
+     * same reason as the two above: a saved scenario reads as a complete description of its own run,
+     * and the editor never has to guard. A fork with no entry plays all its arms at once, which is
+     * what a fan-out to twenty destinations means. See simulation/branches.js.
+     */
+    branches: {},
+    /*
+     * Components this path stops at twice, because the architecture doubles back through them.
+     *
+     * The default is once, and a second arrival is otherwise recorded as a `rejoin` -- the connector
+     * lights up and the component does not claim to have acted again, which is right for the common
+     * case of two routes converging on one destination. This is the uncommon case: a function that
+     * consults a tracking plan and carries on with the answer really is entered twice, and under the
+     * one-stop rule the return leg had no verdict, no card, and nothing downstream of it.
+     *
+     * Opt-in per component rather than inferred from the diagram having a cycle, because a cycle is
+     * not evidence that the reader wants both passes narrated -- and inferring it would silently
+     * relayout every already-saved path that has a diamond in it. See `revisit` in
+     * simulation/router.js.
+     */
+    revisit: [],
+    /*
+     * What to assume where the diagram does not say: `{[nodeId]: 'allow' | 'block' | 'modify'}`.
+     *
+     * Empty means allow everywhere, which is what makes an unconfigured component pass rather than
+     * report a drop nobody configured. Supersedes `functionBehaviour`, which said the same thing about
+     * functions alone and which nothing ever wrote; `runScenarios` folds that spelling in so a saved
+     * scenario carrying one keeps working. See `FALLBACK` in simulation/router.js.
+     */
+    fallback: {},
   }
 }
 
-/** Scenarios that can actually be run: an event and a source that still exists. */
+/**
+ * Scenarios that can actually be run: an event, and a start that still exists.
+ *
+ * The start has to be *named*. It used to fall back to "the first source on the diagram", which
+ * made a new path appear to work while quietly answering a question nobody asked -- on a diagram
+ * with four sources the walkthrough ran from whichever happened to be first in the array, and the
+ * reader had no way to know that was a default rather than a choice. Worse, the fallback is what
+ * hid a diagram whose connectors point the wrong way: the path ran, reached one component, and
+ * stopped, which looks like the tool failing rather than like a start that feeds nothing.
+ *
+ * So an unset start now makes a path un-runnable, and the editor opens on creation to ask for one.
+ */
 export function runnable(graph, scenarios) {
   const ids = new Set(componentNodes(graph).map((node) => node.id))
   return (scenarios ?? []).filter(
-    (scenario) => scenario?.event && (scenario.sourceId ? ids.has(scenario.sourceId) : defaultSourceId(graph)),
+    (scenario) => scenario?.event && scenario.sourceId && ids.has(scenario.sourceId),
   )
 }
 
@@ -90,8 +145,18 @@ export function runScenarios(graph, scenarios) {
     scenario,
     trace: simulate(graph, scenario.event, {
       sourceId: scenario.sourceId ?? undefined,
+      /* Both, because `simulate` merges them and the legacy one has to keep working for a scenario
+         saved before this field existed. `fallback` wins where the two name the same component. */
+      fallback: scenario.fallback ?? {},
       functionBehaviour: scenario.functionBehaviour ?? {},
       disabled: scenario.disabled ?? [],
+      excluded: scenario.excluded ?? [],
+      /* Null rather than `{}` for a scenario saved before fork order existed. `scheduleWaves` reads
+         absent as "every fork all at once", which is what those paths have always done. */
+      branches: scenario.branches ?? null,
+      /* Empty for a scenario saved before revisits existed, which is every one of them: no component
+         named means every second arrival stays the connector-only rejoin it has always been. */
+      revisit: scenario.revisit ?? [],
     }),
   }))
 }
@@ -99,15 +164,63 @@ export function runScenarios(graph, scenarios) {
 /**
  * How many ticks a set of runs takes.
  *
+ * A tick is a *beat* -- either the connectors of one wave being travelled or its components being
+ * arrived at. Two things follow, and neither was expressible when a tick was a step: everything
+ * happening at one moment plays at one moment, so a fork lights both branches together; and travelling
+ * is separate from arriving, so exactly one of them can be glowing at a time.
+ *
  * `together`: the longest run, since they all advance at once and a short run just
  * finishes early. `sequence`: the sum, since each is watched on its own.
  */
 export function playbackLength(runs, mode = PLAY_MODES.together) {
-  const lengths = (runs ?? []).map((run) => run.trace?.steps?.length ?? 0)
+  const lengths = (runs ?? []).map((run) => run.trace?.phases?.length ?? 0)
   if (lengths.length === 0) return 0
   return mode === PLAY_MODES.sequence
     ? lengths.reduce((total, length) => total + length, 0)
     : Math.max(...lengths)
+}
+
+/* How long a beat spent arriving at components lasts. Connector beats are timed by distance
+   instead -- see `tickDurations`. */
+export const NODE_BEAT_MS = 1000
+
+/**
+ * How long each tick should last, in milliseconds.
+ *
+ * A component beat is a fixed second: it is a verdict being read, and a verdict does not take longer
+ * because the card is further away. A connector beat is timed by *distance*, so the event crosses
+ * every connector at the same speed -- which is the whole point. Timing those uniformly is what made
+ * the event look as though it sped up across a long line and crawled across a short one.
+ *
+ * Where a beat travels several connectors at once (a fork), it lasts as long as the longest of them.
+ * Cutting to the next beat when the shortest arrives would leave the other dots still in flight and
+ * the components they are heading for already lit.
+ *
+ * @param hopMs  edge id to how long crossing it should take. Supplied by the app, which is the only
+ *   layer that knows where anything is on screen; a missing entry falls back to a node beat so a
+ *   connector whose ends are not measured yet still takes a sensible amount of time.
+ */
+export function tickDurations(runs, mode = PLAY_MODES.together, { hopMs } = {}) {
+  const perRun = (runs ?? []).map((run) =>
+    (run.trace?.phases ?? []).map((beat) => {
+      if (beat.kind !== 'edge') return NODE_BEAT_MS
+      const ids = (run.trace.waves[beat.wave] ?? [])
+        .map((index) => run.trace.steps[index]?.edgeId)
+        .filter(Boolean)
+      const longest = ids.reduce((top, id) => Math.max(top, hopMs?.get(id) ?? NODE_BEAT_MS), 0)
+      return longest || NODE_BEAT_MS
+    }),
+  )
+
+  if (perRun.length === 0) return []
+  if (mode === PLAY_MODES.sequence) return perRun.flat()
+
+  /* Played together, so tick n lasts as long as the slowest run's tick n. A run that has already
+     finished contributes nothing rather than padding the tick to a full beat. */
+  const total = Math.max(...perRun.map((list) => list.length))
+  return Array.from({ length: total }, (_, tick) =>
+    Math.max(...perRun.map((list) => list[tick] ?? 0), 1),
+  )
 }
 
 /*
@@ -121,13 +234,13 @@ export function playbackLength(runs, mode = PLAY_MODES.together) {
  */
 function indicesAt(runs, tick, mode) {
   if (mode !== PLAY_MODES.sequence) {
-    return runs.map((run) => ({ index: tick, playing: tick < (run.trace?.steps?.length ?? 0) }))
+    return runs.map((run) => ({ index: tick, playing: tick < (run.trace?.phases?.length ?? 0) }))
   }
 
   let remaining = tick
   let started = true
   return runs.map((run) => {
-    const length = run.trace?.steps?.length ?? 0
+    const length = run.trace?.phases?.length ?? 0
     if (!started) return { index: -1, playing: false }
     if (remaining < length) {
       const index = remaining
@@ -161,19 +274,38 @@ export function combinedFrameAt(runs, tick, { mode = PLAY_MODES.together } = {})
   list.forEach((run, position) => {
     const { scenario, trace } = run
     const { index, playing } = indices[position]
-    const frame = frameAt(trace, index)
+    const frame = frameAtPhase(trace, index)
     projected.push({ scenario, trace, frame, playing, index: frame.index })
 
-    /* index === -1 is a run that has not started yet in sequence mode. frameAt
+    /* index === -1 is a run that has not started yet in sequence mode. frameAtPhase
        returns an empty frame for it, so nothing below needs to know. */
+    const inFlight = new Set(frame.current.map((step) => step.nodeId))
     for (const [nodeId, status] of Object.entries(frame.nodeStatus)) {
       ;(nodes[nodeId] ??= []).push({
         scenarioId: scenario.id,
         name: scenario.name,
         color: scenario.color,
         status,
+        /*
+         * The verdict reached here, so hovering the component says what happened to *this* event
+         * rather than what the component does in general.
+         *
+         * Not from the frame's playhead: the playhead is empty while the event is between two
+         * components, which is half of every hop, so reading it there would make the hover text
+         * alternate between the two accounts as the run played.
+         *
+         * From `frame.nodeStep` rather than `trace.visited`, though, because the status on the line
+         * above comes from the frame -- and where a path stops at one component twice, `visited` holds
+         * the first stop while the frame has folded its way to the second. That put the first stop's
+         * sentence beside the second stop's status word. Both now come from the same fold, so they
+         * cannot disagree; `visited` stays as the fallback for a caller holding an older trace.
+         */
+        step: frame.nodeStep?.[nodeId] ?? trace?.visited?.[nodeId] ?? null,
         arrived: hasArrived(status),
-        current: frame.current?.nodeId === nodeId,
+        /* A set, because a wave can have the event at several components at once -- comparing
+           against one "the current step" would light whichever arm of a fork happened to be
+           recorded first and leave its sibling looking passed over. */
+        current: inFlight.has(nodeId),
       })
     }
 
@@ -186,8 +318,10 @@ export function combinedFrameAt(runs, tick, { mode = PLAY_MODES.together } = {})
       })
     }
 
-    if (frame.current) {
-      current.push({ scenarioId: scenario.id, color: scenario.color, step: frame.current })
+    /* One entry per component in flight, not one per run. Two arms of a fork are two places
+       the event is, and the drawer and the canvas both have to be able to say so. */
+    for (const step of frame.current) {
+      current.push({ scenarioId: scenario.id, color: scenario.color, step })
     }
   })
 
@@ -237,50 +371,43 @@ function samePaths(a, b) {
 /**
  * Write a combined frame onto React Flow nodes.
  *
- * Sets `data.paths` (every scenario touching this node) and, for the node a
- * playhead is on, `data.anchor`/`data.anchorStep` -- which is what makes the
- * walkthrough tooltip open by itself. All three are in `RUNTIME_NODE_KEYS`, so none
- * of this reaches the stored document; see diagram/serialize.js.
+ * Sets `data.paths` and nothing else: every scenario touching this node, with the status that draws
+ * the rings, the dimming and the glow, and the verdict reached there for whoever asks to read it. In
+ * `RUNTIME_NODE_KEYS`, so none of it reaches the stored document; see diagram/serialize.js.
  *
- * `playing` gates the anchor, and only the anchor. An open tooltip is the claim "the
- * event is here, now", and that is true exactly while the transport is running -- so
- * when it stops, the rings and the dimming stay (they are the result, and the reason
- * to have watched) and the tooltip closes. Without the gate the playhead parks on
- * whichever component it finished on and holds a panel open over the diagram
- * indefinitely, which is what a stopped walkthrough used to look like: three
- * components greyed out with a note stuck to one of them and no way to tell why.
+ * One field rather than two, deliberately. The verdict used to be written separately as
+ * `data.anchorStep`, and because a frame is recomputed rather than mutated that was a *new object*
+ * every tick -- so comparing it by identity rebuilt every annotated node on every beat and defeated
+ * the whole point of the identity contract below. Carrying it inside the `paths` entry means
+ * `samePaths` is the single arbiter of whether a node changed, and it compares the things that
+ * actually decide what is drawn.
  *
- * @param frame    `combinedFrameAt` output, or null to clear playback state
- * @param playing  whether the transport is running; false leaves the frame's result
- *                 on the canvas but opens no tooltip
+ * ## What it no longer does, and why
+ *
+ * It used to also set `data.anchor = 'step'`, which *pinned* a note open over the component the
+ * playhead was at. Two problems the on-canvas version could not solve. A note card is wider than a
+ * component and taller than the row gap, so each one covered the components either side of the one it
+ * described -- the panel explaining a step obscured the step. And a wave arrives at several
+ * components at once, so this had to cap how many it would open (three) and open *none* past that,
+ * meaning a source feeding twenty destinations explained nothing at the moment it had most to
+ * explain.
+ *
+ * So the notes are collected in a lane above the diagram instead (simulation/NotesLane.jsx), where
+ * they accumulate and nothing is hidden to show them.
+ *
+ * The step itself is still written, deliberately: hovering a component during or after a run shows
+ * what happened to *this* event there rather than the generic description, and the show-all-notes
+ * gutter reads the same field. What went away is only the forcing open, not the content.
  */
-export function applyPathsToNodes(nodes, frame, { playing = true } = {}) {
-  /* One tooltip per node, so when two playheads land on the same node the first
-     run's step is the one shown -- the drawer lists every run's position, which is
-     where the ambiguity is resolved honestly rather than by stacking panels. */
-  const steps = new Map()
-  for (const entry of frame?.current ?? []) {
-    if (!steps.has(entry.step.nodeId)) steps.set(entry.step.nodeId, entry.step)
-  }
-
+export function applyPathsToNodes(nodes, frame) {
   let changed = false
   const next = nodes.map((node) => {
     if (node.type === 'zone') return node
     const paths = pathsFor(frame?.nodes, node.id)
-    const step = playing ? (steps.get(node.id) ?? null) : null
-    const anchor = step ? 'step' : undefined
-
-    if (
-      samePaths(node.data?.paths ?? null, paths) &&
-      (node.data?.anchorStep ?? null) === step &&
-      node.data?.anchor === anchor
-    ) {
-      return node
-    }
+    if (samePaths(node.data?.paths ?? null, paths)) return node
 
     changed = true
-    const data = { ...node.data, paths: paths ?? undefined, anchor, anchorStep: step ?? undefined }
-    return { ...node, data }
+    return { ...node, data: { ...node.data, paths: paths ?? undefined } }
   })
 
   return changed ? next : nodes
@@ -309,7 +436,6 @@ export function applyPathsToEdges(edges, frame) {
  * and should not appear to grow as the animation plays.
  */
 export function runStatus(run) {
-  const steps = run?.trace?.steps ?? []
   const terminal = Object.values(run?.trace?.visited ?? {}).filter((step) =>
     [STATUS.delivered, STATUS.dropped, STATUS.blocked, STATUS.unmatched].includes(step.status),
   )
@@ -317,7 +443,9 @@ export function runStatus(run) {
     scenarioId: run?.scenario?.id,
     name: run?.scenario?.name,
     color: run?.scenario?.color,
-    total: steps.length,
+    /* Beats, matching the transport. Counting steps here would put "4/9" beside a scrubber whose
+       maximum is 5, and the two numbers describing the same run have to agree. */
+    total: run?.trace?.phases?.length ?? 0,
     index: run?.index ?? -1,
     delivered: terminal.filter((step) => step.status === STATUS.delivered).length,
     withheld: terminal.filter((step) => !hasArrived(step.status)).length,

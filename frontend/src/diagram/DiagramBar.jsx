@@ -13,9 +13,21 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp, Download, FolderOpen, Link2Off, Loader2, Palette, RotateCcw, Save } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronUp,
+  Download,
+  FolderOpen,
+  Link2Off,
+  Loader2,
+  Palette,
+  RotateCcw,
+  Save,
+  Upload,
+} from 'lucide-react'
 
 import PalettePicker from '../ui/PalettePicker.jsx'
+import { CHANNELS } from '../canvas/palettes.js'
 import { UNTITLED } from './useDiagrams.js'
 
 export default function DiagramBar({
@@ -35,6 +47,8 @@ export default function DiagramBar({
   onSaveAs,
   onRename,
   onExport,
+  onExportFile,
+  onImportFile,
   onFocusPlaceholder,
   onApplyPalette,
   onResetPalette,
@@ -42,6 +56,11 @@ export default function DiagramBar({
   const [forking, setForking] = useState(false)
   const [forkName, setForkName] = useState('')
   const [theming, setTheming] = useState(false)
+  /* What a theme is allowed to touch. All three colours and no shapes, which is what applying a
+     palette has always done -- see the note beside the toggles. Component state rather than a
+     document field: it is a mode for the next click, not a property of the diagram. */
+  const [channels, setChannels] = useState(() => CHANNELS.map((channel) => channel.key))
+  const [includeShapes, setIncludeShapes] = useState(false)
   const forkInput = useRef(null)
 
   useEffect(() => {
@@ -141,6 +160,15 @@ export default function DiagramBar({
             Open
           </Secondary>
 
+          <Secondary
+            onClick={onImportFile}
+            disabled={Boolean(busy)}
+            icon={Upload}
+            title="Rebuild a diagram from a previously exported file"
+          >
+            Import
+          </Secondary>
+
           <button
             type="button"
             onClick={() => onSave()}
@@ -191,11 +219,41 @@ export default function DiagramBar({
               <div className="absolute right-0 top-full z-30 mt-1 w-72 rounded-md border border-twilio-gray-20 bg-white shadow-lg">
                 <p className="border-b border-twilio-gray-20 px-2.5 py-2 text-[11px] leading-relaxed text-twilio-gray-60">
                   A colour per component family — sources, processing, outputs, Unify,
-                  Engage. Shapes and zone colours are left as they are.
+                  Engage. Zone colours are left as they are.
                 </p>
+                {/*
+                  Which of the three channels a theme writes, and whether it reaches shapes.
+
+                  All three and no shapes is what this always did, so the panel opens on the
+                  behaviour anyone already using it expects. The toggles are the request's own case:
+                  recolouring every border on the canvas and leaving the fills alone is a thing
+                  people do to a diagram they have already coloured by hand.
+
+                  Shapes are opt-in rather than included, because a palette is a colour per
+                  *component family* and a shape has no family -- so it takes a stated rule (the
+                  lightest colour fills, the darkest outlines) rather than an arbitrary one, and the
+                  user asks for it.
+                */}
+                <div className="flex flex-wrap items-center gap-1 border-b border-twilio-gray-20 px-2.5 py-2">
+                  <span className="mr-1 text-[10px] uppercase tracking-wide text-twilio-gray-60">
+                    Apply to
+                  </span>
+                  {CHANNELS.map(({ key, label }) => (
+                    <Toggle
+                      key={key}
+                      on={channels.includes(key)}
+                      onClick={() => setChannels(toggleChannel(channels, key))}
+                    >
+                      {label}
+                    </Toggle>
+                  ))}
+                  <Toggle on={includeShapes} onClick={() => setIncludeShapes((on) => !on)}>
+                    Shapes
+                  </Toggle>
+                </div>
                 <PalettePicker
                   onApply={(key) => {
-                    onApplyPalette(key)
+                    onApplyPalette(key, { channels, includeShapes })
                     setTheming(false)
                   }}
                 />
@@ -214,8 +272,8 @@ export default function DiagramBar({
             )}
           </div>
 
-          {/* Two buttons rather than a menu: there are exactly two formats, and a
-              dropdown would cost a click to reach either. */}
+          {/* Buttons rather than a menu: there are only a few formats, and a dropdown
+              would cost a click to reach any of them. */}
           <div className="ml-1 flex items-center overflow-hidden rounded-md border border-twilio-gray-20">
             <span className="flex items-center gap-1 border-r border-twilio-gray-20 bg-twilio-gray-10 px-2 py-1.5 text-[10px] uppercase tracking-wider text-twilio-gray-60">
               {exporting ? (
@@ -241,6 +299,15 @@ export default function DiagramBar({
             >
               PDF
             </button>
+            <button
+              type="button"
+              onClick={onExportFile}
+              disabled={exporting}
+              title="Save a file that can rebuild this diagram, including its name, by importing it later"
+              className="border-l border-twilio-gray-20 px-2.5 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:bg-twilio-gray-10 hover:text-twilio-navy disabled:opacity-50"
+            >
+              JSON
+            </button>
           </div>
         </div>
       )}
@@ -248,16 +315,49 @@ export default function DiagramBar({
   )
 }
 
-function Secondary({ onClick, disabled, icon: Icon, children }) {
+function Secondary({ onClick, disabled, icon: Icon, title, children }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 px-2.5 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
     >
       {Icon && <Icon size={13} aria-hidden="true" />}
       {children}
     </button>
   )
+}
+
+/* A chip that is on or off. Its own component because there are four of them in a row and the
+   pressed styling has to be identical -- two of them differing by a shade is the sort of thing that
+   reads as one being unavailable. */
+function Toggle({ on, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+        on
+          ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+          : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/* One channel on or off, never emptying the set: "apply to none" is a theme that does nothing, and a
+   picker whose rows silently stop working is worse than one that keeps a channel selected. */
+function toggleChannel(channels, key) {
+  if (!channels.includes(key)) {
+    return CHANNELS.map((channel) => channel.key).filter(
+      (channel) => channels.includes(channel) || channel === key,
+    )
+  }
+  const next = channels.filter((channel) => channel !== key)
+  return next.length ? next : channels
 }

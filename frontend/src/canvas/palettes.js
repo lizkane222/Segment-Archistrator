@@ -236,6 +236,43 @@ export function styleForColor(color) {
   }
 }
 
+/* The three things a colour can be. Named and exported so the two pickers -- one node, whole canvas
+   -- offer the same set and neither can drift from what `styleForColor` writes. */
+export const CHANNELS = [
+  { key: 'bg', label: 'Background' },
+  { key: 'border', label: 'Border' },
+  { key: 'text', label: 'Text' },
+]
+
+const CHANNEL_KEYS = CHANNELS.map((channel) => channel.key)
+
+/**
+ * A picked palette colour, applied to only the channels asked for.
+ *
+ * All three is the default and stays exactly what it was: the fill, a border derived from it and a
+ * label colour that is legible on it (`styleForColor`). That derivation is the reason the default is
+ * all three -- a pick that set only the background is one click away from white-on-white.
+ *
+ * A subset is the request's own case: "specify which of background, border, text should use the
+ * palette colour". There the colour goes on verbatim, because the user has named the channel and
+ * deriving something else for it would be answering a different question. Nothing else in the node's
+ * style is touched, so recolouring only the borders across a canvas leaves every fill alone.
+ *
+ * Returns null for a colour it cannot parse, so a caller can leave the node alone rather than writing
+ * `undefined` into its style and blanking it -- same contract as `styleForColor`.
+ */
+export function styleForChannels(color, channels) {
+  const full = styleForColor(color)
+  if (!full) return null
+
+  const wanted = (channels ?? []).filter((channel) => CHANNEL_KEYS.includes(channel))
+  if (!wanted.length || wanted.length === CHANNEL_KEYS.length) return full
+
+  const patch = {}
+  for (const channel of wanted) patch[channel] = hex(parseHex(color))
+  return patch
+}
+
 export const paletteByKey = (key) => PALETTES.find((palette) => palette.key === key) ?? null
 
 /**
@@ -270,8 +307,10 @@ export function paletteStyles(palette) {
 }
 
 /* The three keys a palette owns. Named rather than "everything except shape", so a
-   style field added later is not silently wiped by Reset colours. */
-const COLOUR_KEYS = ['bg', 'border', 'text']
+   style field added later is not silently wiped by Reset colours. Read off `CHANNELS`
+   rather than written out again, so the pickers and Reset cannot disagree about which
+   fields a theme is responsible for. */
+const COLOUR_KEYS = CHANNEL_KEYS
 
 /**
  * Every component on the canvas, recoloured. The "all components" half of the request.
@@ -285,18 +324,53 @@ const COLOUR_KEYS = ['bg', 'border', 'text']
  * Returns the same array when nothing changes, matching the identity contract
  * `growZones` and `collapseGraph` keep: React Flow re-renders what it is handed.
  */
-export function applyPaletteToNodes(nodes, palette) {
+export function applyPaletteToNodes(nodes, palette, { channels, includeShapes = false } = {}) {
   const styles = paletteStyles(palette)
   if (!Object.keys(styles).length) return nodes ?? []
 
+  /* Which of the three the theme is allowed to write. All three by default, which is what this
+     always did; a subset is the request's "let me theme just the borders". */
+  const wanted = (channels ?? CHANNEL_KEYS).filter((channel) => CHANNEL_KEYS.includes(channel))
+  if (!wanted.length) return nodes ?? []
+  const only = (style) => Object.fromEntries(wanted.map((channel) => [channel, style[channel]]))
+
+  /*
+   * Shapes, opted into.
+   *
+   * A shape has no component family, so the family table has nothing to say about it -- which is why
+   * a themed canvas used to leave every shape as it was, and why the Theme panel said so. Included
+   * on request, under a stated rule rather than an arbitrary family: the lightest colour fills and
+   * the darkest outlines and letters, which is the same light-to-dark reading `paletteStyles` gives
+   * the components.
+   */
+  const ordered = orderedColours(palette)
+  const shapeStyle = ordered.length
+    ? {
+        bg: ordered[0],
+        border: ordered[ordered.length - 1],
+        text: ordered[ordered.length - 1],
+      }
+    : null
+
   let changed = false
   const next = (nodes ?? []).map((node) => {
-    const style = styles[node.data?.kind]
-    if (!style || node.type === 'zone') return node
+    if (node.type === 'zone') return node
+    const isShape = node.data?.kind === 'shape' || node.data?.kind === 'table'
+    const style = isShape ? (includeShapes ? shapeStyle : null) : styles[node.data?.kind]
+    if (!style) return node
     changed = true
-    return { ...node, data: { ...node.data, style: { ...node.data.style, ...style } } }
+    return { ...node, data: { ...node.data, style: { ...node.data.style, ...only(style) } } }
   })
   return changed ? next : (nodes ?? [])
+}
+
+/* A palette's colours, light to dark. The same order `paletteStyles` hands them out in, so a
+   shape's fill matches the lightest family's rather than being a fourth opinion. */
+function orderedColours(palette) {
+  const found = typeof palette === 'string' ? paletteByKey(palette) : palette
+  return (found?.colors ?? [])
+    .filter((color) => parseHex(color))
+    .sort((a, b) => luminance(b) - luminance(a))
 }
 
 /**

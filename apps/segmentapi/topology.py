@@ -221,6 +221,33 @@ DISCOVERED_ZONES = [zone for zone in ZONES if zone["id"] not in PALETTE_ONLY_ZON
 CONTAINER_ZONES = frozenset({ZONE_SEGMENT})
 
 
+#: How a second copy of a zone on one canvas is named: `connections~2`.
+#:
+#: One canvas can hold several diagrams side by side, divided by a frame -- so the same
+#: zone may appear more than once, and two zones sharing an id would collide in the
+#: document (`zones` is keyed by id, and a component stores a single `zone` string). The
+#: copy therefore gets its own id, and every rule here is about the *product*.
+#:
+#: The tilde is chosen for what it is not: `:` already separates the parts of
+#: `custom:zone:ab12` and `manual:source:ab12`, and `-` appears inside product ids like
+#: `profile_sources`. Mirrored by `zoneProductOf` in frontend/src/canvas/frames.js, which
+#: is where the client-side half of this lives.
+ZONE_INSTANCE_SEPARATOR = "~"
+
+
+def zone_product(zone_id: str | None) -> str | None:
+    """
+    Which zone a possibly-duplicated id is a copy of. `connections~2` -> `connections`.
+
+    The identity function for every zone that appears once, which is all of them until
+    someone drops a second Connections beside the first.
+    """
+    if not zone_id:
+        return zone_id
+    head, separator, _ = zone_id.rpartition(ZONE_INSTANCE_SEPARATOR)
+    return head if separator and head else zone_id
+
+
 def zone_chain(zone_id: str | None) -> list[str]:
     """
     A zone and its ancestors, innermost first.
@@ -419,7 +446,15 @@ _POST_SEGMENT = {
 _PRE_SEGMENT = {"source_schema_control", *_POST_SEGMENT}
 
 ALLOWED_EDGES: dict[str, set[str]] = {
-    "source": {"source_insert_function", "source_function", *_PRE_SEGMENT},
+    # Includes itself: the same source is often drawn twice -- once in Connections,
+    # once again in Unify's Profile Sources -- and an edge between the two copies is
+    # how a diagram says "this is the same source" rather than two unrelated ones.
+    #
+    # Also reaches a profile directly, mirroring the reasoning on `profile`'s own
+    # incoming edges below: what identity_resolution produces, a source drawn as a
+    # Profile Source drives the same downstream when the diagram has no separate
+    # identity_resolution node to draw the fan-out from.
+    "source": {"source_insert_function", "source_function", "source", "profile", *_PRE_SEGMENT},
     "source_function": set(_PRE_SEGMENT),
     "source_insert_function": set(_PRE_SEGMENT),
     "source_schema_control": set(_POST_SEGMENT),
@@ -430,7 +465,10 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # event into this destination's own API call -- so it points at the delivery and
     # nothing else.
     "destination_mapping": {"destination", "destination_function"},
-    "destination": set(),  # terminal
+    # Not terminal after all: a destination's own mapping detail is drawn hanging off
+    # it, and Profiles Sync's "audience membership from Engage" input is drawn from
+    # the destination an audience activates rather than from the audience itself.
+    "destination": {"destination_mapping", "profile_sync"},
     "warehouse": {"reverse_etl_model", "sql_table", "data_graph"},
     "reverse_etl_model": {"destination"},
     # A table feeds the entity model that describes it, and the audience that queries it. The arrow
@@ -466,16 +504,23 @@ ALLOWED_EDGES: dict[str, set[str]] = {
         "linked_audience",
     },
     "identity_resolution": {"computed_trait", "audience", "profile", "profile_sync"},
-    "computed_trait": {"audience", "journey", "profile_sync"},
+    # The debugger's source (a stand-in for "play a walkthrough and watch events
+    # arrive here") for the same reason each of these already points at a journey or
+    # an audience: a computed trait, an audience and a journey are all things a
+    # walkthrough demonstrates by feeding events into the debugger.
+    "computed_trait": {"audience", "journey", "profile_sync", "source"},
     "profile_api": set(),  # terminal: a read surface
     "profile_source": {"identity_resolution", "space"},
-    "profile": set(),  # terminal: a profile is what the pipeline produced
+    # Not terminal: what identity_resolution produces, a profile drives the same
+    # downstream as identity_resolution itself does when a diagram has no separate
+    # identity_resolution node to draw the fan-out from.
+    "profile": {"audience", "computed_trait", "journey"},
     # Out to a warehouse only. The edges *into* it are what the request means by
     # "Profile Sync connects to Unify and Engage": it takes profiles and traits from
     # Unify and audience membership from Engage, and lands both in one place.
     "profile_sync": {"warehouse"},
-    "audience": {"journey", "destination", "profile_sync"},
-    "journey": {"audience", "destination"},
+    "audience": {"journey", "destination", "profile_sync", "source"},
+    "journey": {"audience", "destination", "source"},
     "identity_setting": set(),  # a documented rule, not a stage data passes through
 }
 
@@ -555,7 +600,11 @@ def is_valid_placement(kind: str, zone: str) -> bool:
     expected = ZONE_FOR_KIND.get(kind)
     if expected is None:
         return False
-    return expected in zone_chain(zone) or zone in placement_zones(kind)
+    # By product, so a component in the second copy of Connections on a divided canvas is
+    # judged against Connections' rules rather than reported as being in a zone this table
+    # has never heard of. Identical for every zone that appears once -- see `zone_product`.
+    product = zone_product(zone)
+    return expected in zone_chain(product) or product in placement_zones(kind)
 
 
 def expected_zone(kind: str) -> str | None:

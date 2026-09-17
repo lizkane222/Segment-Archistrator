@@ -103,7 +103,7 @@ def test_the_full_pipeline_template_keeps_its_regions_outside_segment(seeded):
     """
     template = Template.objects.get(key="end-to-end-full-pipeline")
     custom = [z for z in template.graph["zones"] if z.get("custom")]
-    assert [z["label"] for z in custom] == ["App / Mobile / Server / Warehouse", "Warehouse"]
+    assert [z["label"] for z in custom] == ["Destination", "App / Mobile / Server / Warehouse"]
     for zone in custom:
         # Beside Segment, not inside it. That is the whole claim they make.
         assert "parent" not in zone, zone["id"]
@@ -119,13 +119,18 @@ def test_every_hand_arranged_node_carries_a_position(seeded):
 
 
 def test_every_template_edge_is_legal(seeded):
+    """
+    Mirrors seed_templates.py's own bypass for a rule-free kind: `custom` has no
+    adjacency table and no business getting one, so an edge touching it is legal by
+    definition rather than something to look up.
+    """
     for template in seeded:
         kinds = {n["id"]: n["kind"] for n in template.graph["nodes"]}
         for edge in template.graph["edges"]:
-            assert topology.is_valid_edge(kinds[edge["source"]], kinds[edge["target"]]), (
-                template.key,
-                edge["id"],
-            )
+            from_kind, to_kind = kinds[edge["source"]], kinds[edge["target"]]
+            if {from_kind, to_kind} & seed_module.RULE_FREE_KINDS:
+                continue
+            assert topology.is_valid_edge(from_kind, to_kind), (template.key, edge["id"])
 
 
 def test_shipped_templates_pass_the_same_validation_a_save_does(seeded):
@@ -835,3 +840,88 @@ def test_a_write_key_in_a_saved_graph_never_reaches_the_database(auth_client):
     assert "writeKey" not in stored["nodes"][0]
     assert stored["nodes"][0]["writeKeyMasked"] == "••••••••1234"
     assert "live_key_abcd1234" not in json.dumps(stored)
+
+
+def test_a_component_in_a_second_copy_of_a_zone_is_not_advised_about(auth_client):
+    """
+    One canvas, two diagrams side by side.
+
+    A divider lets the same zone appear more than once, and the copy needs an id of its
+    own -- two zones sharing one would collide, since `zones` is keyed by id and a
+    component stores a single `zone` string. So the copy is `connections~2`, and the
+    rules have to keep being Connections' rules.
+
+    Without `zone_product`, every component in the copy earned "usually goes in
+    Connections" on every single save: advice that is not only wrong but unfixable, since
+    the component *is* in Connections and there is nowhere else to put it.
+    """
+    response = auth_client.post(
+        "/api/diagrams",
+        {
+            "name": "Before and after",
+            "graph": {
+                "nodes": [
+                    {"id": "a", "kind": "source", "zone": "connections"},
+                    {"id": "b", "kind": "source", "zone": "connections~2"},
+                ],
+                "zones": [
+                    {"id": "connections", "label": "Connections"},
+                    {"id": "connections~2", "label": "Connections (2)"},
+                ],
+            },
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    assert response.data["advisories"] == []
+
+
+def test_a_misplaced_component_in_a_copied_zone_is_still_advised_about(auth_client):
+    """
+    The assertion that keeps the above narrow: a copy is exempt from *nothing*. It is
+    Connections, so what does not belong in Connections does not belong in it either --
+    and the message names the product rather than the raw copy id, because "connections~2"
+    is an implementation detail the reader never chose.
+    """
+    response = auth_client.post(
+        "/api/diagrams",
+        {
+            "name": "Still misfiled",
+            "graph": {
+                "nodes": [{"id": "t", "kind": "computed_trait", "zone": "connections~2"}],
+                "zones": [{"id": "connections~2", "label": "Connections (2)"}],
+            },
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    assert len(response.data["advisories"]) == 1
+    assert "usually goes in Unify" in response.data["advisories"][0]
+
+
+def test_a_divider_exempts_its_contents_like_any_region_the_user_drew(auth_client):
+    """
+    A divider is stored as a custom zone -- it *is* a region the user drew -- so anything
+    dropped straight into a section rather than into a zone inside it is outside Segment's
+    filing system, exactly like something in a box drawn around the customer's own app.
+    """
+    response = auth_client.post(
+        "/api/diagrams",
+        {
+            "name": "Divided",
+            "graph": {
+                "nodes": [{"id": "t", "kind": "computed_trait", "zone": "custom:zone:ab12"}],
+                "zones": [
+                    {
+                        "id": "custom:zone:ab12",
+                        "label": "Divider",
+                        "custom": True,
+                        "frame": {"axis": "vertical", "splitX": 0.5},
+                    }
+                ],
+            },
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    assert response.data["advisories"] == []

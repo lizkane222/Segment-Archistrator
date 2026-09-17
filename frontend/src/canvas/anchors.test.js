@@ -94,7 +94,15 @@ describe('pinning', () => {
   })
 })
 
-describe('the leader line', () => {
+/*
+ * `leader()` -- whichever end the pointer is on, falling back to the pin.
+ *
+ * It used to decide where to draw a dashed line across the diagram from a note to its component. That
+ * gutter is gone and so is the line; what reads this now is the notes lane, which scrolls whichever
+ * card is being pointed at into view. The rule is the same and so is the reason for it: one answer,
+ * because there is one lane and it can only scroll to one place.
+ */
+describe('which end is being pointed at', () => {
   it('follows the pointer over the pin', () => {
     /* One line, not two: a second dashed line across the diagram reads as an edge, which
        is the one thing the leader must never be mistaken for. */

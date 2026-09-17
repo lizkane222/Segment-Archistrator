@@ -32,11 +32,13 @@
  * the moment the flow ends, either way.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
   ArrowLeft,
   Cookie,
+  Eye,
+  EyeOff,
   KeyRound,
   Loader2,
   ShieldCheck,
@@ -88,20 +90,45 @@ const CREDENTIALS = [
   },
 ]
 
-/* Where the user put the screenshot. Served from `frontend/public`, so it is a plain path. */
-const COOKIE_SCREENSHOT = '/help/graph_ql_auth_token.png'
+/* Where the user put the screenshot. Served from `frontend/public`, which Vite copies verbatim
+   into the build output -- so unlike an <img> tag inside index.html, a plain string path here is
+   never rewritten for the production build, and falls through Django's SPA catch-all instead of
+   reaching the file. `BASE_URL` is `/` in dev and `/static/` in the build Django actually serves. */
+const COOKIE_SCREENSHOT = `${import.meta.env.BASE_URL}help/graph_ql_auth_token.png`
 
-export default function ConnectDialog({ onConnected, onClose }) {
+export default function ConnectDialog({ email, onConnected, onClose }) {
+  /* The App session (auth_token) option is somebody's whole login session, not a scoped
+     credential -- offered at all only to a signed-in Twilio account. Hiding it here is UX, not
+     the boundary: the server refuses `credential=graphql` from anyone else regardless. */
+  const credentials = useMemo(
+    () => CREDENTIALS.filter((entry) => entry.id !== 'graphql' || email?.endsWith('@twilio.com')),
+    [email],
+  )
+
   const [credential, setCredential] = useState('public_api')
   const [token, setToken] = useState('')
   const [region, setRegion] = useState('us')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+  /* Hidden by default every time the paste changes. A screen share should never expose what was
+     just pasted here without a deliberate click to reveal it. */
+  const [revealed, setRevealed] = useState(false)
   /* The `needsChoice` list, when the credential can see more than one workspace. Null the rest
      of the time, and it is what switches this dialog into its second step. */
   const [choices, setChoices] = useState(null)
+  /* Set when the choice offered was the `segment-operator` gateway rather than a real workspace
+     -- see `_OPERATOR_SLUG` server-side. Switches the second step into a slug prompt instead of
+     the list, until that slug resolves and folds back into `choices`. */
+  const [needsSlug, setNeedsSlug] = useState(false)
+  const [slug, setSlug] = useState('')
 
-  const active = CREDENTIALS.find((entry) => entry.id === credential) ?? CREDENTIALS[0]
+  const active = credentials.find((entry) => entry.id === credential) ?? credentials[0]
+
+  // If the tab that was selected disappears out from under the dialog -- e.g. someone signs out
+  // of a Twilio account while it is still open -- fall back to the option that is always offered.
+  useEffect(() => {
+    if (!credentials.some((entry) => entry.id === credential)) setCredential('public_api')
+  }, [credentials, credential])
 
   useEffect(() => {
     const onKey = (event) => event.key === 'Escape' && onClose()
@@ -116,20 +143,31 @@ export default function ConnectDialog({ onConnected, onClose }) {
    * because the request, the error handling and the teardown are identical -- the only
    * difference is one field, and two copies would be two places to forget to clear the token.
    */
-  async function attempt(workspaceId) {
+  async function attempt(workspaceId, workspaceSlug) {
     setSubmitting(true)
     setError(null)
     try {
       const result = await sessionApi.start(token.trim(), region, {
         credential,
         workspaceId,
+        workspaceSlug,
       })
+
+      /* The workspace clicked was the `segment-operator` gateway, not a real one -- ask for the
+         exact slug instead of connecting. */
+      if (result?.needsSlug) {
+        setChoices(result.workspaces ?? [])
+        setNeedsSlug(true)
+        return
+      }
 
       /* Not connected yet: the credential works but the workspace is still a question. Keep the
          token in state -- the next request has to carry it again, because nothing is stored
          server-side until a workspace is chosen. */
       if (result?.needsChoice) {
         setChoices(result.workspaces ?? [])
+        setNeedsSlug(false)
+        setSlug('')
         return
       }
 
@@ -137,6 +175,7 @@ export default function ConnectDialog({ onConnected, onClose }) {
          sit in a React fiber too. */
       setToken('')
       setChoices(null)
+      setNeedsSlug(false)
       onConnected(result.workspace, { claimed: result.claimed ?? 0 })
     } catch (err) {
       setError(
@@ -155,14 +194,23 @@ export default function ConnectDialog({ onConnected, onClose }) {
     attempt()
   }
 
+  function handleSlugSubmit(event) {
+    event.preventDefault()
+    if (!slug.trim() || submitting) return
+    attempt(undefined, slug.trim())
+  }
+
   /* Switching tabs drops whatever was pasted. The two credentials look nothing alike, so a
      token left in the box after a switch would be submitted against the wrong validator and
      rejected with a message about the wrong thing. */
   function pick(id) {
     setCredential(id)
     setToken('')
+    setRevealed(false)
     setError(null)
     setChoices(null)
+    setNeedsSlug(false)
+    setSlug('')
   }
 
   return (
@@ -188,7 +236,20 @@ export default function ConnectDialog({ onConnected, onClose }) {
           </button>
         </header>
 
-        {choices ? (
+        {needsSlug ? (
+          <SlugPrompt
+            slug={slug}
+            onSlugChange={setSlug}
+            onSubmit={handleSlugSubmit}
+            submitting={submitting}
+            error={error}
+            onBack={() => {
+              setNeedsSlug(false)
+              setSlug('')
+              setError(null)
+            }}
+          />
+        ) : choices ? (
           <WorkspaceChoice
             workspaces={choices}
             submitting={submitting}
@@ -212,7 +273,7 @@ export default function ConnectDialog({ onConnected, onClose }) {
               aria-label="How to connect"
               className="mt-4 flex gap-2"
             >
-              {CREDENTIALS.map((entry) => {
+              {credentials.map((entry) => {
                 const Icon = entry.icon
                 const chosen = entry.id === credential
                 return (
@@ -251,23 +312,55 @@ export default function ConnectDialog({ onConnected, onClose }) {
               </p>
             )}
 
-            <label
-              htmlFor="token"
-              className="mt-4 flex items-center gap-2 text-sm font-medium text-twilio-navy"
-            >
-              <active.icon size={16} aria-hidden="true" />
-              {active.label}
-            </label>
-            <textarea
-              id="token"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              rows={active.rows}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={active.placeholder}
-              className="mt-2 w-full resize-none break-all rounded-md border border-twilio-gray-20 p-3 font-mono text-xs text-twilio-navy outline-none focus:border-twilio-blue focus:ring-2 focus:ring-twilio-blue/20"
-            />
+            <div className="mt-4 flex items-center justify-between">
+              <label
+                htmlFor="token"
+                className="flex items-center gap-2 text-sm font-medium text-twilio-navy"
+              >
+                <active.icon size={16} aria-hidden="true" />
+                {active.label}
+              </label>
+              {/* Hidden by default -- a screen share should never expose what was just pasted
+                  without a deliberate click to reveal it. */}
+              <button
+                type="button"
+                onClick={() => setRevealed((prev) => !prev)}
+                disabled={!token}
+                className="flex items-center gap-1 text-xs text-twilio-gray-60 transition-colors hover:text-twilio-navy disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {revealed ? (
+                  <EyeOff size={13} aria-hidden="true" />
+                ) : (
+                  <Eye size={13} aria-hidden="true" />
+                )}
+                {revealed ? 'Hide' : 'Reveal'}
+              </button>
+            </div>
+            <div className="relative mt-2">
+              <textarea
+                id="token"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                rows={active.rows}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={active.placeholder}
+                className={`w-full resize-none break-all rounded-md border border-twilio-gray-20 p-3 font-mono text-xs outline-none focus:border-twilio-blue focus:ring-2 focus:ring-twilio-blue/20 ${
+                  revealed || !token ? 'text-twilio-navy' : 'text-transparent'
+                }`}
+              />
+              {/* Painted over the real text rather than instead of it -- the textarea keeps the
+                  actual value (and the caret), so paste, selection and submission all still work
+                  on the real thing. This is purely what gets drawn on screen during a share. */}
+              {!revealed && token && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-all p-3 font-mono text-xs text-twilio-navy"
+                >
+                  {'•'.repeat(Math.min(token.length, 400))}
+                </div>
+              )}
+            </div>
 
             {credential === 'graphql' && <CookieHelp />}
 
@@ -435,6 +528,63 @@ function WorkspaceChoice({ workspaces, submitting, error, onPick, onBack }) {
       >
         <ArrowLeft size={13} aria-hidden="true" />
         Use a different credential
+      </button>
+    </div>
+  )
+}
+
+/**
+ * The `segment-operator` gateway's second step: type the exact slug of the workspace
+ * you actually want, rather than picking from a list that cannot include it.
+ *
+ * A signed-in account's resolved slug is bookmarked server-side, so this is a one-time
+ * cost per workspace -- it reappears in the ordinary list on the next connect.
+ */
+function SlugPrompt({ slug, onSlugChange, onSubmit, submitting, error, onBack }) {
+  return (
+    <div className="p-5">
+      <p className="text-xs leading-relaxed text-twilio-gray-60">
+        That entry is a gateway, not a workspace. Type the exact slug of the workspace you want
+        to read — once it resolves, it is added to your list for next time.
+      </p>
+
+      <form onSubmit={onSubmit}>
+        <label
+          htmlFor="operator-slug"
+          className="mt-4 block text-sm font-medium text-twilio-navy"
+        >
+          Workspace slug
+        </label>
+        <input
+          id="operator-slug"
+          type="text"
+          value={slug}
+          onChange={(event) => onSlugChange(event.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="acme-corp"
+          className="mt-2 w-full rounded-md border border-twilio-gray-20 p-3 font-mono text-xs text-twilio-navy outline-none focus:border-twilio-blue focus:ring-2 focus:ring-twilio-blue/20"
+        />
+
+        {error && <ErrorNote message={error} />}
+
+        <button
+          type="submit"
+          disabled={submitting || !slug.trim()}
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-md bg-twilio-blue px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-twilio-blue-dark disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
+          {submitting ? 'Looking it up…' : 'Find workspace'}
+        </button>
+      </form>
+
+      <button
+        type="button"
+        onClick={onBack}
+        className="mt-4 flex items-center gap-1.5 text-xs text-twilio-gray-60 transition-colors hover:text-twilio-navy"
+      >
+        <ArrowLeft size={13} aria-hidden="true" />
+        Back to the list
       </button>
     </div>
   )

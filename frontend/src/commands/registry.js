@@ -19,6 +19,8 @@
  * shortcut matching are all testable with no canvas and no DOM.
  */
 
+import { isGroupStackId } from '../canvas/grouping.js'
+
 /**
  * The menus a command appears in.
  *
@@ -61,14 +63,29 @@ const alignTo = (id, label) => ({
   id: `align-${id}`,
   label,
   enabled: alignable,
-  run: (ctx) => ctx.actions.align(componentTargets(ctx), id),
+  run: (ctx) => ctx.actions.align(alignTargets(ctx), id),
 })
 
 const distributeOn = (axis, label) => ({
   id: `distribute-${axis}`,
   label,
   enabled: distributable,
-  run: (ctx) => ctx.actions.distribute(componentTargets(ctx), axis),
+  run: (ctx) => ctx.actions.distribute(alignTargets(ctx), axis),
+})
+
+/*
+ * One row of the Table submenu.
+ *
+ * The verb travels to the app rather than the operation being performed here, so this table stays
+ * free of the table *model* -- `enabled` is given facts (how many rows there are) and `run` names
+ * what to do, exactly as every other command here does. See `tableEdit` in AppShell.jsx for the
+ * mapping onto canvas/tables.js.
+ */
+const tableEdit = (verb, label, enabled) => ({
+  id: `table-${verb}`,
+  label,
+  enabled: enabled ?? (() => true),
+  run: (ctx) => ctx.actions.tableEdit(ctx.node.id, verb, ctx.cell),
 })
 
 /* The `hint` is the tooltip. Three line styles is a choice about legibility rather than taste --
@@ -82,23 +99,113 @@ const lineStyle = (id, label, hint) => ({
   run: (ctx) => ctx.actions.lineStyle(ctx.edge.id, id),
 })
 
+/*
+ * Which way data runs along a connector, said in the vocabulary of the drawing.
+ *
+ * The direction ids are canvas/direction.js's -- it owns what "down" means geometrically, and
+ * a test pins these four against `FLOW_DIRECTIONS` so the two lists cannot drift. The labels
+ * live here because they are menu copy: "Top to bottom" is how to *say* `down` to a reader,
+ * and the geometry module has no business holding a phrase.
+ *
+ * `preview` is what makes this usable. Choosing a direction may turn a line round, and the
+ * consequence of that is invisible in a menu -- so hovering a row animates the connector the
+ * way it *would* run, on the canvas, before anything is committed. Resolved against the
+ * context here so the menu only has to hand the value back.
+ */
+const flowOnEdge = (id, label, hint) => ({
+  id: `flow-${id}`,
+  label,
+  hint,
+  enabled: (ctx) =>
+    !ctx.edge
+      ? 'Right-click a connector to set which way it flows.'
+      : (ctx.edge.data?.discovered ?? ctx.edge.discovered) === true
+        ? 'This connection was read from the workspace, so its direction is a fact rather than a choice.'
+        : true,
+  preview: (ctx) => (ctx.edge ? { direction: id, edgeIds: [ctx.edge.id] } : null),
+  run: (ctx) => ctx.actions.flowAlong([ctx.edge.id], id),
+})
+
+const flowOnAll = (id, label, hint) => ({
+  id: `flow-all-${id}`,
+  label,
+  hint,
+  enabled: (ctx) => ctx.edges?.length > 0 || 'There are no connectors on this diagram yet.',
+  /* `edgeIds: null` means every connector, so the preview lights the whole diagram at once --
+     which is the point of the bulk version: you can see how much of the diagram agrees with
+     the direction you are about to assert before asserting it. */
+  preview: () => ({ direction: id, edgeIds: null }),
+  run: (ctx) => ctx.actions.flowAlong(null, id),
+})
+
+/*
+ * "Put this on that path" -- one row per path the diagram has.
+ *
+ * ## Why the slots are numbered
+ *
+ * The rows have to be named after the user's own paths, and `runCommand` resolves an id against a
+ * static table so the keyboard and the menu cannot disagree about what a command is. A row invented
+ * per render would have an id that table has never heard of. So the ids are positional and the
+ * *labels* are resolved from the context, which is the one thing that has to vary.
+ *
+ * Six, matching `PATH_COLORS`: past six paths the colours repeat and a menu stops being the right
+ * way to choose anyway, so `add-to-path-more` points at the drawer instead of growing without limit.
+ *
+ * ## What the row actually does
+ *
+ * Not "append to a list". A path is walked from its start along the arrows, so a component nothing
+ * points at cannot be added to one -- see `routeToReach` in canvas/direction.js. The action either
+ * puts the component back in (if this path was told to leave it out) or turns round the connectors
+ * between the path and it, and says which of the two it did. The second changes the *diagram*, and
+ * the notification has to say so, because a connector drawn backwards is wrong for every path.
+ */
+const addToPath = (slot) => ({
+  id: `add-to-path-${slot}`,
+  /* Resolved against the context, because a row named after a path can only be named at the moment
+     the menu opens. Falls back to a positional name so a row can never render blank. */
+  label: (ctx) => ctx.scenarios?.[slot]?.name ?? `Path ${slot + 1}`,
+  /* Hidden rather than greyed for a path that does not exist: an empty slot is not a thing the user
+     could enable, and five dead rows under every right-click is noise. */
+  visible: (ctx) => Boolean(ctx.scenarios?.[slot]),
+  enabled: (ctx) =>
+    ctx.scenarios?.[slot]?.sourceId
+      ? true
+      : 'This path has no start yet — choose one in the walkthrough drawer first, or it has nothing to be reachable from.',
+  run: (ctx) =>
+    ctx.actions.includeInPath(ctx.scenarios[slot].id, {
+      nodeId: ctx.node?.id ?? null,
+      edgeId: ctx.edge?.id ?? null,
+    }),
+})
+
+const ADD_TO_PATH_SLOTS = 6
+
+/* One list, two scopes. Ordered right/down first because those are the two directions a
+   diagram is actually read in, and so the two that fix a real one. */
+const FLOW_ROWS = [
+  ['right', 'Left to right', 'Data flows towards the right of the diagram.'],
+  ['down', 'Top to bottom', 'Data flows down the diagram. Use this for a vertical stack.'],
+  ['left', 'Right to left', 'Data flows towards the left of the diagram.'],
+  ['up', 'Bottom to top', 'Data flows up the diagram.'],
+]
+
 /* Two components, because the selection's own bounding box is the reference: with one
    selected the box *is* that card and every alignment is a no-op that still marks the
-   document dirty. Zones are excluded before counting -- see `componentTargets`. */
+   document dirty. See `alignTargets`. */
 function alignable(ctx) {
-  const count = componentTargets(ctx).length
+  const count = alignTargets(ctx).length
   if (count >= 2) return true
   return count === 1
-    ? 'Select a second component — aligning one to itself does nothing.'
-    : 'Select two or more components to align them.'
+    ? 'Select a second component or zone — aligning one to itself does nothing.'
+    : 'Select two or more components or zones to align them.'
 }
 
 /* Three, because distributing two is the identity: one gap is already equal to itself.
    See `distributeNodes`. */
 function distributable(ctx) {
-  const count = componentTargets(ctx).length
+  const count = alignTargets(ctx).length
   if (count >= 3) return true
-  return `Select three or more components to space them out — ${count} cannot be distributed.`
+  return `Select three or more components or zones to space them out — ${count} cannot be distributed.`
 }
 
 export const COMMANDS = [
@@ -236,6 +343,59 @@ export const COMMANDS = [
       distributeOn('vertical', 'Vertically'),
     ],
   },
+  /*
+   * Auto-Align. No `menus`: this is not a per-selection action, it runs over the whole
+   * diagram, so its home is the always-on Panel button in Canvas.jsx rather than a
+   * right-click row -- there is no selection for a right-click on one component or zone to
+   * be "about". Still a command, not a bare button handler, so it goes through the same
+   * `runCommand` path (and gets a reason string for free if it is ever wired to a shortcut).
+   * `standalone: true` tells the reachability check in registry.test.js that its dedicated
+   * button, not a menu or a keystroke, is how this one is meant to be found.
+   */
+  {
+    id: 'auto-align',
+    label: 'Auto-Align',
+    group: 'arrange',
+    standalone: true,
+    enabled: (ctx) => (ctx.nodes?.length ?? 0) > 0 || 'There is nothing on this diagram yet.',
+    run: (ctx) => ctx.actions.autoAlign(ctx.nodes),
+  },
+
+  /*
+   * Editing a table's grid.
+   *
+   * A submenu, and hidden entirely unless the right-click landed on a cell -- six rows about
+   * columns on the menu for a destination would be noise on every use, and the parent's `visible`
+   * is what keeps the whole branch out of the way.
+   *
+   * The row and column come from the click rather than from a selection, because a table is one
+   * node: selecting it says nothing about which of its nine cells is meant, and the pointer does.
+   * Adding is offered from the cell too, so "another row under this one" is one gesture -- the two
+   * `+` affordances on the node itself only ever append.
+   */
+  {
+    id: 'table',
+    label: 'Table',
+    menus: [NODE_MENU],
+    group: 'edit',
+    visible: (ctx) => Boolean(ctx.cell),
+    enabled: (ctx) => Boolean(ctx.cell) || 'Right-click a cell to edit the grid.',
+    children: [
+      tableEdit('insert-row-above', 'Insert row above'),
+      tableEdit('insert-row-below', 'Insert row below'),
+      tableEdit('insert-column-left', 'Insert column left'),
+      tableEdit('insert-column-right', 'Insert column right'),
+      tableEdit('delete-row', 'Delete row', (ctx) =>
+        ctx.cell.rows > 1 || 'A table needs at least one row.',
+      ),
+      tableEdit('delete-column', 'Delete column', (ctx) =>
+        ctx.cell.columns > 1 || 'A table needs at least one column.',
+      ),
+      /* The way back from a row dragged shorter than its own text. Also on the divider itself, as
+         a double-click, but that one is only findable once you know it is there. */
+      tableEdit('fit-row', 'Fit row to its text'),
+    ],
+  },
 
   {
     id: 'group',
@@ -321,6 +481,113 @@ export const COMMANDS = [
     visible: (ctx) => Boolean(ctx.edge?.data?.waypoints?.length),
     enabled: () => true,
     run: (ctx) => ctx.actions.route(ctx.edge.id, []),
+  },
+  {
+    id: 'flow',
+    label: 'Flow',
+    menus: [EDGE_MENU],
+    group: 'route',
+    /*
+     * The direct way to say which way a connector runs, and the one to reach for.
+     *
+     * "Reverse direction" below is the same operation stated relatively, and relative is the
+     * harder thing to reason about on a diagram with forty lines: you have to know which way
+     * it points now to know what reversing gets you. "Data flows top to bottom" is absolute
+     * and is a property of the diagram in front of you, so it is right whether the connector
+     * was drawn forwards or backwards -- and it is a no-op on the ones already correct, which
+     * is what makes it safe to use on a whole selection.
+     */
+    enabled: (ctx) => Boolean(ctx.edge) || 'Right-click a connector to set which way it flows.',
+    children: FLOW_ROWS.map(([id, label, hint]) => flowOnEdge(id, label, hint)),
+  },
+  {
+    id: 'add-to-path',
+    label: 'Add to path',
+    menus: [NODE_MENU, EDGE_MENU],
+    group: 'route',
+    /* Hidden with no paths at all, rather than greyed. "Add to path" on a diagram that has none is
+       not an action waiting on a condition -- there is nothing to add to -- and the drawer is where
+       a path gets made. */
+    visible: (ctx) => (ctx.scenarios?.length ?? 0) > 0,
+    enabled: (ctx) =>
+      ctx.node || ctx.edge
+        ? true
+        : 'Right-click a component or a connector to get it onto a path.',
+    children: [
+      ...Array.from({ length: ADD_TO_PATH_SLOTS }, (_, slot) => addToPath(slot)),
+      {
+        /*
+         * Past the sixth path, say so rather than quietly listing the first six.
+         *
+         * `inert`: a row that exists to be read, never to be run. It carries no `run` because there
+         * is nothing for it to do -- the honest response to "there are more paths than fit here" is
+         * to name the place they can be reached, not to invent a way to open a drawer from inside a
+         * submenu. Its `enabled` always refuses, so `runCommand` reports the reason if a keystroke
+         * ever finds it.
+         */
+        id: 'add-to-path-more',
+        inert: true,
+        label: (ctx) => `${(ctx.scenarios?.length ?? 0) - ADD_TO_PATH_SLOTS} more…`,
+        visible: (ctx) => (ctx.scenarios?.length ?? 0) > ADD_TO_PATH_SLOTS,
+        enabled: () =>
+          'This menu lists the first six paths. Open the walkthrough drawer to reach the rest.',
+      },
+    ],
+  },
+  {
+    id: 'flow-all',
+    label: 'Flow of every connector',
+    menus: [PANE_MENU],
+    group: 'route',
+    /* The bulk form, for a diagram whose connectors were all drawn the same wrong way -- which
+       is what laying components out and dragging each line back to the previous card produces.
+       Only the ones running against the direction chosen are touched, so this is idempotent
+       and one undo puts the whole diagram back. */
+    enabled: (ctx) => ctx.edges?.length > 0 || 'There are no connectors on this diagram yet.',
+    children: FLOW_ROWS.map(([id, label, hint]) => flowOnAll(id, label, hint)),
+  },
+  {
+    id: 'reverse-edge',
+    label: 'Reverse direction',
+    menus: [EDGE_MENU],
+    group: 'route',
+    /*
+     * The fix for the commonest drawing mistake on this canvas.
+     *
+     * `ConnectionMode.Loose` makes `source` whichever end the drag started from, so drawing
+     * a connector from a destination back towards the source that feeds it stores it
+     * pointing the wrong way -- and the walkthrough only ever walks source to target, so the
+     * event stops there. With the arrowheads that is now visible; this is what corrects it.
+     *
+     * A discovered connector is refused for the same reason it cannot be deleted: its
+     * direction is a fact read from the workspace rather than a drawing decision.
+     */
+    enabled: (ctx) =>
+      !ctx.edge
+        ? 'Right-click a connector to reverse it.'
+        : (ctx.edge.data?.discovered ?? ctx.edge.discovered) === true
+          ? 'This connection was read from the workspace, so its direction is a fact rather than a choice.'
+          : true,
+    run: (ctx) => ctx.actions.reverseEdges([ctx.edge.id]),
+  },
+  {
+    id: 'reverse-all-edges',
+    label: 'Reverse every connector',
+    menus: [PANE_MENU],
+    group: 'route',
+    /*
+     * For a diagram drawn end-to-start, which is a whole class of diagram rather than a
+     * freak case: it is what you get by laying out the components right to left, or by
+     * consistently dragging each connector from the card you just placed back to the one
+     * before it.
+     *
+     * Deliberately not "work the directions out for me". Nothing local to a connector can
+     * tell a backwards chain from a legitimate fan-in, so an inferring version turns correct
+     * diagrams into wrong ones -- see the header of canvas/direction.js. This says exactly
+     * what it does, and one undo puts it back.
+     */
+    enabled: (ctx) => ctx.edges?.length > 0 || 'There are no connectors on this diagram yet.',
+    run: (ctx) => ctx.actions.reverseEdges(null),
   },
   {
     id: 'delete-edge',
@@ -429,6 +696,19 @@ export function componentTargets(ctx) {
   return selectionOf(ctx).filter((id) => byId.get(id)?.type !== 'zone')
 }
 
+/**
+ * The part of the selection that align and distribute can act on.
+ *
+ * Unlike `componentTargets`, a zone stays in: `alignNodes`/`distributeNodes` already convert
+ * every node to absolute coordinates before computing anything, so a zone's box is exactly as
+ * usable as a component's, and there is no version of "line up these two zones' tops" that a
+ * user could mean by selecting components instead. Only a synthetic group-stack id is dropped
+ * -- it draws as one card but is not a node the document actually has a position for.
+ */
+export function alignTargets(ctx) {
+  return selectionOf(ctx).filter((id) => !isGroupStackId(id))
+}
+
 /* Three refusals rather than one, because "there is no component here" has three
    different causes and only the bare one is the user's own oversight. A stack and a zone
    each have components in them, and the sentence says how to reach them. */
@@ -468,10 +748,25 @@ export function commandsFor(menu, ctx) {
 function resolve(command, ctx) {
   return {
     id: command.id,
-    label: command.label,
+    /*
+     * A function when the row is named after something in the document rather than after an
+     * operation -- "Path 4" is the user's own word for it and only exists at the moment the menu
+     * opens. The *id* stays static regardless, because `runCommand` resolves ids against a fixed
+     * table and a row whose id was invented per render could never be run from it.
+     */
+    label: typeof command.label === 'function' ? command.label(ctx ?? {}) : command.label,
     shortcut: command.shortcut ?? null,
     hint: command.hint ?? null,
     group: command.group,
+    /*
+     * What hovering this row should show on the canvas, or null.
+     *
+     * Resolved here against the same context `enabled` and `run` get, so the menu stays a
+     * renderer: it hands the value back on hover and knows nothing about what a preview is.
+     * A row whose command declares none reads as null and the menu does nothing, which is
+     * every command but the flow directions.
+     */
+    preview: command.preview?.(ctx ?? {}) ?? null,
     ...commandState(command, ctx),
     children: command.children
       ? command.children

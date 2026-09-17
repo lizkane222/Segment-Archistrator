@@ -99,6 +99,26 @@ export function useDiagrams() {
   }, [])
 
   /**
+   * Adopt a diagram read from an exported file.
+   *
+   * Not a template and not a saved diagram, for the same reason `openTemplate` isn't:
+   * `id` stays null, so the first Save creates a new diagram in this workspace rather
+   * than assuming one by this name already exists here. The graph itself is not this
+   * hook's concern -- the caller reads it out of the file and hands it to `applyGraph`
+   * directly, same split as `openTemplate`.
+   */
+  const importGraph = useCallback(({ name, description, sourceTemplate } = {}) => {
+    setCurrent({
+      id: null,
+      name: name || UNTITLED,
+      description: description ?? '',
+      sourceTemplate: sourceTemplate ?? '',
+      updatedAt: null,
+    })
+    setSavedPrint(null)
+  }, [])
+
+  /**
    * Start from nothing. Not a template, not a saved diagram, not the workspace.
    *
    * `zones: []` explicitly, not omitted. `replace` fills an absent `zones` from the
@@ -241,6 +261,7 @@ export function useDiagrams() {
     refresh,
     openTemplate,
     openDiagram,
+    importGraph,
     startBlank,
     save,
     saveAs,

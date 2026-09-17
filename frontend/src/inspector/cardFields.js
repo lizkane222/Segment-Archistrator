@@ -22,6 +22,11 @@
  * exception because the card is already *drawn inside* its zone, so printing the zone's name on it
  * repeats what the position already says.
  *
+ * Description is a second, later exception: also asked for directly, on the grounds that a
+ * description is usually prose written for the inspector's sidebar, not for a card shared with
+ * forty others on a diagram -- so it now starts hidden and an author turns it on per-component
+ * where it earns its space.
+ *
  * ## What is deliberately not here
  *
  * `name`, because it is the card's title and always drawn -- a card with no label is not a component,
@@ -39,14 +44,18 @@
  * those are different things: turning the eye on for "Cadence" on a source must not print an empty
  * row.
  *
- * `defaultOn: false` appears exactly once. Anything added here later should think twice before
- * joining it -- the point of the default is that a diagram says what it knows without being asked.
+ * `defaultOn: false` appears twice, on `description` and `zone`. Anything added here later should
+ * think twice before joining them -- the point of the default is that a diagram says what it knows
+ * without being asked.
  */
 export const CARD_FIELDS = [
   {
     id: 'description',
     label: 'Description',
-    defaultOn: true,
+    /* Off by default -- see the module comment above. A component's description tends to be prose
+       written for the inspector, and printing it on every card by default crowds a diagram that has
+       more than a couple of components on it. */
+    defaultOn: false,
     read: (data) => text(data?.description),
   },
   {

@@ -51,12 +51,29 @@ export default function EventPreview({ frame, graph, scenarios }) {
    */
   const live = useMemo(() => {
     return (frame?.runs ?? [])
-      .filter((run) => run.frame?.current)
+      .filter((run) => run.frame?.arrived?.length > 0)
       .map((run) => ({
         id: run.scenario.id,
         name: run.scenario.name,
         color: run.scenario.color,
-        step: run.frame.current,
+        /*
+         * Every component this run last landed at, not one.
+         *
+         * `arrived` rather than `current`, because `current` is empty while the event is between two
+         * components -- which is half of every hop, and reading it here made this whole panel blink
+         * out and back once per connector. What it describes is the payload as it currently stands,
+         * and that does not stop being true because the event is in transit.
+         *
+         * A fork lands at several components at once, hence a list. Still one section per *run*
+         * rather than one per component, because the payload is per run -- `frameAtPhase` threads a
+         * single one through the fold -- and splitting would print the same twenty lines of JSON
+         * twice under two headings.
+         */
+        steps: run.frame.arrived,
+        /* The first transform in the wave. A stage that rewrote the event is worth reporting
+           wherever in the wave it happened; claiming one per branch would need a payload per
+           branch, which the trace does not carry. */
+        transform: run.frame.arrived.find((step) => step.transform)?.transform ?? null,
         payload: run.frame.payload,
       }))
   }, [frame])
@@ -84,7 +101,17 @@ export default function EventPreview({ frame, graph, scenarios }) {
             <RunPayload
               key={entry.id}
               entry={entry}
-              nodeName={nameById.get(entry.step.nodeId) ?? entry.step.nodeId}
+              /* Every component in the wave with its own verdict, so a fork reads as one moment
+                 at two places rather than as whichever branch was recorded first. */
+              places={entry.steps.map((step) => ({
+                nodeId: step.nodeId,
+                /* The step index rides along as the list key: a path that doubles back has the same
+                   component arriving twice, and keying on its id would collide. */
+                stepIndex: step.index,
+                name: nameById.get(step.nodeId) ?? step.nodeId,
+                reason: step.reason,
+                status: step.status,
+              }))}
               named={live.length > 1 || scenarios?.length > 1}
             />
           ))}
@@ -94,9 +121,12 @@ export default function EventPreview({ frame, graph, scenarios }) {
   )
 }
 
-function RunPayload({ entry, nodeName, named }) {
-  const { step, payload, color, name } = entry
-  const transform = step.transform ?? null
+function RunPayload({ entry, places, named }) {
+  const { payload, color, name, transform } = entry
+  /* Any branch of the wave that the event did not reach. Reported per branch rather than for the
+     wave as a whole: at a fork one destination can take the event while its sibling drops it, and
+     one sentence about "here" would have to pick a side. */
+  const stopped = places.filter((place) => !hasArrived(place.status))
 
   return (
     <section>
@@ -111,43 +141,80 @@ function RunPayload({ entry, nodeName, named }) {
         </div>
       )}
 
-      {/* Where it is, and the verdict there. The same sentence the anchor tooltip shows on the
+      {/* Where it is, and the verdict there. The same sentences the anchor tooltips show on the
           canvas -- deliberately, because a reader looking at one and then the other must not have to
-          reconcile two different accounts of the same step. */}
-      <div className="rounded-md bg-twilio-gray-10 px-2 py-1.5">
-        <p className="truncate text-[11px] font-semibold text-twilio-navy" title={nodeName}>
-          {nodeName}
-        </p>
-        <p className="mt-0.5 text-[10px] leading-snug text-twilio-gray-60">{step.reason}</p>
+          reconcile two different accounts of the same step. One block per component in the wave,
+          because at a fork the event is genuinely at more than one. */}
+      <div className="space-y-1">
+        {places.map((place) => (
+          <div key={place.stepIndex ?? place.nodeId} className="rounded-md bg-twilio-gray-10 px-2 py-1.5">
+            <p className="truncate text-[11px] font-semibold text-twilio-navy" title={place.name}>
+              {place.name}
+            </p>
+            <p className="mt-0.5 text-[10px] leading-snug text-twilio-gray-60">{place.reason}</p>
+          </div>
+        ))}
       </div>
 
       {transform && (
-        /* Amber and explicit. An unread transform is the one case where the JSON below is *not* the
-           truth, and a panel that showed it silently would let the reader conclude a function does
-           nothing. */
-        <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-twilio-warning/40 bg-orange-50 px-2 py-1.5 text-[10px] leading-snug text-twilio-gray-80">
+        /*
+         * Two different claims, and the colour is what separates them.
+         *
+         * Amber is a warning that the JSON below is *not* the truth: an unread transform
+         * means something may have happened here that this tool did not see, and a panel
+         * that showed the payload silently would let the reader conclude the function does
+         * nothing. That was the only case this note had to make.
+         *
+         * A function that carried code and *ran* is the opposite situation -- the payload
+         * below is exactly what leaves, which is a reassurance rather than a caveat -- so
+         * it reads green and names what moved. Painting it amber would put a warning
+         * triangle on the one stage the walkthrough is now most sure about.
+         */
+        <p
+          className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-[10px] leading-snug text-twilio-gray-80 ${
+            transform.ran
+              ? 'border-twilio-success/40 bg-green-50'
+              : 'border-twilio-warning/40 bg-orange-50'
+          }`}
+        >
           {transform.unread ? (
             <TriangleAlert size={11} className="mt-px shrink-0 text-twilio-warning" aria-hidden="true" />
           ) : (
-            <Wand2 size={11} className="mt-px shrink-0 text-twilio-warning" aria-hidden="true" />
+            <Wand2
+              size={11}
+              className={`mt-px shrink-0 ${transform.ran ? 'text-twilio-success' : 'text-twilio-warning'}`}
+              aria-hidden="true"
+            />
           )}
           <span>
             {transform.unread
               ? 'This stage may rewrite the event, and this tool does not read its code — so what is below is what arrived, not what leaves.'
-              : transform.fields?.length
-                ? `Fields ${transform.mode === 'allow' ? 'kept' : 'removed'} here: ${transform.fields.join(', ')}.`
-                : 'The event was rewritten at this stage.'}
+              : transform.ran
+                ? `${
+                    transform.summary
+                      ? `This stage ran its own code and ${transform.summary}.`
+                      : 'This stage ran its own code and returned the event unchanged.'
+                  } What is below is what leaves it.${
+                    transform.logs > 0
+                      ? ` It logged ${transform.logs} line${transform.logs === 1 ? '' : 's'} — the Code tab shows them.`
+                      : ''
+                  }`
+                : transform.fields?.length
+                  ? `Fields ${transform.mode === 'allow' ? 'kept' : 'removed'} here: ${transform.fields.join(', ')}.`
+                  : 'The event was rewritten at this stage.'}
           </span>
         </p>
       )}
 
-      {!hasArrived(step.status) && (
-        <p className="mt-1.5 text-[10px] leading-snug text-twilio-red-dark">
-          {step.status === STATUS.dropped || step.status === STATUS.blocked
-            ? 'The event stops here — nothing downstream of this receives it.'
-            : 'Nothing past this point is claimed.'}
+      {stopped.map((place) => (
+        <p key={place.stepIndex ?? place.nodeId} className="mt-1.5 text-[10px] leading-snug text-twilio-red-dark">
+          {/* Named, because with several branches in flight "here" is ambiguous. */}
+          {places.length > 1 ? `${place.name}: ` : ''}
+          {place.status === STATUS.dropped || place.status === STATUS.blocked
+            ? 'the event stops here — nothing downstream of this receives it.'
+            : 'nothing past this point is claimed.'}
         </p>
-      )}
+      ))}
 
       <PayloadBody payload={payload} />
     </section>

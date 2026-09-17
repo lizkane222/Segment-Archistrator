@@ -26,6 +26,7 @@ import {
   insertWaypoint,
   lineStyleOf,
   midpointOf,
+  pointAlong,
   moveWaypoint,
   orthogonalCorners,
   removeWaypoint,
@@ -416,6 +417,56 @@ describe('where the label goes', () => {
   it('survives a zero-length route', () => {
     expect(midpointOf([{ x: 5, y: 5 }, { x: 5, y: 5 }])).toEqual({ x: 5, y: 5 })
     expect(midpointOf([])).toEqual({ x: 0, y: 0 })
+  })
+})
+
+/*
+ * The same arc-length walk the label uses, for the travelling event.
+ *
+ * The property that matters is constant speed: equal fractions of `t` must cover equal *distance*,
+ * so a bent connector does not make the event slow down at every corner. Timing each connector by
+ * distance (see simulation/scenarios.js) is pointless if the interpolation within one is uneven.
+ */
+describe('pointAlong', () => {
+  /* One long leg and one short one, so anything that interpolated per segment would fail. */
+  const bent = [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 210, y: 0 },
+  ]
+
+  it('covers equal distance for equal steps of t', () => {
+    const at = (t) => pointAlong(bent, t).x
+    expect(at(0)).toBe(0)
+    expect(at(0.25)).toBeCloseTo(52.5, 5)
+    expect(at(0.5)).toBeCloseTo(105, 5)
+    expect(at(0.75)).toBeCloseTo(157.5, 5)
+    expect(at(1)).toBe(210)
+  })
+
+  it('turns the corner rather than cutting across it', () => {
+    const corner = [
+      { x: 0, y: 0 },
+      { x: 0, y: 100 },
+      { x: 100, y: 100 },
+    ]
+    /* A quarter of the way along a 200-unit route is 50 down the first leg. Straight-lining from
+       start to end would put it at (25, 25). */
+    expect(pointAlong(corner, 0.25)).toEqual({ x: 0, y: 50 })
+  })
+
+  /* A progress value that has drifted a hair past its bounds must not fling the event off the end
+     of the line -- the clock is real time and floating point, so it will happen. */
+  it('clamps a t outside 0..1', () => {
+    expect(pointAlong(bent, 1.0001)).toEqual({ x: 210, y: 0 })
+    expect(pointAlong(bent, -3)).toEqual({ x: 0, y: 0 })
+    expect(pointAlong(bent, NaN)).toEqual({ x: 0, y: 0 })
+  })
+
+  it('survives a degenerate route', () => {
+    expect(pointAlong([{ x: 4, y: 4 }], 0.5)).toEqual({ x: 4, y: 4 })
+    expect(pointAlong([], 0.5)).toEqual({ x: 0, y: 0 })
+    expect(pointAlong(null, 0.5)).toEqual({ x: 0, y: 0 })
   })
 })
 

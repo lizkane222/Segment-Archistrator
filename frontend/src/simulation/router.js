@@ -23,18 +23,37 @@
  * What is a claim and what is a hint (this distinction is the whole point):
  *   - Destination filters ARE evaluated. FQL runs against one event with no
  *     profile context, so a verdict here matches the real engine (see fql.js).
- *   - Function bodies are NOT read, by the same decision as the Rules tab. A
- *     function is reported as "may transform" and the user can tell the simulator
- *     to treat it as dropping, which is what the end-to-end-test template's
- *     "simulate with and without it" note is asking for.
+ *   - Function bodies are read *when the component carries code*, and are run
+ *     against the event by ../functions/runtime.js -- so a function that strips a
+ *     field really does strip it from the payload the next component receives. A
+ *     function with no code on it is reported as "may transform", exactly as before,
+ *     and the user can still tell the simulator to treat any of them as dropping.
+ *     The runner is synchronous and has no network, so code that needs to wait for
+ *     something reports `unavailable` and falls back to that same honest hint rather
+ *     than to a guess -- which is the whole reason the outcome is a value and not a
+ *     boolean.
  *   - Audience and computed-trait verdicts are three-valued and often UNKNOWN,
  *     because one event cannot settle a question about profile history.
+ *
+ * One consequence worth stating: `simulate` is memoised on (graph, event), which
+ * holds only while running a function twice gives the same answer. The runner offers
+ * nothing that varies by itself (no clock, no network, no randomUUID), so the only
+ * way to break that is for the user's own code to reach for `Math.random()` -- which
+ * is a thing they did, not a thing this reducer did.
  */
 
+import { sequenceOf } from './branches.js'
 import { evaluateCondition } from './fql.js'
 import { evaluateQuery } from './audienceQuery.js'
 import { dominantCause, explain, UNSUPPORTED } from './logic.js'
 import { eventNameOf, identifiersOf } from './payload.js'
+import {
+  OUTCOME,
+  ROUTER_DEADLINE_MS,
+  runFunction,
+  summarizeChanges,
+} from '../functions/runtime.js'
+import { anchoredLines, checklistState, summarizeSteps } from '../functions/steps.js'
 
 export const STATUS = {
   origin: 'origin',
@@ -48,15 +67,84 @@ export const STATUS = {
   undecided: 'undecided',
   notEvaluated: 'not_evaluated',
   notApplicable: 'not_applicable',
+  /* Left out of this path by the reader, and stepped over rather than stopped at. Distinct from
+     `blocked`: switching a component off is a claim about the architecture ("nothing is delivered
+     here"), while leaving it out is a claim about the *story being told* ("this path is not about
+     this component"), and the event carries on to whatever it feeds. */
+  bypassed: 'bypassed',
 }
 
 /* Statuses that mean the event got there. Used by the results panel rather than
-   by traversal, which asks each handler whether to propagate instead. */
-const ARRIVED = new Set([STATUS.origin, STATUS.passed, STATUS.transformed, STATUS.delivered, STATUS.matched])
+   by traversal, which asks each handler whether to propagate instead.
+
+   `bypassed` is in here because the event did pass through -- it is not withheld, and counting it
+   as such would put a number in the results panel that reads as a fault when it was a choice. It
+   is not `delivered` either, which is what keeps it out of the delivered count. */
+const ARRIVED = new Set([
+  STATUS.origin,
+  STATUS.passed,
+  STATUS.transformed,
+  STATUS.delivered,
+  STATUS.matched,
+  STATUS.bypassed,
+])
 
 /* Exposed as a predicate rather than as the set, so a caller cannot add to it and
    change what every other reader of a trace considers an arrival. */
 export const hasArrived = (status) => ARRIVED.has(status)
+
+/*
+ * What to assume where the diagram does not say.
+ *
+ * ## Why the default is `allow`
+ *
+ * Because the alternative was reading *absence of configuration* as an architectural finding, and
+ * that turned out to be almost every component on almost every diagram. A destination filter with no
+ * condition and no actions used to match every event, find no action to take, and drop it -- so a box
+ * somebody had just dragged onto the canvas reported the event dead and greyed out everything past it.
+ * Across the diagrams this tool actually holds, not one filter, audience, computed trait, journey or
+ * mapping carried any rules at all: the "finding" was unanimous and meaningless. Worse, the fields it
+ * turned on are read-only in the inspector -- they arrive from a real workspace or not at all -- so on
+ * a hand-drawn diagram there was no way to stop a filter dropping.
+ *
+ * So an unconfigured component now passes the event, and the reader says otherwise when they mean it.
+ *
+ * ## Three, not two
+ *
+ * `block` is not the same claim as switching a component off, and the drawer has said so in a comment
+ * for longer than this enum has existed: a dropping insert function still ran, while a switched-off one
+ * was never invoked. `modify` is the third, and it is the honest answer for the commonest case of all --
+ * a function whose body this tool cannot read, which probably did something to the payload but not
+ * anything we can name.
+ *
+ * These are assumptions, so they only ever apply where the simulator has nothing better. A condition
+ * that evaluates false, a matching DROP action, code that threw DropEvent, an audience query that
+ * resolved -- all of those are *known*, and a fallback must never soften a real finding into a guess.
+ * See `indeterminate` for the other half of that rule.
+ */
+export const FALLBACK = {
+  allow: 'allow',
+  block: 'block',
+  modify: 'modify',
+}
+
+export const DEFAULT_FALLBACK = FALLBACK.allow
+
+/* The legacy spelling. `functionBehaviour: {[nodeId]: 'pass' | 'drop'}` said the same thing about
+   functions alone, and nothing in the app ever wrote it -- but a scenario in the database may carry
+   one, and `serialize.test.js` and `tests/test_graph.py` both pin that it survives a round trip. Folded
+   in one place (`runScenarios`) rather than checked at every use. */
+const LEGACY_BEHAVIOUR = { pass: FALLBACK.allow, drop: FALLBACK.block }
+
+/** A legacy `functionBehaviour` map as a `fallback` one. Exported so `runScenarios` is the only caller. */
+export function foldLegacyBehaviour(behaviour) {
+  const folded = {}
+  for (const [nodeId, value] of Object.entries(behaviour ?? {})) {
+    const mapped = LEGACY_BEHAVIOUR[value]
+    if (mapped) folded[nodeId] = mapped
+  }
+  return folded
+}
 
 /*
  * Kinds that are never a stage on an event's path: a definition, a record, or a read
@@ -78,6 +166,17 @@ const INERT_KINDS = new Set([
   'profile_api',
   'reverse_etl_model',
 ])
+
+/*
+ * How many times one component may be stopped at, at most, when a path has asked for it -- see
+ * `revisit` in `simulate`.
+ *
+ * This is what keeps the walk finite, and it is a constant rather than a setting because it is not a
+ * matter of taste: two is what a round trip needs (out and back), and the number that has to be
+ * bounded by *something* is the number of times a component's outgoing connectors are followed. Raise
+ * it and a diagram with a cycle in it takes longer to walk without telling a clearer story.
+ */
+const STOPS_PER_NODE = 2
 
 export function dataOf(node) {
   return node?.data ?? node ?? {}
@@ -133,22 +232,383 @@ export function defaultSourceId(graph) {
   return eligibleStarts(graph)[0]?.id ?? null
 }
 
+/*
+ * Every kind `visit` has a handler for.
+ *
+ * Kept beside the switch it mirrors, and read by `indeterminate` so an unknown kind is offered a
+ * fallback: the simulator has no handler for it and so can claim nothing about it, which is precisely
+ * the condition a fallback answers. Adding a `case` below without adding it here is the one way to get
+ * these out of step, and the cost of that is a component offered a setting it does not need -- which is
+ * the safe direction to fail in.
+ */
+const KNOWN_KINDS = new Set([
+  'source',
+  'custom',
+  'source_function',
+  'source_insert_function',
+  'destination_insert_function',
+  'destination_function',
+  'source_schema_control',
+  'destination_filter',
+  'destination_mapping',
+  'destination',
+  'warehouse',
+  'reverse_etl_model',
+  'tracking_plan',
+  'event_library',
+  'property_library',
+  'space',
+  'identity_resolution',
+  'computed_trait',
+  'audience',
+  'profile_sync',
+  'profile_api',
+  'journey',
+  'profile_source',
+  'profile',
+  'identity_setting',
+])
+
+/*
+ * Kinds whose outcome this tool can fail to settle, and which therefore take a fallback.
+ *
+ * A fixed list of kinds rather than a per-node inspection, for the same reason `revisitable` reads the
+ * graph and not the trace: the answer has to be stable. "Does this filter record actions" flips the
+ * moment a reader sets the fallback to `block` and truncates the path, and a control that removes its
+ * own row is a control with no undo. A kind, by contrast, is a kind.
+ *
+ * It is deliberately close to the `toggleable` list the switched-off chips already use -- the two
+ * questions are asked about much the same components -- but not identical: a `destination` or a
+ * `warehouse` has nothing unreadable about it (they receive, and that is all), while an `audience` or a
+ * `journey` is nothing but unreadable.
+ */
+const INDETERMINATE_KINDS = new Set([
+  'source_function',
+  'source_insert_function',
+  'destination_insert_function',
+  'destination_function',
+  'destination_filter',
+  'destination_mapping',
+  'source_schema_control',
+  'audience',
+  'computed_trait',
+  'journey',
+])
+
+/*
+ * Of those, the ones where `modify` is a thing the component could actually do.
+ *
+ * An audience does not rewrite an event -- it decides whether a profile is in a set -- so offering
+ * "assume it modifies the payload" there would invite a claim the diagram cannot support. Functions,
+ * filters, mappings and schema controls all really can reshape what passes through them.
+ */
+const MODIFIABLE_KINDS = new Set([
+  'source_function',
+  'source_insert_function',
+  'destination_insert_function',
+  'destination_function',
+  'destination_filter',
+  'destination_mapping',
+  'source_schema_control',
+])
+
+/** Is `modify` a meaningful assumption for this kind? See `MODIFIABLE_KINDS`. */
+export function acceptsModify(kind) {
+  return MODIFIABLE_KINDS.has(kind)
+}
+
+/**
+ * The components on `graph` that take a fallback: those this tool may be unable to read.
+ *
+ * A Set of ids, off the graph, for the reasons in `INDETERMINATE_KINDS`. An unknown `kind` counts too:
+ * the simulator has no handler for it, so it cannot claim anything about it, which is exactly the
+ * condition a fallback answers.
+ */
+export function indeterminate(graph) {
+  const ids = new Set()
+  for (const node of componentNodes(graph)) {
+    const kind = kindOf(node)
+    if (INDETERMINATE_KINDS.has(kind) || !KNOWN_KINDS.has(kind)) ids.add(node.id)
+  }
+  return ids
+}
+
+/**
+ * The components a path could sensibly be asked to stop at twice: those with more than one connector
+ * drawn into them. See `revisit` in `simulate`.
+ *
+ * Off the *graph*, and that is the whole point of it being here rather than inferred where it is used.
+ * The obvious source is the trace -- a `rejoin` step is literally the arrival the setting promotes, so
+ * it looks like better evidence. It is not, and the way it fails is the way that matters: a rejoin only
+ * exists if the walk reached the second connector, and a path whose filter drops the event never does.
+ * So the control offering this vanished from exactly the diagram it was built for, leaving no way to
+ * switch it on. Connectors are drawn whether or not a given run reached them, which is the question.
+ *
+ * A Set of ids rather than nodes, because every caller is asking "is this one of them" about a
+ * component it already has.
+ */
+export function revisitable(graph) {
+  const inbound = new Map()
+  for (const edge of graph?.edges ?? []) {
+    inbound.set(edge.target, (inbound.get(edge.target) ?? 0) + 1)
+  }
+  const ids = new Set()
+  for (const [nodeId, count] of inbound) if (count > 1) ids.add(nodeId)
+  return ids
+}
+
 /* --- the trace ------------------------------------------------------------- */
+
+/**
+ * Which tick each step of the walk plays on, given the order this path takes its forks in.
+ *
+ * ## Why this is a pass and not a counter
+ *
+ * `wave` used to be written during the walk as `depth + 1`, which made two different ideas one
+ * number: how far a component is from the start, and which moment it is watched at. They coincide
+ * for a plain breadth-first reading and stop coinciding the instant a path wants to take one arm of a
+ * fork before the other -- so they are prised apart here. `depth` still means BFS distance and
+ * several things read it; `wave` means "which tick", and only this decides it.
+ *
+ * ## The shape it walks
+ *
+ * A tree. Every step carries exactly one `fromIndex` -- one parent *step*, not one parent component --
+ * and a second connector arriving at a component the walk is finished with is recorded as a separate
+ * `rejoin` step that owns no children. So the parent links form a spanning tree of the walk and this
+ * cannot loop, however many cycles the diagram itself has, and however many times a path asks for one
+ * component to be stopped at.
+ *
+ *   unsequenced fork  every arm at `parent + 1`, their subtrees advancing together. Exactly the
+ *                     breadth-first shape as before, which is what keeps this inert for every path
+ *                     that has not asked for anything.
+ *   sequenced fork    arm *k*'s whole subtree finishes before arm *k+1* begins.
+ *
+ * Whole subtree, not one row: staggering only the arms themselves would interleave two branches a row
+ * apart, and an event alternating between two stories reads as a fault rather than as a sequence.
+ *
+ * A `rejoin` is scheduled one wave after its own parent rather than pinned to the component it
+ * rejoins. It exists so the *connector* lights up, and the connector is travelled at the moment the
+ * branch carrying it gets there.
+ *
+ * @param steps     pass one's steps, each with `index`, `nodeId`, `fromIndex`, `rejoin`
+ * @param branches  the scenario's fork order -- see simulation/branches.js
+ * @returns Map of step index to wave
+ */
+export function scheduleWaves(steps, branches = null) {
+  const list = steps ?? []
+  const waves = new Map()
+  if (list.length === 0) return waves
+
+  /*
+   * Children by parent *step*, in the order the walk found them.
+   *
+   * By step index and not by node id, which is the difference between a tree and a graph. These maps
+   * used to be keyed by `fromId` and read back by `nodeId`, which was sound only while a component
+   * could appear at most once in the walk. It no longer can: a path may ask for a component to be
+   * stopped at twice (see `revisit` in `simulate`), and under node-id keys the two visits pool their
+   * children -- so every child gets placed once per visit, and a genuine round trip
+   * (`fn -> plan -> fn`) has `place` descending through the same pair for ever.
+   *
+   * A step index identifies one arrival rather than one component, and every step carries exactly
+   * one parent, so keying on it makes the parent links a real spanning tree. Termination is then a
+   * property of the shape rather than something the walk has to promise.
+   *
+   * Rejoins are collected separately even though they are keyed the same way. A rejoin takes a wave
+   * but owns no subtree -- the component it arrives at already has one, reached by the route that got
+   * there first -- so letting them into `children` would send the scheduler down through the same
+   * component twice and count its depth twice over.
+   */
+  const children = new Map()
+  const rejoins = new Map()
+  const roots = []
+  for (const step of list) {
+    /* No parent step: the origin, and pass three's footnotes. `fromIndex` rather than `fromId`
+       because that is the link being walked -- a step that named a parent id without an index would
+       be a step this scheduler could not place, and silently rooting it would put it on tick zero. */
+    if (step.fromIndex == null) {
+      roots.push(step)
+      continue
+    }
+    const into = step.rejoin ? rejoins : children
+    if (!into.has(step.fromIndex)) into.set(step.fromIndex, [])
+    into.get(step.fromIndex).push(step)
+  }
+
+  /*
+   * Place one step and everything below it; return the last wave the subtree occupies.
+   *
+   * That return value is the whole reason this is recursive rather than a loop over an explicit
+   * stack: a sequenced fork cannot know when its second arm may start until the first arm has said
+   * how far it reached. The recursion is as deep as the longest route through the diagram, which is
+   * tens of components on a real architecture and is bounded by the walk having already visited each
+   * one exactly once.
+   */
+  const place = (step, at) => {
+    waves.set(step.index, at)
+
+    /* A second connector into somewhere already reached. Scheduled a wave *after* this component,
+       because that is when it is travelled: the event leaves here and arrives there, exactly like any
+       other hop -- the only difference is that the component at the far end already has its verdict. */
+    for (const extra of rejoins.get(step.index) ?? []) {
+      if (!waves.has(extra.index)) waves.set(extra.index, at + 1)
+    }
+
+    const kids = children.get(step.index) ?? []
+    if (kids.length === 0) return at
+
+    const order = sequenceOf(
+      branches,
+      step.nodeId,
+      kids.map((kid) => kid.nodeId),
+    )
+
+    /* All at once: every arm on the next wave, their subtrees advancing together. This is the
+       breadth-first shape the walk had before any of this existed, and it is what every path that has
+       asked for nothing still gets. */
+    if (!order) {
+      let deepest = at
+      for (const kid of kids) deepest = Math.max(deepest, place(kid, at + 1))
+      return deepest
+    }
+
+    /* One at a time: each arm's whole subtree finishes before the next one begins. */
+    const byNode = new Map(kids.map((kid) => [kid.nodeId, kid]))
+    let cursor = at
+    for (const id of order) {
+      const kid = byNode.get(id)
+      if (kid) cursor = place(kid, cursor + 1)
+    }
+    return cursor
+  }
+
+  for (const root of roots) if (!root.rejoin) place(root, 0)
+
+  /* Any step the tree walk did not reach. Pass one produces only connected steps, so this is a
+     belt-and-braces floor rather than an expected case -- but a step with no wave would be a step
+     `wavesOf` silently filed under tick zero, which is worse than saying so here. */
+  for (const step of list) if (!waves.has(step.index)) waves.set(step.index, 0)
+
+  return waves
+}
+
+/**
+ * Steps grouped into the ticks they play on: `waves[n]` is the step indices of wave n.
+ *
+ * Dense, so an empty wave in the middle is still a tick. That can happen -- pass two records
+ * against the wave *after* whatever stopped, and if a path stopped early there may be no
+ * wave-three hop even though a footnote sits at wave four -- and collapsing the gap would make
+ * the transport skip a beat and land the footnotes a tick early.
+ *
+ * Indices rather than the steps themselves, so nothing holds a second reference to a step and
+ * the array stays the one place a step object lives.
+ */
+export function wavesOf(steps) {
+  const list = steps ?? []
+  if (list.length === 0) return []
+  const highest = list.reduce((top, step) => Math.max(top, step.wave ?? 0), 0)
+  const waves = Array.from({ length: highest + 1 }, () => [])
+  for (const step of list) waves[step.wave ?? 0].push(step.index)
+  return waves
+}
+
+/**
+ * The ticks a walkthrough plays, as `{kind: 'edge' | 'node', wave}`.
+ *
+ * A wave is two beats, not one: the event travels *along* the connectors into it, and then it
+ * *arrives* at the components. Those are separate moments to watch -- one is motion between two
+ * places, the other is a verdict at one -- and collapsing them into a single tick was what made the
+ * animation read as a component lighting up at the same instant as the line feeding it, with nothing
+ * in between.
+ *
+ * Either beat is skipped where the wave has nothing for it to show, because a beat with nothing in it
+ * is a second of stillness the reader has to sit through.
+ *
+ *   no edge beat    where nothing is travelled. The origin arrives from nowhere, and the footnote
+ *                   wave -- components the walk never reached, recorded so the diagram accounts for
+ *                   them -- has no route to them by definition.
+ *   no node beat    where nothing *arrives*. A wave holding only rejoins is the case: a rejoin is a
+ *                   second connector into a component that already has its verdict, so the connector
+ *                   is travelled and no component is reached. This used to be invisible, because a
+ *                   rejoin always shared its wave with a real arrival -- until a path could take a
+ *                   fork one arm at a time, which puts the rejoin on a wave of its own and left a
+ *                   dead beat at the end of every such run.
+ */
+export function phasesOf(steps, waves) {
+  const list = waves ?? []
+  if (list.length === 0) return []
+
+  const phases = []
+  for (let wave = 0; wave < list.length; wave += 1) {
+    const indices = list[wave] ?? []
+    if (indices.length === 0) continue
+    if (indices.some((index) => steps[index]?.edgeId)) phases.push({ kind: 'edge', wave })
+    if (indices.some((index) => steps[index] && !steps[index].rejoin)) {
+      phases.push({ kind: 'node', wave })
+    }
+  }
+  return phases
+}
 
 /**
  * Walk `event` through `graph`.
  *
  * @param options.sourceId          which source the event enters at
- * @param options.functionBehaviour {[nodeId]: 'pass' | 'drop'} -- what to assume a
- *                                  function whose code we cannot read does
+ * @param options.fallback          `{[nodeId]: 'allow' | 'block' | 'modify'}` -- what to assume where
+ *   the diagram does not say. Absent means `allow` for everything, which is what makes an unconfigured
+ *   component pass rather than report a drop nobody configured. See `FALLBACK`, and `indeterminate` for
+ *   which components it can apply to.
+ * @param options.functionBehaviour the same idea, for functions alone, spelled `'pass' | 'drop'`.
+ *   Superseded by `fallback` and read only so a scenario saved with one keeps working -- `runScenarios`
+ *   folds it in, so nothing here consults it.
  * @param options.disabled          node ids to treat as switched off for this run
  *   only. The graph is not touched: "the same architecture with the insert function
  *   turned off" is a question about one run, and mutating a copy of the graph to ask
  *   it would break memoising the trace on (graph, event) and would put a scenario's
  *   assumption where the document's own `enabled` lives.
+ * @param options.branches          `{[forkNodeId]: [childNodeId, ...]}` -- forks this path takes one
+ *   arm at a time, in the order given. Absent means all at once, which is what a fan-out to twenty
+ *   destinations means and stays the default. See simulation/branches.js.
+ * @param options.excluded          node ids to step *over*: the event passes through without
+ *   the component acting on it and carries on to whatever it feeds. Not the same as `disabled`,
+ *   which stops the event dead -- this is for a path that is not about a component the route
+ *   happens to run through, so leaving one out must not truncate everything past it.
+ * @param options.revisit          node ids this path stops at *twice*.
+ *
+ *   Default is once, and once is right almost always: a component reached by two routes has one
+ *   verdict, and the second connector is recorded as a `rejoin` so the line lights up without the
+ *   component claiming to have acted again. But some architectures genuinely double back, and one of
+ *   the real ones does it in the middle of a customer walkthrough:
+ *
+ *     destination filter -> insert function -> Actions tracking plan -> insert function -> Adobe
+ *
+ *   The function asks the plan for its rules and carries on with the answer. Under the one-stop rule
+ *   the return leg is a bare connector: no verdict, no narration, and -- because a rejoin owns no
+ *   subtree -- nothing downstream of it either. Naming the component here makes the second arrival a
+ *   real stop, with its own tick, its own children, and `visit` run again against the payload as it
+ *   stands, so a function that reshapes the event visibly reshapes it twice.
+ *
+ *   Capped at two stops per component, which is what bounds the walk: each component's outgoing
+ *   connectors are followed at most twice, so a cycle with both ends named goes A B A B and stops.
  */
-export function simulate(graph, event, { sourceId, functionBehaviour = {}, disabled = [] } = {}) {
+export function simulate(
+  graph,
+  event,
+  {
+    sourceId,
+    fallback = {},
+    functionBehaviour = {},
+    disabled = [],
+    excluded = [],
+    branches = null,
+    revisit = [],
+  } = {},
+) {
   const off = new Set(disabled)
+  const skip = new Set(excluded)
+  const returning = new Set(revisit)
+  /* Merged here rather than in two places: a caller that still passes the legacy field gets it read,
+     and `fallback` wins where both name the same component, because it is the newer statement. */
+  const assumed = { ...foldLegacyBehaviour(functionBehaviour), ...fallback }
   const nodes = componentNodes(graph)
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const edges = (graph?.edges ?? []).filter(
@@ -215,17 +675,54 @@ export function simulate(graph, event, { sourceId, functionBehaviour = {}, disab
 
   const steps = []
   const visited = new Map()
+  /*
+   * The stops each component has had: how many, and the most recent.
+   *
+   * Both separate from `visited`, which answers a different question -- "what is this component's
+   * verdict" -- and has to go on answering it with one step per component, because the results panel
+   * is a list of components rather than of arrivals.
+   *
+   * The count is what `revisit` is capped against. The latest is what a *further* connector into a
+   * component reports: a rejoin says "the verdict above is the one that settles it", and on a component
+   * stopped at twice the verdict above is the second one. Quoting the first would let a connector read
+   * as dropped when the pass that actually settled it passed the event on.
+   */
+  const stops = new Map()
+  const latest = new Map()
 
+  /*
+   * `wave` is which tick a step plays on; `index` is where it sits in the array.
+   *
+   * They are not the same number and the difference is the whole point. Several hops happen at
+   * once -- a source feeding four destinations is one moment, not four -- so the transport
+   * advances a wave at a time and a fork lights both of its branches together. The array stays
+   * flat and ordered so `summarize` and the tests can read it as a list.
+   *
+   * A rejoin does not overwrite `visited`. It is a second connector arriving at a component
+   * that already has a verdict, recorded so the *connector* lights up; letting it replace the
+   * entry would give the component a second verdict and make `summarize` report it twice.
+   *
+   * Neither does a revisit, for the same reason and a different one. A component stopped at twice
+   * has two verdicts and they can differ -- the payload has moved on between them -- but the results
+   * panel is a list of components rather than of arrivals, so `visited` keeps the first and the
+   * `steps` array is where both live. Readers that want the verdict as at a given tick take it from
+   * the frame, which folds the steps in order.
+   */
   const record = (entry) => {
     const step = { index: steps.length, ...entry }
     steps.push(step)
-    visited.set(entry.nodeId, step)
+    if (!entry.rejoin) {
+      if (!visited.has(entry.nodeId)) visited.set(entry.nodeId, step)
+      stops.set(entry.nodeId, (stops.get(entry.nodeId) ?? 0) + 1)
+      latest.set(entry.nodeId, step)
+    }
     return step
   }
 
-  record({
+  const origin = record({
     nodeId: start.id,
     fromId: null,
+    fromIndex: null,
     edgeId: null,
     depth: 0,
     status: STATUS.origin,
@@ -246,44 +743,97 @@ export function simulate(graph, event, { sourceId, functionBehaviour = {}, disab
   })
 
   /* Pass one: the paths the event takes. */
-  let frontier = [{ node: start, payload: event, depth: 0 }]
+  let frontier = [{ node: start, payload: event, depth: 0, index: origin.index }]
 
   while (frontier.length > 0) {
     const nextFrontier = []
 
     for (const current of frontier) {
       for (const edge of outgoing.get(current.node.id) ?? []) {
-        if (visited.has(edge.target)) continue
-
+        const edgeId = edge.id ?? `${edge.source}->${edge.target}`
         const target = byId.get(edge.target)
+
+        /*
+         * A second connector into a component the walk already accounted for.
+         *
+         * This used to `continue`, which dropped the *edge* along with the node -- so on any
+         * diagram where two things feed one destination, one of those two connectors appeared
+         * nowhere in the trace and never lit up during playback. The event does travel along it,
+         * so it is recorded; what is not repeated is the component's verdict, which does not
+         * change for having been arrived at twice.
+         *
+         * Unless the path asked for it to be. A component named in `revisit` is one the reader is
+         * telling us the event genuinely comes back through, so its second arrival falls through to
+         * the real visit below instead of being flattened into a connector.
+         *
+         * Bounded either way: a component is allowed `STOPS_PER_NODE` arrivals and no more, so its
+         * outgoing connectors are followed a bounded number of times and a cycle cannot spin here.
+         */
+        const known = visited.get(edge.target)
+        const again = known && returning.has(edge.target) && (stops.get(edge.target) ?? 0) < STOPS_PER_NODE
+        if (known && !again) {
+          record({
+            nodeId: target.id,
+            fromId: current.node.id,
+            fromIndex: current.index,
+            edgeId,
+            depth: current.depth + 1,
+            /* The most recent stop, not the first: on a component this path stops at twice, the
+               verdict "above" is the second one. */
+            status: (latest.get(edge.target) ?? known).status,
+            reason: `“${nameOf(target)}” is also fed from “${nameOf(current.node)}”. It is reached by more than one route on this diagram, and the verdict above is the one that settles it.`,
+            payload: current.payload,
+            propagate: false,
+            rejoin: true,
+          })
+          continue
+        }
+
         const outcome = visit({
           node: target,
           from: current.node,
           payload: current.payload,
           event,
           sourceNode: start,
-          functionBehaviour,
+          assumed,
           switchedOff: off.has(target.id),
+          bypassed: skip.has(target.id),
         })
 
-        record({
+        const onward = continues(outcome, outgoing.get(target.id))
+        const reason = onward === outcome.propagate ? outcome.reason : beyond(outcome, target)
+
+        const step = record({
           nodeId: target.id,
           fromId: current.node.id,
-          edgeId: edge.id ?? `${edge.source}->${edge.target}`,
+          fromIndex: current.index,
+          edgeId,
           depth: current.depth + 1,
           status: outcome.status,
-          reason: outcome.reason,
+          /* Said out loud on a second stop, because the sentence underneath is about to repeat a
+             verdict the reader has already been given once. Without the prefix the card reads as the
+             walkthrough having lost its place rather than as the event doubling back. */
+          reason: again ? `${returned(target, current.node)} ${reason}` : reason,
           payload: outcome.payload ?? current.payload,
           verdict: outcome.verdict ?? null,
           transform: outcome.transform ?? null,
-          propagate: outcome.propagate,
+          /* The *effective* answer, not the handler's. Pass two reads this to decide where to record
+             a "the event never got here" hop, and the app reads it to explain why a path stops -- so
+             recording the handler's opinion while walking on past it would have the trace disagreeing
+             with itself. */
+          propagate: onward,
+          /* Which assumption produced this verdict, when one did. Carried onto the step so a reader --
+             and the diagnostics report -- can tell a guess from a finding without parsing the sentence. */
+          ...(outcome.assumed ? { assumed: outcome.assumed } : {}),
+          ...(again ? { revisit: true } : {}),
         })
 
-        if (outcome.propagate) {
+        if (onward) {
           nextFrontier.push({
             node: target,
             payload: outcome.payload ?? current.payload,
             depth: current.depth + 1,
+            index: step.index,
           })
         }
       }
@@ -291,6 +841,22 @@ export function simulate(graph, event, { sourceId, functionBehaviour = {}, disab
 
     frontier = nextFrontier
   }
+
+  /*
+   * Which tick each of those steps plays on.
+   *
+   * Its own pass, between the walk and the two that explain the walk, and that placement is
+   * load-bearing in both directions. It has to come *after* pass one, because deciding when a
+   * sequenced fork's second arm may start requires knowing how deep the first arm went -- which is
+   * not known until the walk has finished. And it has to come *before* pass two, which schedules
+   * itself relative to whatever stopped (`parent.wave + 1`) and would otherwise be reading a number
+   * that had not been decided yet.
+   *
+   * The walk itself no longer assigns waves at all. It used to write `depth + 1`, which made "how far
+   * from the start" and "which moment it is watched at" the same number -- true of a plain
+   * breadth-first reading and false the moment a path wants one arm of a fork before the other.
+   */
+  for (const [index, wave] of scheduleWaves(steps, branches)) steps[index].wave = wave
 
   /* Pass two: one hop past every path that stopped, so the diagram says why. */
   for (const edge of edges) {
@@ -307,8 +873,12 @@ export function simulate(graph, event, { sourceId, functionBehaviour = {}, disab
     record({
       nodeId: target.id,
       fromId: edge.source,
+      fromIndex: parent.index,
       edgeId: edge.id ?? `${edge.source}->${edge.target}`,
       depth: parent.depth + 1,
+      /* The wave after whatever stopped, so "the event would have gone here next" plays at the
+         moment it would have happened rather than at the end of the run. */
+      wave: (parent.wave ?? parent.depth) + 1,
       status: undecidedParent ? STATUS.undecided : STATUS.blocked,
       reason: undecidedParent
         ? `Whether the event reaches “${nameOf(target)}” depends on “${nameOf(byId.get(edge.source))}”, which this simulation could not settle.`
@@ -321,6 +891,10 @@ export function simulate(graph, event, { sourceId, functionBehaviour = {}, disab
   /* Pass three: the components that take no part in any event's path at all, so the
      diagram accounts for them instead of leaving them grey. Last, and with no edge, so
      they read as footnotes to the walk rather than as part of it. */
+  /* One wave past everything the walk produced, so the footnotes arrive after the run rather
+     than at tick zero -- which is where grouping them by `depth` would have put them, since
+     they have no depth to speak of. */
+  const footnoteWave = steps.reduce((highest, step) => Math.max(highest, step.wave ?? 0), 0) + 1
   for (const node of nodes) {
     if (visited.has(node.id)) continue
     if (!INERT_KINDS.has(kindOf(node))) continue
@@ -331,36 +905,203 @@ export function simulate(graph, event, { sourceId, functionBehaviour = {}, disab
       payload: event,
       event,
       sourceNode: start,
-      functionBehaviour,
+      assumed,
       switchedOff: off.has(node.id),
+      bypassed: skip.has(node.id),
     })
 
     record({
       nodeId: node.id,
       fromId: null,
+      fromIndex: null,
       edgeId: null,
       depth: 0,
+      wave: footnoteWave,
       status: outcome.status,
       reason: outcome.reason,
       payload: event,
       propagate: false,
+      ...(outcome.assumed ? { assumed: outcome.assumed } : {}),
     })
   }
 
+  const waves = wavesOf(steps)
   return {
     sourceId: start.id,
     event,
     steps,
+    waves,
+    phases: phasesOf(steps, waves),
     visited: Object.fromEntries([...visited].map(([id, step]) => [id, step])),
     notes,
   }
 }
 
+/*
+ * Does the event carry on past this component?
+ *
+ * The handler's own answer, unless it said "stop" for the one reason that is not about the event: a
+ * destination *delivers* and then, as far as Segment is concerned, the story is over. That is true of
+ * Segment and not true of the architecture -- a customer's diagram may well carry on into another
+ * vendor's estate, and one of the real ones does exactly that:
+ *
+ *   … -> Adobe Analytics -> Adds AA formatting -> AEP HTTP endpoint -> AEP dataset -> CJA reports
+ *
+ * Five components past the destination, every one of them drawn deliberately, and the walkthrough
+ * used to report all five as never reached. The diagram said the data goes there and the tool said it
+ * does not, which makes the tool wrong about the thing it is for.
+ *
+ * So an outgoing connector is read as the claim it is. Drawing a line out of a component says the
+ * data continues, and this follows it.
+ *
+ * Gated on `delivered` specifically, and not on `hasArrived`, which was tried and is too loose. A
+ * space returns `passed` with `propagate: false` to mean "the event got here but has no identifier, so
+ * it cannot be attached to a profile" -- an entirely real reason not to continue, and one that has a
+ * downstream audience depending on it. `arrived and stopped` covers both "the model ends here" and
+ * "the event stopped here", and only the first should be walked past. `delivered` is the one status
+ * that means the former: the event left Segment intact.
+ *
+ * Gated on there *being* an outgoing connector too, so a genuine leaf stays a leaf and the results
+ * panel goes on counting delivered terminals.
+ *
+ * The component's status is untouched: Adobe Analytics still reads as `delivered`, because it is. What
+ * changes is only whether the walk stops there.
+ */
+function continues(outcome, out) {
+  if (outcome.propagate) return true
+  return outcome.status === STATUS.delivered && (out?.length ?? 0) > 0
+}
+
+/* The verdict, plus the fact that the walk is following the diagram past it. Said out loud rather
+   than left implicit: "Delivered to Adobe Analytics" followed by the event turning up three
+   components later needs a sentence explaining which claim the tool is making, or it reads as the
+   simulator not understanding what a destination is. */
+function beyond(outcome, node) {
+  return `${outcome.reason} This diagram carries on past “${nameOf(node)}”, so the walkthrough follows what you have drawn it feeding — beyond this point it is your architecture being described, not Segment's own behaviour.`
+}
+
+/*
+ * The opening clause of a second stop.
+ *
+ * Prefixed to the verdict rather than replacing it, because the verdict is still the thing that
+ * happened -- and it was re-evaluated against the payload as it stands now, so on a function that
+ * reshapes the event it is a genuinely different sentence from the first pass. What the reader needs
+ * added is only *which* pass they are looking at.
+ */
+function returned(node, from) {
+  return `The event comes back through “${nameOf(node)}” from “${nameOf(from)}”, so this component acts on it a second time on this path.`
+}
+
+/*
+ * The outcome of an assumption, for a component whose real behaviour the diagram does not record.
+ *
+ * One function so the three answers cannot drift apart across the eight or so places that reach for
+ * them, and so the wording is uniformly about *who said so*. Every sentence here names the reader,
+ * because that is the difference between this and a finding: "nothing is recorded, so the walkthrough
+ * assumes" is a very different claim from "the filter drops it", and a reader who cannot tell them
+ * apart has no reason to trust either.
+ *
+ * `why` lets the caller say what specifically was unreadable -- no actions recorded, a condition that
+ * would not parse, a definition needing history -- appended rather than replacing the sentence, so the
+ * assumption is always stated even when the cause is interesting.
+ */
+function assume(node, payload, how, why = null) {
+  const name = nameOf(node)
+  const because = why ? ` ${why}` : ''
+
+  if (how === FALLBACK.block) {
+    return {
+      status: STATUS.dropped,
+      reason: `You set “${name}” to block on this path, so the event stops here and nothing downstream receives it.${because}`,
+      assumed: how,
+      propagate: false,
+    }
+  }
+
+  if (how === FALLBACK.modify) {
+    return {
+      status: STATUS.transformed,
+      reason: `You set “${name}” to modify the event on this path, so it carries on with the payload treated as reshaped — this diagram does not record how, so the fields shown downstream are the ones that arrived.${because}`,
+      /* The same `unread` marker an unread function body sets, so the payload panel already knows how to
+         say "this may have changed" without a second vocabulary for the same uncertainty. */
+      transform: { unread: true },
+      assumed: how,
+      payload,
+      propagate: true,
+    }
+  }
+
+  return {
+    status: STATUS.passed,
+    reason: `Nothing on this diagram records what “${name}” does to the event, so the walkthrough lets it through.${because} Set it to block or modify on this path to say otherwise.`,
+    assumed: FALLBACK.allow,
+    payload,
+    propagate: true,
+  }
+}
+
+/*
+ * An honest verdict, with the reader's fallback deciding only whether the walk carries on past it.
+ *
+ * The other half of `assume`, and the distinction between them is the one this whole feature turns on.
+ * `assume` is for a component that records *nothing* -- there is no verdict to preserve, so the
+ * assumption becomes the verdict and the route reads green. This is for a component that records
+ * something the simulator genuinely cannot settle: an audience needing profile history one event cannot
+ * supply, a condition outside the readable FQL subset, a journey whose entry rules Segment publishes no
+ * API for.
+ *
+ * Those keep their amber status, because it is true and because turning it green would claim the tool
+ * had settled something it had not. What changes is that they no longer *truncate*: the event carries
+ * on and everything downstream gets its own verdict, which is the difference between a walkthrough with
+ * one honest caveat in it and a walkthrough that stops.
+ */
+function carryOn(outcome, node, payload, how) {
+  if (how === FALLBACK.block) return assume(node, payload, how, outcome.reason)
+
+  return {
+    ...outcome,
+    reason: `${outcome.reason} The walkthrough carries on past it${how === FALLBACK.modify ? ' with the payload treated as reshaped' : ''}, so what follows is what the diagram says happens next rather than something this component confirmed.`,
+    ...(how === FALLBACK.modify ? { transform: { unread: true } } : {}),
+    assumed: how ?? DEFAULT_FALLBACK,
+    payload,
+    propagate: true,
+  }
+}
+
 /* --- per-kind behaviour ---------------------------------------------------- */
 
-function visit({ node, from, payload, event, sourceNode, functionBehaviour, switchedOff }) {
+function visit({
+  node,
+  from,
+  payload,
+  event,
+  sourceNode,
+  assumed,
+  switchedOff,
+  bypassed,
+}) {
   const data = dataOf(node)
   const kind = data.kind
+
+  /*
+   * Left out of this path, and therefore stepped over.
+   *
+   * First, ahead of every other rule including the two "off" checks below. Leaving a component out
+   * is a statement about the story the path tells, and if it is not in the story then its
+   * behaviour is not either -- so nothing here evaluates a filter, reads a function, or asks
+   * whether the workspace has it enabled. The payload passes through untouched.
+   *
+   * `propagate: true` is the whole difference from `blocked`. Stopping here would truncate
+   * everything downstream, which is the opposite of what leaving out a component in the middle of
+   * a route is for.
+   */
+  if (bypassed) {
+    return {
+      status: STATUS.bypassed,
+      reason: `“${nameOf(node)}” is left out of this path, so the event passes straight through it to whatever it feeds. Nothing this component does is evaluated here.`,
+      propagate: true,
+    }
+  }
 
   /* Two ways to be off, worded differently on purpose: one is a fact about the
      customer's workspace, the other is an assumption the user made for this run,
@@ -379,13 +1120,29 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
 
   switch (kind) {
     case 'source': {
-      /* Source -> source really is a dead end: an event is collected once, and a
-         second collection of the same event is not a thing Segment does. */
+      /*
+       * A source fed by another source: the same source in a second place, not a second collection.
+       *
+       * This used to be `blocked`, on the reasoning that an event is collected once and a second
+       * collection of the same event is not a thing Segment does. That reasoning is right about the
+       * product and wrong about the drawing, and the flagship template is the proof: a source in
+       * Connections *also* exists as a Profile Source in Unify, and because those are conceptually
+       * different places the template draws the same source twice and joins them. It was never
+       * claiming data flows from one source into another.
+       *
+       * Blocking it cost the whole Unify and Engage half of that template -- Profile, Audience,
+       * Computed Trait and Journey all reported as never reached, from one edge that was only ever a
+       * drawing convention. A diagramming tool that enforces the product's plumbing over the reader's
+       * concepts is rigid in the one place it cannot afford to be.
+       *
+       * So it passes, and says which of the two things it is. Nothing is claimed about a second
+       * collection, because that is not what the edge means.
+       */
       if (kindOf(from) === 'source') {
         return {
-          status: STATUS.blocked,
-          reason: 'An event cannot pass from one source into another.',
-          propagate: false,
+          status: STATUS.passed,
+          reason: `“${nameOf(node)}” is the same source shown again — a source in Connections is also a Profile Source in Unify, and the two are drawn separately because they are different ideas. No second collection happens here; the walkthrough carries on into the role this copy stands for.`,
+          propagate: true,
         }
       }
       /* Anything else upstream is the customer's own system handing Segment the event
@@ -419,16 +1176,16 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
     case 'source_insert_function':
     case 'destination_insert_function':
     case 'destination_function':
-      return visitFunction({ node, payload, functionBehaviour })
+      return visitFunction({ node, payload, assumed })
 
     case 'source_schema_control':
       return visitSchemaControl({ node, payload })
 
     case 'destination_filter':
-      return visitFilter({ node, payload, switchedOff })
+      return visitFilter({ node, payload, switchedOff, assumed })
 
     case 'destination_mapping':
-      return visitMapping({ node, payload })
+      return visitMapping({ node, payload, assumed })
 
     case 'destination':
       return visitDestination({ node, from, payload, sourceNode })
@@ -443,11 +1200,15 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
       }
 
     case 'reverse_etl_model':
+      /* Propagates, though it is not a stage. Keeping the honest verdict and *also* stopping the walk
+         meant a component drawn feeding something else reported that something else as never reached --
+         which is a claim about the diagram, not about Segment. The status stays amber because it is
+         true; what carries on is the walk. */
       return {
         status: STATUS.notApplicable,
         reason:
           'Reverse ETL is not event-driven — this model runs its query on a schedule, so it plays no part in one event’s path.',
-        propagate: false,
+        propagate: true,
       }
 
     case 'tracking_plan':
@@ -458,7 +1219,7 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
       return {
         status: STATUS.notApplicable,
         reason: `“${nameOf(node)}” holds ${kind === 'event_library' ? 'events and their properties' : 'groups of properties'} for tracking plans to share. Events do not flow through it; it is where the plan got its definitions.`,
-        propagate: false,
+        propagate: true,
       }
 
     case 'space':
@@ -469,7 +1230,7 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
 
     case 'computed_trait':
     case 'audience':
-      return visitQueryNode({ node, payload })
+      return visitQueryNode({ node, payload, assumed })
 
     case 'profile_sync':
       return {
@@ -486,16 +1247,23 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
         status: STATUS.notApplicable,
         reason:
           'The Profile API is a read surface — events are not delivered to it, they become readable through it.',
-        propagate: false,
+        propagate: true,
       }
 
     case 'journey':
-      return {
-        status: STATUS.undecided,
-        reason:
-          'Segment publishes no Journeys API, so this journey’s entry conditions are not readable and cannot be simulated.',
-        propagate: false,
-      }
+      /* Never readable, so this is the one kind whose fallback is the *only* thing that can decide it.
+         The status stays amber whatever the reader assumes, because "we cannot see the entry conditions"
+         does not stop being true when they tell us what to assume about them. */
+      return carryOn(
+        {
+          status: STATUS.undecided,
+          reason:
+            'Segment publishes no Journeys API, so this journey’s entry conditions are not readable and cannot be simulated.',
+        },
+        node,
+        payload,
+        assumed?.[node.id],
+      )
 
     /* The three Unify/Engage kinds nobody can read back from the API. All three are
        asserted by hand, so the honest verdict is "this diagram says so", and none of
@@ -512,7 +1280,7 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
         status: STATUS.notApplicable,
         reason:
           'A profile is what the events before it added up to, and this node stands for the shape of one rather than a real person — so a single event has nothing to arrive at here.',
-        propagate: false,
+        propagate: true,
       }
 
     case 'identity_setting':
@@ -520,42 +1288,242 @@ function visit({ node, from, payload, event, sourceNode, functionBehaviour, swit
         status: STATUS.notApplicable,
         reason:
           'A recorded identity resolution rule, not a stage the event passes through. Segment publishes no API for these, so it is maintained by hand.',
-        propagate: false,
+        propagate: true,
       }
 
     default:
-      return {
-        status: STATUS.notEvaluated,
-        reason: `“${kind ?? 'This component'}” is not a component the simulator knows how to route through.`,
-        propagate: false,
-      }
+      /* No handler, so nothing is known -- which is what a fallback is for. This used to stop the walk,
+         the way `custom` did before it was given a case of its own, and the comment there records what
+         that cost: it silently truncated every path that ran through one. */
+      return assume(
+        node,
+        payload,
+        assumed?.[node.id],
+        `“${kind ?? 'This component'}” is not a kind the simulator has rules for.`,
+      )
   }
 }
 
 /*
- * A function's code is deliberately not read -- reproducing it in a diagram invites
- * it going stale, which is the same reason the Rules tab refuses to show it. So the
- * honest simulation is "something may have changed here", with the user able to
- * assert a drop to test the branch.
+ * A function, with or without its code.
+ *
+ * Without code the verdict is the one this simulator always gave: something may have
+ * changed here, we do not claim to know what, and the user can assert a drop to test
+ * the branch. That was the only honest answer while a function body was a thing the
+ * tool refused to hold.
+ *
+ * With code on the component -- pasted into the Code tab -- it is *run*, and the event
+ * that leaves is the event the code returned. That is the point of the feature: a
+ * function that deletes a trait now visibly deletes it from the payload the next
+ * component receives, and a `throw new DropEvent(...)` stops the path where it really
+ * would stop.
+ *
+ * The interesting cases are the ones where running it settles less than it looks like
+ * it should:
+ *
+ *   - `unavailable` -- the code reached for `fetch`, `crypto.createHash`, lodash. The
+ *     runner is synchronous and has no network, so it cannot know what comes back. This
+ *     falls all the way back to the unread verdict rather than to an optimistic one,
+ *     because a payload shown confidently and wrong is worse than a payload withheld.
+ *   - `notRunnable` -- it did not compile. Also the unread verdict, and deliberately
+ *     still propagating: a half-typed brace in the sidebar must not blank out
+ *     everything downstream of the component on the canvas.
+ *   - `error` -- it threw something unplanned. Nothing past this point is claimed,
+ *     which matches what Segment does with it: retry, then drop.
+ *   - `no_handler` -- there is no handler for this event type. On an insert function
+ *     that blocks the type outright, which is a real Segment behaviour and one of the
+ *     easiest to be caught by, so it is reported as the drop it is.
+ *
+ * The reader's fallback wins over all of it. "Assume this blocks" is a question they asked, and code
+ * that says otherwise is not an answer to it.
  */
-function visitFunction({ node, payload, functionBehaviour }) {
-  if (functionBehaviour[node.id] === 'drop') {
+function visitFunction({ node, payload, assumed }) {
+  const data = dataOf(node)
+  const name = nameOf(node)
+  const terminal = data.kind === 'destination_function'
+
+  const said = assumed?.[node.id]
+  if (said === FALLBACK.block) return assume(node, payload, said)
+
+  /*
+   * The unread verdict, kept in one place because four branches below fall back to it and they must
+   * not drift apart. `why` is appended when there is something specific to say about why the code
+   * could not settle it.
+   *
+   * A terminal function is not routed through `assume`: a destination function *is* the destination,
+   * so "the event carried on" is not a thing that could happen here whatever the reader assumes, and
+   * `delivered` is the honest verdict. For the other three kinds this is `modify` in all but name --
+   * a payload that may have been reshaped, carried through unchanged because we cannot say how -- so
+   * the reader only has to reach for the control to say `block` or `allow` instead.
+   */
+  const unread = (why) => {
+    if (!terminal && said === FALLBACK.allow) return assume(node, payload, said)
     return {
-      status: STATUS.dropped,
-      reason: `You told the simulator to treat “${nameOf(node)}” as dropping the event.`,
-      propagate: false,
+      status: terminal ? STATUS.delivered : STATUS.transformed,
+      reason: terminal
+        ? `Delivered by “${name}”. A destination function *is* the destination${why ? `, and ${why}` : ' — its code is not read, so what it sends is not simulated'}.`
+        : `“${name}” may reshape or drop the event${why ? `, and ${why}` : '. Its code is not read'}, so the payload is carried through unchanged.`,
+      transform: { unread: true },
+      payload,
+      propagate: !terminal,
     }
   }
 
-  const terminal = dataOf(node).kind === 'destination_function'
-  return {
-    status: terminal ? STATUS.delivered : STATUS.transformed,
-    reason: terminal
-      ? `Delivered by “${nameOf(node)}”. A destination function *is* the destination — its code is not read, so what it sends is not simulated.`
-      : `“${nameOf(node)}” may reshape or drop the event. Its code is not read, so the payload is carried through unchanged.`,
-    transform: { unread: true },
-    payload,
-    propagate: !terminal,
+  if (!data.code?.trim()) return unread(null)
+
+  /* The checklist's anchors, so a walkthrough reports the same ticks and crosses the Code
+     tab's own Test button does. Same source of truth, same run, so the two cannot disagree
+     about what happened on this event. */
+  const anchors = Object.values(anchoredLines(data.code))
+
+  const result = runFunction({
+    code: data.code,
+    kind: data.kind,
+    event: payload,
+    settings: data.functionSettings ?? {},
+    deadlineMs: ROUTER_DEADLINE_MS,
+    probes: anchors,
+    /* A handful, not the hundred the tester keeps: the trace reports a count and the
+       Code tab is where the output is actually read. A trace is held per scenario per
+       tick, so what goes in it stays small. */
+    maxLogs: 5,
+  })
+
+  const logs = result.logs.length
+  /* Small on purpose. This rides in the trace, which is memoised per (graph, event) and
+     read by the canvas on every tick, so it carries a sentence and a count rather than
+     the whole diff. */
+  /*
+   * Small on purpose. This rides in the trace, which is memoised per (graph, event) and read
+   * by the canvas on every tick, so it carries a sentence and a few counts rather than the
+   * whole diff, the console output, or the checklist itself.
+   */
+  const tally = summarizeSteps(
+    checklistState(data.checklist ?? [], data.code, result.hits, result.tracked),
+  )
+  const transform = {
+    ran: true,
+    summary: summarizeChanges(result.changed),
+    logs,
+    outcome: result.outcome,
+    ...(tally ? { steps: { done: tally.done, total: tally.total } } : {}),
+  }
+  const alsoLogged = logs > 0 ? ` It logged ${logs} line${logs === 1 ? '' : 's'}.` : ''
+  /* The checklist, in one clause, so the walkthrough drawer says what the Code tab shows.
+     Only when something was measurable -- see `summarizeSteps`. */
+  const alsoSteps = tally
+    ? ` ${tally.done} of ${tally.total} checklist step${tally.total === 1 ? '' : 's'} ${tally.done === 1 ? 'was' : 'were'} reached.`
+    : ''
+
+  switch (result.outcome) {
+    case OUTCOME.returned: {
+      const changes = summarizeChanges(result.changed)
+      if (!changes) {
+        return {
+          /* `passed`, not `transformed`. The code ran and handed the event back
+             untouched, and calling that a transformation would put an amber "the event
+             was rewritten here" note on a component that did nothing to it. */
+          status: terminal ? STATUS.delivered : STATUS.passed,
+          reason: terminal
+            ? `Delivered by “${name}”. Its code ran and returned the event unchanged.${alsoSteps}${alsoLogged}`
+            : `“${name}” ran and returned the event unchanged.${alsoSteps}${alsoLogged}`,
+          transform,
+          payload: result.payload,
+          propagate: !terminal,
+        }
+      }
+      return {
+        status: terminal ? STATUS.delivered : STATUS.transformed,
+        reason: terminal
+          ? `Delivered by “${name}”. Its code ran and ${changes}.${alsoSteps}${alsoLogged}`
+          : `“${name}” ran and ${changes}. Everything downstream sees the event as it stands after this.${alsoSteps}${alsoLogged}`,
+        transform,
+        payload: result.payload,
+        propagate: !terminal,
+      }
+    }
+
+    case OUTCOME.emitted: {
+      const count = result.emitted.length
+      return {
+        status: STATUS.transformed,
+        reason:
+          count === 1
+            ? `“${name}” ran and emitted one ${result.payload?.type ?? 'event'} call, which is what continues from here.${alsoLogged}`
+            : /* One event carries on, and the walkthrough says so rather than quietly
+                 following the first. A source function fanning one webhook into four
+                 events is a real thing, and a reducer built around a single payload
+                 cannot show all four without pretending to be something it is not. */
+              `“${name}” ran and emitted ${count} calls (${result.emitted.map((entry) => entry.type).join(', ')}). This path follows the first of them; the others take the same route.${alsoLogged}`,
+        transform,
+        payload: result.payload,
+        propagate: true,
+      }
+    }
+
+    case OUTCOME.dropped:
+      return {
+        status: STATUS.dropped,
+        reason: `“${name}” threw DropEvent, so the event is discarded here${terminal ? '' : ' and nothing downstream receives it'}: ${result.error.message}${alsoSteps}${alsoLogged}`,
+        transform,
+        propagate: false,
+      }
+
+    case OUTCOME.invalid:
+      return {
+        status: STATUS.dropped,
+        reason: `“${name}” rejected the event permanently (${result.error.name}: ${result.error.message}). There is no retry for this, so it goes no further.${alsoLogged}`,
+        transform,
+        propagate: false,
+      }
+
+    case OUTCOME.unsupported:
+      return {
+        status: STATUS.dropped,
+        reason: `“${name}” does not handle ${payload?.type ?? 'this'} events (${result.error.message}), so nothing is sent for it.${alsoLogged}`,
+        transform,
+        propagate: false,
+      }
+
+    case OUTCOME.noHandler:
+      return {
+        status: STATUS.dropped,
+        reason: `${result.error.message} An omitted handler blocks that event type outright rather than passing it through, which is the easiest thing about a function to be caught by.`,
+        transform,
+        propagate: false,
+      }
+
+    case OUTCOME.empty:
+      return {
+        status: STATUS.dropped,
+        reason: `${result.error.message}${alsoLogged}`,
+        transform,
+        propagate: false,
+      }
+
+    case OUTCOME.retry:
+      return {
+        status: STATUS.undecided,
+        reason: `“${name}” threw RetryError (${result.error.message}). Segment will retry it with backoff, so whether this event eventually lands is not something one run can tell you.${alsoLogged}`,
+        transform,
+        propagate: false,
+      }
+
+    case OUTCOME.unavailable:
+      return unread(
+        `its code needs something the local runner does not have (${result.error.message})`,
+      )
+
+    case OUTCOME.notRunnable:
+      return unread(`its code could not be run here (${result.error.message})`)
+
+    default:
+      return {
+        status: STATUS.notEvaluated,
+        reason: `“${name}” threw while handling the event (${result.error?.name}: ${result.error?.message}), so nothing past this point is claimed. Segment would retry it and then drop it.${alsoLogged}`,
+        transform,
+        propagate: false,
+      }
   }
 }
 
@@ -741,16 +1709,21 @@ function visitSchemaControl({ node, payload }) {
  * destination's own payload shape, which is the same "do not reproduce what will go
  * stale" line the function bodies fall on.
  */
-function visitMapping({ node, payload }) {
+function visitMapping({ node, payload, assumed }) {
   const data = dataOf(node)
   const result = evaluateCondition(data.trigger, payload)
+  const said = assumed?.[node.id]
 
   if (!result.parsed) {
-    return {
-      status: STATUS.notEvaluated,
-      reason: `“${nameOf(node)}” has a trigger this simulator cannot read (${result.error}), so whether the action fires is unknown.`,
-      propagate: false,
-    }
+    return carryOn(
+      {
+        status: STATUS.notEvaluated,
+        reason: `“${nameOf(node)}” has a trigger this simulator cannot read (${result.error}), so whether the action fires is unknown.`,
+      },
+      node,
+      payload,
+      said,
+    )
   }
 
   if (!result.matched) {
@@ -786,8 +1759,9 @@ export function namesOf(value) {
 
 const sameName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase()
 
-function visitFilter({ node, payload, switchedOff }) {
+function visitFilter({ node, payload, switchedOff, assumed }) {
   const data = dataOf(node)
+  const said = assumed?.[node.id]
 
   /* A filter that is off is absent, so everything passes it -- the opposite of
      every other component, where off means nothing arrives. */
@@ -805,13 +1779,25 @@ function visitFilter({ node, payload, switchedOff }) {
   const result = evaluateCondition(data.condition, payload)
 
   if (!result.parsed) {
-    return {
-      status: STATUS.notEvaluated,
-      reason: `“${nameOf(node)}” has a condition this simulator cannot read (${result.error}), so its verdict is unknown and the event is not claimed to pass.`,
-      propagate: false,
-    }
+    return carryOn(
+      {
+        status: STATUS.notEvaluated,
+        reason: `“${nameOf(node)}” has a condition this simulator cannot read (${result.error}), so its verdict is unknown.`,
+      },
+      node,
+      payload,
+      said,
+    )
   }
 
+  /*
+   * Checked before the actions, and that order is load-bearing.
+   *
+   * A condition the event does not match is a *known* answer: the filter provably leaves this event
+   * alone, whatever it would do to one that matched and whatever the reader has assumed. Consulting the
+   * fallback here would let "assume this blocks" drop an event the recorded rules say it never touches,
+   * which is the one thing a fallback must not do -- it exists to fill silence, not to overrule a fact.
+   */
   if (!result.matched) {
     return {
       status: STATUS.passed,
@@ -820,12 +1806,10 @@ function visitFilter({ node, payload, switchedOff }) {
     }
   }
 
-  /* An empty condition still has to run the actions. Returning "matches
-     everything" and then passing the event on would contradict itself, and would
-     hide a filter that drops every event -- the worst possible thing to hide. */
   return applyFilterActions({
     node,
     payload,
+    said,
     matched: result.empty
       ? `“${nameOf(node)}” reports no condition, so it matches every event`
       : `The event matches “${nameOf(node)}” (${data.condition})`,
@@ -837,15 +1821,20 @@ function visitFilter({ node, payload, switchedOff }) {
  * spelling has been seen in more than one form across API versions, so this
  * matches on substrings in the same tolerant spirit as schemas.py.
  */
-function applyFilterActions({ node, payload, matched }) {
+function applyFilterActions({ node, payload, matched, said }) {
   const actions = dataOf(node).actions ?? []
 
+  /*
+   * No actions recorded, so what the filter *does* is simply not on the diagram.
+   *
+   * This used to read `dropped`, on the reasoning that a filter with no action to take drops what it
+   * matches. True of the real product and wrong for this tool: a filter's actions are read-only in the
+   * inspector, arriving from a live workspace or not at all, so every hand-drawn filter had an empty
+   * list and every hand-drawn filter therefore killed the walkthrough at the exact point the reader was
+   * trying to explain. It read as a finding and it was a blank field.
+   */
   if (actions.length === 0) {
-    return {
-      status: STATUS.dropped,
-      reason: `${matched}, and the filter reports no actions. A destination filter with no action to take drops what it matches.`,
-      propagate: false,
-    }
+    return assume(node, payload, said, `${matched}, and no actions are recorded for it.`)
   }
 
   const types = actions.map((action) => String(action?.type ?? '').toUpperCase())
@@ -892,11 +1881,15 @@ function applyFilterActions({ node, payload, matched }) {
     }
   }
 
-  return {
-    status: STATUS.notEvaluated,
-    reason: `${matched}, but its action (${types.join(', ') || 'unnamed'}) is not one this simulator interprets, so the outcome is unknown.`,
-    propagate: false,
-  }
+  return carryOn(
+    {
+      status: STATUS.notEvaluated,
+      reason: `${matched}, but its action (${types.join(', ') || 'unnamed'}) is not one this simulator interprets, so the outcome is unknown.`,
+    },
+    node,
+    payload,
+    said,
+  )
 }
 
 function fieldPaths(action) {
@@ -971,10 +1964,25 @@ function visitIdentityResolution({ node, payload }) {
   }
 }
 
-function visitQueryNode({ node, payload }) {
+function visitQueryNode({ node, payload, assumed }) {
   const data = dataOf(node)
-  const verdict = evaluateQuery(data.query, payload)
   const label = data.kind === 'audience' ? 'audience' : 'computed trait'
+  const said = assumed?.[node.id]
+
+  /*
+   * No definition at all, which is a different thing from a definition that cannot be settled.
+   *
+   * Checked here rather than left to `evaluateQuery`, which folds both into one `unsupported` verdict.
+   * They deserve different answers: a placeholder audience somebody dropped on the canvas records
+   * nothing, so there is no verdict to preserve and the walkthrough should simply let the event past
+   * (green). A *recorded* definition needing profile history is a real caveat and keeps its amber
+   * status below.
+   */
+  if (data.query == null || String(data.query).trim() === '') {
+    return assume(node, payload, said, `No ${label} definition is recorded on this diagram.`)
+  }
+
+  const verdict = evaluateQuery(data.query, payload)
 
   if (verdict.value === 'true') {
     return {
@@ -985,6 +1993,8 @@ function visitQueryNode({ node, payload }) {
     }
   }
 
+  /* A definite no, from a definition that was read. Known, so the fallback stays out of it -- see the
+     matching note in `visitFilter`. */
   if (verdict.value === 'false') {
     return {
       status: STATUS.unmatched,
@@ -995,12 +2005,16 @@ function visitQueryNode({ node, payload }) {
   }
 
   const unsupported = dominantCause(verdict) === UNSUPPORTED
-  return {
-    status: unsupported ? STATUS.notEvaluated : STATUS.undecided,
-    reason: explain(verdict).join(' ') || `The definition of “${nameOf(node)}” was not evaluated.`,
-    verdict,
-    propagate: false,
-  }
+  return carryOn(
+    {
+      status: unsupported ? STATUS.notEvaluated : STATUS.undecided,
+      reason: explain(verdict).join(' ') || `The definition of “${nameOf(node)}” was not evaluated.`,
+      verdict,
+    },
+    node,
+    payload,
+    said,
+  )
 }
 
 /* --- projecting a step ----------------------------------------------------- */
@@ -1042,6 +2056,113 @@ export function frameAt(trace, step) {
     edgeStatus,
     payload,
     current,
+    done: index >= total - 1,
+  }
+}
+
+/** Did the event stop at this step? Decides whether its incoming connector reads as dropped. */
+function stopped(step) {
+  return (
+    step.status === STATUS.dropped ||
+    step.status === STATUS.blocked ||
+    step.status === STATUS.unmatched
+  )
+}
+
+/**
+ * The visual state of the diagram after `phase` ticks have played.
+ *
+ * The same fold as `frameAt`, over phases instead of single steps. Two properties come out of it,
+ * and both are things the step-indexed version could not express:
+ *
+ *   - Everything happening at one moment is lit at one moment, so a fork reads as a fork. A source
+ *     feeding four destinations sends the event down all four together, and stepping through them
+ *     one at a time said something about the diagram that was not true.
+ *   - Exactly one thing is `active` at a time -- either the connectors being travelled or the
+ *     components being arrived at, never both. That is what lets the canvas glow only where the
+ *     event *is*: an edge beat lights the lines and leaves the components behind it dim, and the
+ *     node beat that follows lights the components and drops the lines to `travelled`.
+ *
+ * `frameAt` is kept beside this rather than replaced. It is the honest way to ask "what had happened
+ * by step N", which is what a test asserting on trace order wants, and the two cannot disagree
+ * because this is expressed in terms of the same statuses.
+ *
+ * `current` is a *list*, and it is empty during an edge beat: while the event is between components
+ * there is no component it is at, which is precisely why the tooltips stay shut until it lands.
+ */
+export function frameAtPhase(trace, phase) {
+  const phases = trace?.phases ?? []
+  const waves = trace?.waves ?? []
+  const steps = trace?.steps ?? []
+  const total = phases.length
+  const index = Math.max(-1, Math.min(phase ?? total - 1, total - 1))
+
+  const nodeStatus = {}
+  const nodeStep = {}
+  const edgeStatus = {}
+  const current = []
+  let arrived = []
+  let payload = trace?.event ?? null
+
+  for (let cursor = 0; cursor <= index; cursor += 1) {
+    const beat = phases[cursor]
+    const active = cursor === index
+    const landed = []
+
+    for (const stepIndex of waves[beat.wave] ?? []) {
+      const entry = steps[stepIndex]
+      if (!entry) continue
+
+      if (beat.kind === 'edge') {
+        /* The connectors only. The components at their far ends have not been reached yet on this
+           beat, and revealing their verdicts here would light the destination before the event
+           got to it. */
+        if (!entry.edgeId) continue
+        edgeStatus[entry.edgeId] = stopped(entry) ? 'dropped' : active ? 'active' : 'travelled'
+        continue
+      }
+
+      nodeStatus[entry.nodeId] = entry.status
+      nodeStep[entry.nodeId] = entry
+      if (entry.payload) payload = entry.payload
+      landed.push(entry)
+      if (active) current.push(entry)
+    }
+
+    if (beat.kind === 'node' && landed.length > 0) arrived = landed
+  }
+
+  return {
+    index,
+    total,
+    /* Which kind of beat this is, so the canvas can tell "the event is moving" from "the event has
+       landed" without re-deriving it from what happens to be active. */
+    kind: phases[index]?.kind ?? null,
+    nodeStatus,
+    /*
+     * The step each component's status came from, keyed the same way.
+     *
+     * Published because `nodeStatus` alone is not enough to say *why* once a component can be stopped
+     * at twice: a reader looking it up in `trace.visited` gets the first stop's sentence beside the
+     * second stop's status word, and the two can disagree. Folded in the same order as the status, so
+     * they cannot.
+     */
+    nodeStep,
+    edgeStatus,
+    payload,
+    current,
+    /*
+     * Where the event last *landed*, which during a travelling beat is not where it is.
+     *
+     * `current` is deliberately empty mid-hop -- there is no component the event is at, and that is
+     * what keeps the tooltips shut and the glow on the line. But a panel describing the payload has
+     * to keep saying something across the gap, or it would blink out and back on every hop. So this
+     * holds the most recent arrival and never empties once the run has started.
+     */
+    arrived,
+    /* The first of the active steps, for the handful of readers that genuinely want one thing
+       to point at. Named so it cannot be mistaken for "the" position of the run. */
+    leading: current[0] ?? null,
     done: index >= total - 1,
   }
 }

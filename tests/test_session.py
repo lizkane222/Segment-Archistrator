@@ -23,7 +23,14 @@ def test_get_session_with_no_cookie(client):
     # so no-cookie has to report False for it, not merely a null workspace.
     response = client.get("/api/session")
     assert response.status_code == 200
-    assert response.json() == {"workspace": None, "connected": False, "anonymous": False}
+    assert response.json() == {
+        "hasSession": False,
+        "account": None,
+        "workspace": None,
+        "connected": False,
+        "anonymous": False,
+        "auth": {"google": False},
+    }
 
 
 def test_get_session_plants_the_csrf_cookie(client):
@@ -162,9 +169,12 @@ def test_expired_session_is_rejected_and_deleted(auth_client, session, settings)
         - timedelta(hours=settings.WORKSPACE_SESSION_IDLE_HOURS + 1)
     )
     assert auth_client.get("/api/session").json() == {
+        "hasSession": False,
+        "account": None,
         "workspace": None,
         "connected": False,
         "anonymous": False,
+        "auth": {"google": False},
     }
     assert WorkspaceSession.objects.count() == 0
 
@@ -172,9 +182,12 @@ def test_expired_session_is_rejected_and_deleted(auth_client, session, settings)
 def test_unknown_cookie_is_not_authenticated(client):
     client.cookies["sab_session"] = "00000000-0000-0000-0000-000000000000"
     assert client.get("/api/session").json() == {
+        "hasSession": False,
+        "account": None,
         "workspace": None,
         "connected": False,
         "anonymous": False,
+        "auth": {"google": False},
     }
 
 

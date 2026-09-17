@@ -24,6 +24,7 @@ import {
   reparentTarget,
   toZoneLocal,
   zoneAtPosition,
+  zoneChain,
   zoneLabel,
   zoneOfParent,
   zoneOrigin,
@@ -778,5 +779,63 @@ describe('the Segment backdrop as a placement', () => {
     /* The assertion that keeps the exemption narrow: if it had been widened to the
        backdrop's children, this would pass too and the rule would be gone. */
     expect(isValidPlacement(TOPOLOGY, 'source', { id: 'engage', label: 'Engage' })).toBe(false)
+  })
+})
+
+/*
+ * The same zone, twice.
+ *
+ * A second copy of Connections has an id of its own (`connections~2`), because two zones sharing one
+ * id collide on save. Everything in this file has to keep answering about the *product*: which
+ * ancestors it has, which kinds belong in it, what it is called. The failure if any one of them asks
+ * by id instead is not a crash -- it is an advisory on every component in the copy, on every save,
+ * telling the user their diagram is wrong when it is not.
+ */
+describe('a duplicated zone', () => {
+  const topology = {
+    zones: [
+      { id: 'segment', label: 'Segment' },
+      { id: 'connections', label: 'Connections', parent: 'segment' },
+      { id: 'unify', label: 'Unify', parent: 'segment' },
+      { id: 'profiles', label: 'Profiles', parent: 'unify', subdivision: true },
+    ],
+    kinds: {
+      source: { zone: 'connections', label: 'Source' },
+      profile: { zone: 'profiles', label: 'Profile' },
+    },
+  }
+
+  it('has the same ancestors as the original', () => {
+    expect(zoneChain(topology, { id: 'connections~2' })).toEqual(['connections', 'segment'])
+  })
+
+  it('takes the same components as the original', () => {
+    expect(isValidPlacement(topology, 'source', { id: 'connections~2' })).toBe(true)
+    expect(isValidPlacement(topology, 'profile', { id: 'connections~2' })).toBe(false)
+  })
+
+  /* A subdivision's copy, so the upward rule is exercised too: a profile dropped on a second Unify
+     backdrop is filed correctly, exactly as it is on the first. */
+  it('keeps the upward rule over subdivisions', () => {
+    expect(isValidPlacement(topology, 'profile', { id: 'unify~2' })).toBe(true)
+  })
+
+  it('is still a container when the original is', () => {
+    expect(isValidPlacement(topology, 'profile', { id: 'segment~2' })).toBe(true)
+  })
+
+  it('is named after the product rather than by its raw id', () => {
+    expect(zoneLabel(topology, 'connections~2')).toBe('Connections')
+  })
+
+  it('explains a misplacement in the product’s words', () => {
+    const message = explainMisplacement({
+      topology,
+      kind: 'profile',
+      attemptedZone: { id: 'connections~2' },
+    })
+    expect(message).toContain('Profile')
+    expect(message).toContain('Profiles')
+    expect(message).not.toContain('~2')
   })
 })

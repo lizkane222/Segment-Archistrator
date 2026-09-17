@@ -26,6 +26,7 @@
 import { useMemo, useState } from 'react'
 
 import { DRAG_MIME } from '../canvas/Canvas.jsx'
+import { newTable } from '../canvas/tables.js'
 import { SHAPES, shapePath } from '../canvas/shapes/geometry.js'
 import LUCID from '../canvas/shapes/lucid.json'
 import { LucidArt } from '../canvas/shapes/LucidArt.jsx'
@@ -33,6 +34,12 @@ import { LucidArt } from '../canvas/shapes/LucidArt.jsx'
 /* Default drop size. A shape has no text to size itself around, so unlike a component it needs one --
    and it comes from the shape's own `aspect` so a swimlane arrives wide and a cylinder does not. */
 const BASE = 120
+
+/* The geometry, minus the one entry that has been replaced by a real object. `SHAPES.table` is a
+   rectangle with four lines through it and nothing can be typed into it; the Objects tile below
+   drops a table whose cells are real. The path stays in geometry.js so that diagrams already saved
+   with one still draw, but offering both would be two tiles called "Table". */
+const GEOMETRY = SHAPES.filter((shape) => shape.id !== 'table')
 
 export default function ShapesTab({ search }) {
   const [library, setLibrary] = useState('geometry')
@@ -56,16 +63,20 @@ export default function ShapesTab({ search }) {
    * "nothing found" while the icon sat one tab over.
    */
   if (term) {
-    const geometry = SHAPES.filter((shape) => shape.name.toLowerCase().includes(term))
+    const geometry = GEOMETRY.filter((shape) => shape.name.toLowerCase().includes(term))
     const icons = LUCID.filter(
       (shape) =>
         shape.name.toLowerCase().includes(term) || shape.library.toLowerCase().includes(term),
     )
-    if (!geometry.length && !icons.length) {
+    const objects = OBJECTS.filter((object) => object.name.toLowerCase().includes(term))
+    const dividers = DIVIDERS.filter((divider) => divider.name.toLowerCase().includes(term))
+    if (!geometry.length && !icons.length && !objects.length && !dividers.length) {
       return <p className="px-1 py-6 text-center text-xs text-twilio-gray-40">No shapes match “{search}”.</p>
     }
     return (
       <div className="space-y-3">
+        {objects.length > 0 && <Grid title="Objects">{objects.map(objectTile)}</Grid>}
+        {dividers.length > 0 && <Grid title="Dividers">{dividers.map(dividerTile)}</Grid>}
         {geometry.length > 0 && <Grid title="Shapes">{geometry.map(geometryTile)}</Grid>}
         {icons.length > 0 && (
           <Grid title={`Icons · ${icons.length}`}>{icons.slice(0, 120).map(lucidTile)}</Grid>
@@ -80,7 +91,7 @@ export default function ShapesTab({ search }) {
           the useful part -- it says whether a library is worth opening. */}
       <div className="mb-3 flex flex-wrap gap-1">
         <Chip active={library === 'geometry'} onClick={() => setLibrary('geometry')}>
-          Shapes · {SHAPES.length}
+          Shapes · {GEOMETRY.length + OBJECTS.length + DIVIDERS.length}
         </Chip>
         {libraries.map(([name, shapes]) => (
           <Chip key={name} active={library === name} onClick={() => setLibrary(name)}>
@@ -90,12 +101,112 @@ export default function ShapesTab({ search }) {
       </div>
 
       {library === 'geometry' ? (
-        <Grid>{SHAPES.map(geometryTile)}</Grid>
+        <div className="space-y-3">
+          {/* First, and in their own section: these are not outlines with a label over them but
+              things with their own internals, so a reader scanning for "the table" should not have
+              to find it among sixty silhouettes. */}
+          <Grid title="Objects">{OBJECTS.map(objectTile)}</Grid>
+          {/* Their own section, above the outlines: a divider is not a thing you draw *on* the
+              canvas but a division *of* it, and someone laying out a before-and-after is looking
+              for that idea rather than for a rectangle. */}
+          <Grid title="Dividers">{DIVIDERS.map(dividerTile)}</Grid>
+          <Grid title="Shapes">{GEOMETRY.map(geometryTile)}</Grid>
+        </div>
       ) : (
         <Grid>{(libraries.find(([name]) => name === library)?.[1] ?? []).map(lucidTile)}</Grid>
       )}
     </div>
   )
+}
+
+/*
+ * The things that are not outlines.
+ *
+ * A table is a `kind` of its own rather than a `shape`, because its content is a grid of editable
+ * cells rather than a label over a path -- see canvas/nodes/TableNode.jsx. The old `table` geometry
+ * is still in geometry.js so that diagrams saved with one still render, but it has no tile here:
+ * two entries called "Table", one of which cannot be typed into, is a worse answer than one.
+ */
+const OBJECTS = [
+  {
+    id: 'table',
+    name: 'Table',
+    payload: {
+      kind: 'table',
+      name: 'Table',
+      /* Never a placeholder for anything in the workspace -- see the note in `geometryTile`. */
+      data: { bound: true, bindable: false, table: newTable() },
+    },
+    preview: (
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-7 w-7">
+        <path
+          d="M 4 20 H 96 M 4 50 H 96 M 4 80 H 96 M 4 12 H 96 V 88 H 4 Z M 36 12 V 88 M 68 12 V 88"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={5}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    ),
+  },
+]
+
+/*
+ * Dividers: one canvas holding several diagrams.
+ *
+ * Dropped as `kind: 'zone'` -- a divider *is* a region the user drew, which is what a custom zone
+ * already is, so it inherits containment, reparenting, growth, serialization and the server's
+ * exemption from placement advice rather than needing any of them written again. See
+ * canvas/nodes/ZoneOrFrame.jsx for where the two part company, and canvas/frames.js for what the
+ * sections do when a divider moves.
+ *
+ * `custom: true` is load-bearing and not decoration: it is what tells the server's
+ * `placement_notes` that Segment's zone rules have no jurisdiction here, so a source dropped in the
+ * right-hand half of a divider does not earn an advisory on every save.
+ */
+const DIVIDERS = [
+  { id: 'vertical', name: 'Divider, vertical', d: 'M 50 6 V 94' },
+  { id: 'horizontal', name: 'Divider, horizontal', d: 'M 6 50 H 94' },
+  { id: 'cross', name: 'Divider, four ways', d: 'M 50 6 V 94 M 6 50 H 94' },
+]
+
+function dividerTile(divider) {
+  return (
+    <Tile
+      key={`divider:${divider.id}`}
+      label={divider.name}
+      payload={{
+        kind: 'zone',
+        name: divider.name,
+        zone: {
+          custom: true,
+          label: 'Divider',
+          frame: { axis: divider.id, splitX: 0.5, splitY: 0.5 },
+        },
+      }}
+      preview={
+        <svg viewBox="0 0 100 100" className="h-7 w-7">
+          <rect
+            x="6"
+            y="6"
+            width="88"
+            height="88"
+            rx="8"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={4}
+            strokeDasharray="10 8"
+            vectorEffect="non-scaling-stroke"
+          />
+          <path d={divider.d} fill="none" stroke="currentColor" strokeWidth={6} vectorEffect="non-scaling-stroke" />
+        </svg>
+      }
+    />
+  )
+}
+
+function objectTile(object) {
+  return <Tile key={object.id} label={object.name} payload={object.payload} preview={object.preview} />
 }
 
 function geometryTile(shape) {
@@ -107,6 +218,13 @@ function geometryTile(shape) {
         kind: 'shape',
         name: shape.name,
         data: {
+          /* Nothing here is a placeholder for a component in the customer's workspace: a star is a
+             star. Said explicitly because the drop path defaults a new node to `bound: false`,
+             which is what draws the "Unbound" badge and what `countPlaceholders` totals into the
+             "N placeholders to bind" banner -- so without these two, decorating a diagram added
+             work to a checklist that could never be finished. */
+          bound: true,
+          bindable: false,
           shape: shape.id,
           /* Zero, and stored explicitly rather than left absent: the corner handle reads it, and a
              shape that arrives with no radius at all would make the handle's first drag jump from
@@ -140,6 +258,9 @@ function lucidTile(shape) {
         kind: 'shape',
         name: shape.name,
         data: {
+          /* Never a placeholder -- see the note in `geometryTile`. */
+          bound: true,
+          bindable: false,
           lucid: shape.id,
           /* The icon's own aspect ratio, so a wide illustration is not dropped into a square and
              squeezed. */

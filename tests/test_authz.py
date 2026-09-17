@@ -68,11 +68,33 @@ def test_diagram_from_another_workspace_is_not_readable(auth_client, db):
 
 
 def test_diagram_list_is_scoped_to_the_session_workspace(auth_client):
-    Diagram.objects.create(workspace_id=WORKSPACE["id"], name="Mine", graph={})
-    Diagram.objects.create(workspace_id="ws_other", name="Theirs", graph={})
+    """
+    A shared diagram is visible to a credential-holder for its workspace, and one from
+    another workspace is not.
+
+    `shared_with_workspace=True` is what these rows need now, and it is not a weakening
+    of the test -- it is the same rule said explicitly. Workspace-wide visibility used to
+    be the *only* rule, so a bare `workspace_id` implied it; now it has to be asked for,
+    and a row that does not ask is private to its owner.
+    """
+    Diagram.objects.create(
+        workspace_id=WORKSPACE["id"], shared_with_workspace=True, name="Mine", graph={}
+    )
+    Diagram.objects.create(
+        workspace_id="ws_other", shared_with_workspace=True, name="Theirs", graph={}
+    )
 
     names = [item["name"] for item in auth_client.get("/api/diagrams").json()["items"]]
     assert names == ["Mine"]
+
+
+def test_an_unshared_diagram_is_invisible_even_within_the_same_workspace(auth_client, db):
+    """
+    The new default, and the point of the ownership split: holding a credential for a
+    workspace no longer means reading everything anyone drew about it.
+    """
+    Diagram.objects.create(workspace_id=WORKSPACE["id"], name="Somebody's private draft", graph={})
+    assert auth_client.get("/api/diagrams").json()["items"] == []
 
 
 def test_workspace_id_in_the_request_body_is_ignored(auth_client):

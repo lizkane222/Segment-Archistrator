@@ -27,17 +27,35 @@
  *    ones that have to move are the document's.
  */
 
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { NodeResizer, useNodes } from '@xyflow/react'
 import { Lock } from 'lucide-react'
 
 import ConnectionHandles from './ConnectionHandles.jsx'
+import RichEditor from './RichEditor.jsx'
+import RichLabel from './RichLabel.jsx'
 import { useChrome } from '../chrome.js'
+import { hasFormatting } from '../richText.js'
 import { MIN_ZONE_HEIGHT, MIN_ZONE_WIDTH } from '../layout.js'
 import { zoneStyleFor } from '../kinds.js'
 
 function ZoneNode({ id, data, selected }) {
   const style = zoneStyleFor(data)
+  const { updateData, walkthroughActive } = useChrome()
+  const [editing, setEditing] = useState(false)
+
+  /* Both halves of the label, like a component's name: `label` stays the field the inspector, the
+     save advisories and the deletion warning all read, and `labelRich` carries the formatting. */
+  const commit = ({ rich, text }) => {
+    setEditing(false)
+    const next = text.trim()
+    /* A zone with no title is an unexplained box, and there would be nothing left to
+       double-click to get the field back -- so blank is a cancel, as it is on a component. */
+    if (!next) return
+    const formatted = hasFormatting(rich) ? rich : undefined
+    if (next === data.label && !formatted && !data.labelRich) return
+    updateData?.(id, { label: next, labelRich: formatted })
+  }
 
   /* `useNodes` re-renders this on every node change, which defeats the `memo`
      below. Accepted: zones are a handful of divs, and the alternative is reading
@@ -62,7 +80,6 @@ function ZoneNode({ id, data, selected }) {
    * `useNodes` above already re-renders this on every node change, so this costs a pass over the
    * list on a render that was happening anyway.
    */
-  const { walkthroughActive } = useChrome()
   const aside =
     walkthroughActive && !nodes.some((node) => onPath(node) && within(node, id, nodes))
 
@@ -77,7 +94,11 @@ function ZoneNode({ id, data, selected }) {
         minWidth={MIN_ZONE_WIDTH}
         minHeight={MIN_ZONE_HEIGHT}
         color={style.border}
-        handleStyle={{ width: 9, height: 9, borderRadius: 2 }}
+        /* Wider than the connection dot it shares a midpoint with -- see ConnectionHandles --
+           so most of the border is grabbable as a resize target rather than the sliver that
+           used to survive outside the dot's own hit area. The dot still wins its own center,
+           deliberately: it is the smaller target and the one with no alternative. */
+        handleStyle={{ width: 16, height: 16, borderRadius: 3 }}
         lineStyle={{ borderWidth: 1 }}
       />
 
@@ -88,9 +109,10 @@ function ZoneNode({ id, data, selected }) {
           `zIndex` there and the resizer's whole edge *line* stays draggable, so nothing is lost.
           See ConnectionHandles.
 
-          Not dimmed, unlike a component's: a zone is a large backdrop the pointer crosses
-          constantly, so `group-hover` would flicker its handles on and off across the whole
-          region, and there is no shortage of room for four dots on something this size. */}
+          Revealed by border proximity like every other node's, which is what a zone needed all
+          along: they used to be permanently visible here precisely because hover was the wrong
+          test on a backdrop the pointer crosses on its way to everything else. "Near the border"
+          means the same thing on a 900px region as on a card. */}
       <ConnectionHandles border={style.border} />
 
       <div
@@ -103,28 +125,59 @@ function ZoneNode({ id, data, selected }) {
             otherwise the header says "drag me" and then refuses, which reads as a stuck
             canvas rather than as a lock. */}
         <div
-          className={`zone-handle pointer-events-auto flex items-baseline gap-2 px-4 pt-3 ${
+          className={`zone-handle pointer-events-auto px-4 pt-3 ${
             data.locked ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'
           }`}
         >
-          <span
-            className="text-[11px] font-bold uppercase tracking-widest"
-            style={{ color: style.border }}
-          >
-            {data.label}
-          </span>
-          {data.locked && (
-            <span title="Placement locked. Right-click to unlock.">
-              <Lock size={10} aria-hidden="true" style={{ color: style.border, opacity: 0.7 }} />
-            </span>
-          )}
-          <span className="truncate text-[10px] text-twilio-gray-60">{data.description}</span>
-          {empty && (
-            /* An empty zone is normal -- plenty of workspaces have no Unify -- so
-               say so rather than leaving an unexplained empty box. */
-            <span className="ml-auto shrink-0 pr-2 text-[10px] italic text-twilio-gray-60">
-              {data.custom ? 'drag anything here' : 'nothing here yet'}
-            </span>
+          <div className="flex items-baseline gap-2">
+            {editing ? (
+              <RichEditor
+                value={data.labelRich}
+                text={data.label ?? ''}
+                sessionKey={`zone:${id}`}
+                nodeId={id}
+                /* Single-line, like a component's name and for the same reason: this is a
+                   region's title, printed in one uppercase row that the zone's own width is
+                   not negotiated around. */
+                onCommit={commit}
+                onCancel={() => setEditing(false)}
+                className="min-w-24 rounded border border-twilio-blue bg-white px-1 text-[11px] font-bold uppercase tracking-widest"
+                style={{ color: style.border }}
+              />
+            ) : (
+              <span
+                className="text-[11px] font-bold uppercase tracking-widest"
+                style={{ color: style.border }}
+                /* Double-click to rename, matching a component's card. The Zone tab is still the
+                   way to do it without hunting for the header, and both write the same fields. */
+                onDoubleClick={(event) => {
+                  if (!updateData) return
+                  event.stopPropagation()
+                  setEditing(true)
+                }}
+              >
+                <RichLabel value={data.labelRich} text={data.label} />
+              </span>
+            )}
+            {data.locked && (
+              <span title="Placement locked. Right-click to unlock.">
+                <Lock size={10} aria-hidden="true" style={{ color: style.border, opacity: 0.7 }} />
+              </span>
+            )}
+            {empty && (
+              /* An empty zone is normal -- plenty of workspaces have no Unify -- so
+                 say so rather than leaving an unexplained empty box. */
+              <span className="ml-auto shrink-0 pr-2 text-[10px] italic text-twilio-gray-60">
+                {data.custom ? 'drag anything here' : 'nothing here yet'}
+              </span>
+            )}
+          </div>
+          {/* On its own line rather than sharing the label row, so wrapping to two or three
+              lines does not crowd the lock icon or the "nothing here yet" hint. */}
+          {data.description && (
+            <div className="mt-0.5 max-w-md whitespace-normal break-words text-[10px] text-twilio-gray-60">
+              {data.description}
+            </div>
           )}
         </div>
       </div>

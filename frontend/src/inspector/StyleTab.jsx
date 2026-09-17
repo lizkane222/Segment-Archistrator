@@ -25,7 +25,8 @@ import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronRight, Paintbrush, RotateCcw } from 'lucide-react'
 
 import { SHAPES, outlineFor, styleFor } from '../canvas/kinds.js'
-import { styleForColor } from '../canvas/palettes.js'
+import { SHAPES as GEOMETRY, shapeById, shapePath } from '../canvas/shapes/geometry.js'
+import { CHANNELS, styleForChannels } from '../canvas/palettes.js'
 import {
   MIN_NODE_HEIGHT,
   MIN_NODE_WIDTH,
@@ -113,8 +114,131 @@ function IntegerField({ label, value, placeholder, min, onCommit }) {
   )
 }
 
+/*
+ * The controls that apply to a shape: which outline, and how round its corners.
+ *
+ * Both write fields the renderer actually reads -- `data.shape` and `data.radius` -- rather than the
+ * `style.shape` class a component uses. The corner row is the same value the drag-dot on the canvas
+ * writes, so the two are one setting with two ways in; and it is hidden for a shape with no corners,
+ * because a control that silently does nothing on a circle teaches the user that the feature is
+ * broken rather than inapplicable.
+ *
+ * The geometry list is every shape, in the palette's order, as its own outline: nobody scans a column
+ * of words looking for a cylinder.
+ */
+function ShapeGeometry({ node, onUpdate }) {
+  const current = node.data.shape ?? null
+  const geometry = current ? shapeById(current) : null
+  const radius = Number(node.data.radius) || 0
+
+  return (
+    <>
+      <div className="flex items-start gap-2 py-1 text-xs">
+        <span className="mt-1 w-28 shrink-0 text-twilio-gray-60">Shape</span>
+        <div className="grid max-h-40 grid-cols-8 gap-1 overflow-y-auto pr-1">
+          {GEOMETRY.map((shape) => (
+            <button
+              key={shape.id}
+              type="button"
+              title={shape.name}
+              aria-label={shape.name}
+              aria-pressed={current === shape.id}
+              onClick={() => onUpdate({ shape: shape.id })}
+              className={`nodrag flex h-7 w-7 items-center justify-center rounded border transition-colors ${
+                current === shape.id
+                  ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+                  : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+              }`}
+            >
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-4 w-4">
+                <path
+                  d={shapePath(shape.id, 0)}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={6}
+                  strokeLinejoin="round"
+                  vectorEffect="non-scaling-stroke"
+                />
+              </svg>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {geometry?.rounds && (
+        <div className="flex items-center gap-2 py-1 text-xs">
+          <span className="w-28 shrink-0 text-twilio-gray-60">Corners</span>
+          <div className="flex flex-wrap gap-1">
+            {CORNER_PRESETS.map(({ label, value }) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => onUpdate({ radius: value })}
+                className={`nodrag rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                  /* Nearest preset rather than an exact match: the canvas drag writes any value in
+                     between, and none of the three looking selected after a drag reads as the row
+                     having lost track of the shape. */
+                  nearestPreset(radius) === value
+                    ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+                    : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            <span className="ml-1 self-center text-[10px] tabular-nums text-twilio-gray-60">
+              {Math.round(radius * 100)}%
+            </span>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+/* Square, rounded, pill -- the three the request asked for by name, mapped onto the one value a
+   shape's corners actually have. 1 is fully round, which on a rectangle is a pill. */
+const CORNER_PRESETS = [
+  { label: 'Square', value: 0 },
+  { label: 'Rounded', value: 0.2 },
+  { label: 'Pill', value: 1 },
+]
+
+/* One channel on or off, never emptying the set: a picker with nothing selected would look like a
+   control that had stopped working, and there is no useful "apply to none". */
+function toggle(channels, key) {
+  if (!channels.includes(key)) return CHANNELS.map((channel) => channel.key).filter(
+    (channel) => channels.includes(channel) || channel === key,
+  )
+  const next = channels.filter((channel) => channel !== key)
+  return next.length ? next : channels
+}
+
+/* An outline style as an SVG dash pattern, since a path has no `border-style`. Scaled by the stroke
+   width so a 4px dashed outline reads as dashes rather than as a solid line with gaps in it. */
+function dashFor({ borderStyle, borderWidth = 1 }) {
+  if (borderStyle === 'dashed') return `${borderWidth * 4} ${borderWidth * 3}`
+  if (borderStyle === 'dotted') return `${borderWidth} ${borderWidth * 2}`
+  return undefined
+}
+
+const nearestPreset = (radius) =>
+  CORNER_PRESETS.reduce((best, preset) =>
+    Math.abs(preset.value - radius) < Math.abs(best.value - radius) ? preset : best,
+  ).value
+
 export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
   const kind = node.data.kind
+  /* A shape draws an SVG path rather than a styled box, which changes what the controls below can
+     honestly offer -- see the note beside the Shape row. `data.lucid` is a converted icon: it has no
+     geometry of its own to swap, so it takes the colours and nothing else. */
+  const isShape = kind === 'shape' && !node.data.lucid
+  /*
+   * Nodes with no shape to choose at all, where the four buttons would be the same dead control the
+   * shape report was about: a converted Lucid icon *is* its artwork, and a table is a grid whose
+   * outline is drawn by the cells. Both still take every colour on this panel.
+   */
+  const shapeless = kind === 'table' || Boolean(node.data.lucid)
   const override = node.data.style ?? {}
   const effective = styleFor(kind, override)
   /* Resolved rather than read off `effective`, so the highlighted button is the border
@@ -126,6 +250,9 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
      custom component carries none, and this label is interpolated into a sentence. */
   const kindLabel = topology?.kinds?.[kind]?.label ?? kind ?? 'component'
   const [palettesOpen, setPalettesOpen] = useState(false)
+  /* Which of background/border/text a palette swatch writes. All three to begin with, which is what
+     this always did -- see the note beside the toggles. */
+  const [channels, setChannels] = useState(() => CHANNELS.map((channel) => channel.key))
 
   const set = (patch) => onUpdate({ style: { ...override, ...patch } })
 
@@ -232,27 +359,42 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 py-1 text-xs">
-          <span className="w-28 shrink-0 text-twilio-gray-60">Shape</span>
-          <div className="flex flex-wrap gap-1">
-            {Object.keys(SHAPES).map((shape) => (
-              <button
-                key={shape}
-                type="button"
-                onClick={() => set({ shape })}
-                className={`nodrag border px-1.5 py-0.5 text-[10px] transition-colors ${
-                  SHAPES[shape]
-                } ${
-                  effective.shape === shape
-                    ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
-                    : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
-                }`}
-              >
-                {SHAPE_LABELS[shape] ?? shape}
-              </button>
-            ))}
+        {/*
+          Two different controls, because "shape" means two different things.
+
+          On a component, a shape is one of four CSS treatments of a box -- a border radius or a
+          clip path on a div (see `SHAPES` in canvas/kinds.js). On a *shape*, the outline is drawn
+          from an SVG path and those four classes are never read: the buttons appeared to work, the
+          highlight moved, and nothing on the canvas changed. Which was the report.
+
+          So a shape node gets the controls that do apply to it -- which path, and how round its
+          corners -- and a component keeps the four it always had.
+        */}
+        {isShape ? (
+          <ShapeGeometry node={node} onUpdate={onUpdate} />
+        ) : shapeless ? null : (
+          <div className="flex items-center gap-2 py-1 text-xs">
+            <span className="w-28 shrink-0 text-twilio-gray-60">Shape</span>
+            <div className="flex flex-wrap gap-1">
+              {Object.keys(SHAPES).map((shape) => (
+                <button
+                  key={shape}
+                  type="button"
+                  onClick={() => set({ shape })}
+                  className={`nodrag border px-1.5 py-0.5 text-[10px] transition-colors ${
+                    SHAPES[shape]
+                  } ${
+                    effective.shape === shape
+                      ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+                      : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+                  }`}
+                >
+                  {SHAPE_LABELS[shape] ?? shape}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </Section>
 
       <Section
@@ -306,41 +448,103 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
            colours are being judged against off the bottom of the panel. */
         note={
           palettesOpen
-            ? 'One click sets the fill, a matching border and a legible label colour together.'
+            ? channels.length === CHANNELS.length
+              ? 'One click sets the fill, a matching border and a legible label colour together.'
+              : `One click sets the ${CHANNELS.filter((channel) => channels.includes(channel.key))
+                  .map((channel) => channel.label.toLowerCase())
+                  .join(' and ')} only.`
             : undefined
         }
       >
         {palettesOpen && (
-          <PalettePicker
-            height="max-h-64"
-            /* A swatch is a fill, and the border and text are derived from it rather
-               than left to the user, because the three have to agree: a pick that set
-               only the background is one click away from white-on-white. The colour
-               pickers above are still there for anyone who wants to break that. */
-            onPick={(color) => set(styleForColor(color))}
-          />
+          <>
+            {/*
+              Which of the three a swatch writes.
+
+              All three is the default and does what it always did -- the fill, plus a border and a
+              label colour derived from it, because those three have to agree or a pick is one click
+              away from white-on-white. Turning one off is the request's own case: a shape whose
+              outline should take the palette colour and whose fill should stay as it is.
+
+              Component state, not a document field: it is a mode for the next click, not a fact
+              about this node, and storing it would put it in every saved diagram and in the
+              unsaved-changes fingerprint.
+            */}
+            <div className="flex flex-wrap items-center gap-1 pb-1.5">
+              <span className="mr-1 text-[10px] uppercase tracking-wide text-twilio-gray-60">
+                Apply to
+              </span>
+              {CHANNELS.map(({ key, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={channels.includes(key)}
+                  onClick={() => setChannels(toggle(channels, key))}
+                  className={`nodrag rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                    channels.includes(key)
+                      ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+                      : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <PalettePicker
+              height="max-h-64"
+              onPick={(color) => {
+                const patch = styleForChannels(color, channels)
+                if (patch) set(patch)
+              }}
+            />
+          </>
         )}
       </Section>
 
       <Section title="Preview">
         <div className="flex justify-center rounded-md bg-twilio-gray-10 p-3">
-          <div
-            className={`flex items-center gap-2 border px-3 py-2 text-[13px] font-semibold shadow-sm ${
-              SHAPES[effective.shape] ?? SHAPES.rounded
-            }`}
-            /* A fixed width, not the chosen one: this is a colour-and-outline swatch, and a
-               scale model of a 90px-wide card would be too small to judge either in. */
-            style={{
-              width: 180,
-              background: effective.bg,
-              color: effective.text,
-              borderColor: effective.border,
-              borderStyle: outline.borderStyle,
-              borderWidth: outline.borderWidth,
-            }}
-          >
-            <span className="truncate">{node.data.name}</span>
-          </div>
+          {isShape ? (
+            /* The actual outline, at the actual radius. A rounded rectangle standing in for a
+               cylinder would make the swatch a picture of a different shape from the one being
+               styled -- which is the same disconnect the Shape row above had. */
+            <div className="relative" style={{ width: 180, height: 90 }}>
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full">
+                <path
+                  d={shapePath(node.data.shape, Number(node.data.radius) || 0) ?? ''}
+                  fill={override.bg ?? 'none'}
+                  stroke={effective.border}
+                  strokeWidth={outline.borderWidth}
+                  strokeDasharray={dashFor(outline)}
+                  strokeLinejoin="round"
+                  vectorEffect="non-scaling-stroke"
+                />
+              </svg>
+              <span
+                className="absolute inset-0 flex items-center justify-center px-2 text-center text-[12px] font-semibold"
+                style={{ color: effective.text }}
+              >
+                {node.data.name}
+              </span>
+            </div>
+          ) : (
+            <div
+              className={`flex items-center gap-2 border px-3 py-2 text-[13px] font-semibold shadow-sm ${
+                SHAPES[effective.shape] ?? SHAPES.rounded
+              }`}
+              /* A fixed width, not the chosen one: this is a colour-and-outline swatch, and a
+                 scale model of a 90px-wide card would be too small to judge either in. */
+              style={{
+                width: 180,
+                background: effective.bg,
+                color: effective.text,
+                borderColor: effective.border,
+                borderStyle: outline.borderStyle,
+                borderWidth: outline.borderWidth,
+              }}
+            >
+              <span className="truncate">{node.data.name}</span>
+            </div>
+          )}
         </div>
       </Section>
 

@@ -61,6 +61,31 @@ services:
         sync: false
       - key: AIRTABLE_BASE_ID
         sync: false
+      # The table within that base, as a name or a `tbl...` id. Listed here rather than left to its
+      # default because the default is a *guess* at the table's name, and a wrong one fails at the first
+      # submission rather than at deploy: an id is immune to the table being renamed later.
+      - key: AIRTABLE_TABLE
+        sync: false
+      # Google sign-in. Create an OAuth 2.0 Client ID (Web application) at
+      #   https://console.cloud.google.com/apis/credentials
+      # Leave unset and sign-in does not appear at all -- the app still works
+      # anonymously, it just cannot give anybody a durable identity.
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      # Must be byte-identical to the "Authorized redirect URI" in the Google console,
+      # or Google answers redirect_uri_mismatch without saying which of the two strings
+      # is wrong. Pinned rather than derived because behind Render's proxy the request's
+      # own idea of its scheme is http, and Google requires https.
+      #   https://<your-host>/api/auth/google/callback
+      - key: GOOGLE_OAUTH_REDIRECT_URI
+        sync: false
+      # Who may sign in without an invitation, comma-separated, matched exactly.
+      # Empty means invitation-only -- admit the first person from a shell with
+      # `python manage.py invite_user --email you@example.com`.
+      - key: ALLOWED_EMAIL_DOMAINS
+        sync: false
 
 databases:
   - name: segment-archistrator-db

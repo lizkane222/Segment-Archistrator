@@ -51,7 +51,14 @@ class Command(BaseCommand):
         rotated = 0
         unreadable = []
 
-        queryset = WorkspaceSession.objects.all().only("id", "encrypted_token")
+        # Token-bearing rows only. A session with no credential has nothing to
+        # re-encrypt, and `rotate_token(None)` raises TypeError from deep inside
+        # MultiFernet -- which `TokenDecryptionError` below does not catch, so a single
+        # signed-out visitor was enough to abort the whole rotation.
+        queryset = (
+            WorkspaceSession.objects.exclude(encrypted_token=None)
+            .only("id", "encrypted_token")
+        )
         for session in queryset.iterator(chunk_size=BATCH_SIZE):
             try:
                 new_blob = rotate_token(session.encrypted_token)

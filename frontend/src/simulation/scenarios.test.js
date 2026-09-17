@@ -28,6 +28,8 @@ import {
   runScenarios,
   runnable,
   runStatus,
+  tickDurations,
+  NODE_BEAT_MS,
 } from './scenarios.js'
 
 const TRACK = {
@@ -59,10 +61,43 @@ function chain() {
   }
 }
 
+/*
+ * source -> insert fn -> two destinations.
+ *
+ * A fork, which `chain` above is not -- and on a linear graph the step count and the wave count are
+ * the same number, so every assertion about one passes for the other by coincidence. This is the
+ * fixture that can tell them apart: four steps over three waves, with both destinations reached on
+ * the last one, and five beats once travelling is counted separately from arriving.
+ */
+function fork() {
+  return {
+    nodes: [
+      { id: 'src', kind: 'source', name: 'Website' },
+      { id: 'fn', kind: 'source_insert_function', name: 'Enrich' },
+      { id: 'braze', kind: 'destination', name: 'Braze' },
+      { id: 'amp', kind: 'destination', name: 'Amplitude' },
+    ],
+    edges: [
+      { id: 'e1', source: 'src', target: 'fn' },
+      { id: 'e2', source: 'fn', target: 'braze' },
+      { id: 'e3', source: 'fn', target: 'amp' },
+    ],
+  }
+}
+
 const scenario = (overrides) => ({
   ...newScenario({ id: 'x', name: 'x', event: TRACK }),
   ...overrides,
 })
+
+/* Which tick is the travelling (or arriving) beat of a given wave. Named rather than counted,
+   because a literal beat number encodes the phase layout into every assertion that uses it. */
+const beatIndex = (trace, kind, wave) =>
+  trace.phases.findIndex((beat) => beat.kind === kind && beat.wave === wave)
+
+/* Which tick the event arrives at a named component on. */
+const arrivalBeat = (trace, nodeId) =>
+  beatIndex(trace, 'node', trace.steps.find((step) => step.nodeId === nodeId).wave)
 
 describe('colours', () => {
   it('hands out an unused colour until the palette runs out', () => {
@@ -81,6 +116,39 @@ describe('colours', () => {
   })
 })
 
+/*
+ * The assumption fields, and the one property they all share: a scenario that has never been edited
+ * has to describe a run that behaves exactly as the tool did before the field existed.
+ *
+ * Worth its own block because every one of them is read with a `?? default` in `runScenarios`, and
+ * those guards are load-bearing rather than defensive -- nothing normalises a scenario on the way in
+ * from Postgres, so a path saved before a field existed reaches `simulate` without it.
+ */
+describe('the assumptions a path carries', () => {
+  it('starts every one of them empty, so a new path is a complete description of its own run', () => {
+    const fresh = newScenario({ id: 'a', name: 'New', event: TRACK })
+    expect(fresh.disabled).toEqual([])
+    expect(fresh.excluded).toEqual([])
+    expect(fresh.revisit).toEqual([])
+    expect(fresh.branches).toEqual({})
+  })
+
+  it('runs a path saved before revisits existed as one that names nothing', () => {
+    /* The inertness guarantee at this layer. A stored scenario has no `revisit` key at all, and the
+       walk it produces must be the one it has always produced -- so this asserts the absent case and
+       the empty case are the same run rather than trusting they are. */
+    const before = scenario({ sourceId: 'src' })
+    delete before.revisit
+    const after = scenario({ sourceId: 'src', revisit: [] })
+
+    const [older] = runScenarios(chain(), [before])
+    const [newer] = runScenarios(chain(), [after])
+    expect(older.trace.steps.map((step) => [step.nodeId, step.status, step.wave])).toEqual(
+      newer.trace.steps.map((step) => [step.nodeId, step.status, step.wave]),
+    )
+  })
+})
+
 describe('runnable', () => {
   it('drops a path whose source is no longer on the diagram', () => {
     const kept = scenario({ id: 'keep', sourceId: 'src' })
@@ -88,10 +156,18 @@ describe('runnable', () => {
     expect(runnable(chain(), [kept, gone]).map((s) => s.id)).toEqual(['keep'])
   })
 
-  it('drops a path with no event, and allows one with no explicit source', () => {
-    const noEvent = scenario({ id: 'no-event', event: null })
-    const noSource = scenario({ id: 'default-source', sourceId: null })
-    expect(runnable(chain(), [noEvent, noSource]).map((s) => s.id)).toEqual(['default-source'])
+  it('drops a path with no event', () => {
+    const noEvent = scenario({ id: 'no-event', event: null, sourceId: 'src' })
+    const ok = scenario({ id: 'ok', sourceId: 'src' })
+    expect(runnable(chain(), [noEvent, ok]).map((s) => s.id)).toEqual(['ok'])
+  })
+
+  it('drops a path whose start was never chosen', () => {
+    /* This used to fall back to the first source on the diagram, which made the path appear to
+       work while answering a question nobody asked -- and hid the case where the chosen start
+       feeds nothing because the connectors point the wrong way. */
+    const noSource = scenario({ id: 'no-start', sourceId: null })
+    expect(runnable(chain(), [noSource])).toEqual([])
   })
 })
 
@@ -218,9 +294,105 @@ describe('playback length and tick mapping', () => {
 
   it('together takes as long as the longest run; sequence takes the sum', () => {
     const runs = uneven()
-    const lengths = runs.map((run) => run.trace.steps.length)
+    /* Beats, which is what a tick is. This read `steps.length` and passed only because the fixture
+       is linear -- on a fork the numbers differ, and travelling is a separate beat from arriving. */
+    const lengths = runs.map((run) => run.trace.phases.length)
     expect(playbackLength(runs, PLAY_MODES.together)).toBe(Math.max(...lengths))
     expect(playbackLength(runs, PLAY_MODES.sequence)).toBe(lengths[0] + lengths[1])
+  })
+
+  it('counts a fork as one wave, and each wave as travel-then-arrive', () => {
+    /* Four components reached over three waves, and five beats: the origin arrives from nowhere so
+       it has no travelling beat, and the two later waves each get one. */
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    expect(runs[0].trace.steps).toHaveLength(4)
+    expect(runs[0].trace.waves).toHaveLength(3)
+    expect(playbackLength(runs, PLAY_MODES.together)).toBe(5)
+  })
+
+  it('lights both arms of a fork on the same beat', () => {
+    /* The behaviour the whole change is for: the event does not visit one destination before the
+       other, so neither may be lit a beat ahead of its sibling. */
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    const travelling = beatIndex(runs[0].trace, 'edge', 2)
+    const frame = combinedFrameAt(runs, travelling, { mode: PLAY_MODES.together })
+    expect(frame.edges.e2[0].status).toBe('active')
+    expect(frame.edges.e3[0].status).toBe('active')
+  })
+
+  it('reports every component in flight, not just one', () => {
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    const arriving = beatIndex(runs[0].trace, 'node', 2)
+    const frame = combinedFrameAt(runs, arriving, { mode: PLAY_MODES.together })
+    expect(frame.current.map((entry) => entry.step.nodeId).sort()).toEqual(['amp', 'braze'])
+    expect(frame.nodes.braze[0].current).toBe(true)
+    expect(frame.nodes.amp[0].current).toBe(true)
+  })
+
+  /*
+   * Timing.
+   *
+   * The event has to cross every connector at the same *speed*, so a beat spent travelling lasts as
+   * long as the distance being covered. Timing all of them alike is what made it appear to accelerate
+   * across the long connectors on a wide diagram and crawl across the short ones.
+   */
+  it('times an arriving beat at a fixed length and a travelling beat by distance', () => {
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    const trace = runs[0].trace
+    const hopMs = new Map([
+      ['e1', 400],
+      ['e2', 1800],
+      ['e3', 700],
+    ])
+    const beats = tickDurations(runs, PLAY_MODES.together, { hopMs })
+
+    expect(beats[beatIndex(trace, 'node', 0)]).toBe(NODE_BEAT_MS)
+    expect(beats[beatIndex(trace, 'edge', 1)]).toBe(400)
+  })
+
+  it('holds a fork open until the slowest of its connectors is crossed', () => {
+    /* Cutting to the next beat when the shortest arrives would leave the other dot still in flight
+       and the component it is heading for already lit. */
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    const hopMs = new Map([
+      ['e1', 400],
+      ['e2', 1800],
+      ['e3', 700],
+    ])
+    const beats = tickDurations(runs, PLAY_MODES.together, { hopMs })
+    expect(beats[beatIndex(runs[0].trace, 'edge', 2)]).toBe(1800)
+  })
+
+  it('falls back to a node beat for a connector it has no measurement for', () => {
+    /* A node reports no size for the frame after it mounts, so an unmeasured hop has to be merely
+       average rather than instant. */
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    const beats = tickDurations(runs, PLAY_MODES.together, { hopMs: new Map() })
+    expect(beats.every((ms) => ms === NODE_BEAT_MS)).toBe(true)
+  })
+
+  it('gives one duration per tick, in both modes', () => {
+    const runs = uneven()
+    expect(tickDurations(runs, PLAY_MODES.together, {})).toHaveLength(
+      playbackLength(runs, PLAY_MODES.together),
+    )
+    expect(tickDurations(runs, PLAY_MODES.sequence, {})).toHaveLength(
+      playbackLength(runs, PLAY_MODES.sequence),
+    )
+  })
+
+  it('is empty with no runs', () => {
+    expect(tickDurations([], PLAY_MODES.together, {})).toEqual([])
+  })
+
+  it('has nothing at a component while the event is between two', () => {
+    /* What lets the canvas glow in exactly one place: on a travelling beat the connectors are lit
+       and no component is, so the halo belongs to the line rather than to both ends of it. */
+    const runs = runScenarios(fork(), [scenario({ id: 'f', event: TRACK, sourceId: 'src' })])
+    const travelling = beatIndex(runs[0].trace, 'edge', 2)
+    const frame = combinedFrameAt(runs, travelling, { mode: PLAY_MODES.together })
+    expect(frame.current).toEqual([])
+    expect(frame.nodes.braze).toBeUndefined()
   })
 
   it('together advances every run on the same tick', () => {
@@ -231,7 +403,7 @@ describe('playback length and tick mapping', () => {
 
   it('sequence advances one run at a time', () => {
     const runs = uneven()
-    const first = runs[0].trace.steps.length
+    const first = runs[0].trace.phases.length
 
     const early = combinedFrameAt(runs, 0, { mode: PLAY_MODES.sequence })
     expect(early.runs[0].index).toBe(0)
@@ -313,8 +485,12 @@ describe('applying a frame to the canvas', () => {
     { id: 'e2', source: 'fn', target: 'dest', data: {} },
   ]
 
-  const frameOf = (tick) =>
-    combinedFrameAt(runScenarios(chain(), [scenario({ id: 'a', event: TRACK })]), tick, {})
+  const runsOf = () => runScenarios(chain(), [scenario({ id: 'a', event: TRACK, sourceId: 'src' })])
+  const frameOf = (tick) => combinedFrameAt(runsOf(), tick, {})
+  /* The beat the event arrives at a component on. A literal tick would encode the phase layout --
+     travel-then-arrive per wave -- into every assertion, so they would all have to move together
+     the next time the beats change. */
+  const arrivalOf = (nodeId) => arrivalBeat(runsOf()[0].trace, nodeId)
 
   it('returns the very same array when nothing changed', () => {
     const nodes = canvasNodes()
@@ -328,8 +504,8 @@ describe('applying a frame to the canvas', () => {
   })
 
   it('reuses the identity of a node whose own playback state did not change', () => {
-    const before = applyPathsToNodes(canvasNodes(), frameOf(1))
-    const after = applyPathsToNodes(before, frameOf(2))
+    const before = applyPathsToNodes(canvasNodes(), frameOf(arrivalOf('fn')))
+    const after = applyPathsToNodes(before, frameOf(arrivalOf('dest')))
 
     const at = (nodes, id) => nodes.find((node) => node.id === id)
     /* The source is behind the playhead in both frames, so it must be untouched;
@@ -340,11 +516,19 @@ describe('applying a frame to the canvas', () => {
     expect(at(after, 'zone-connections')).toBe(at(before, 'zone-connections'))
   })
 
-  it('opens the anchor on the node the playhead is on, and only that one', () => {
-    const nodes = applyPathsToNodes(canvasNodes(), frameOf(1))
-    const stepped = nodes.filter((node) => node.data.anchor === 'step')
-    expect(stepped).toHaveLength(1)
-    expect(stepped[0].data.anchorStep.nodeId).toBe(stepped[0].id)
+  it('marks the component the playhead is on, and only that one', () => {
+    const nodes = applyPathsToNodes(canvasNodes(), frameOf(arrivalOf('fn')))
+    const here = nodes.filter((node) => node.data.paths?.some((entry) => entry.current))
+    expect(here.map((node) => node.id)).toEqual(['fn'])
+  })
+
+  it('marks no component while the event is in transit', () => {
+    /* A glowing component is the claim "the event is here". On a travelling beat it is not at a
+       component at all, so lighting either end of the connector would be saying something untrue --
+       and the event itself is on the line, drawn by simulation/EventLayer.jsx. */
+    const trace = runsOf()[0].trace
+    const nodes = applyPathsToNodes(canvasNodes(), frameOf(beatIndex(trace, 'edge', 1)))
+    expect(nodes.filter((node) => node.data.paths?.some((entry) => entry.current))).toHaveLength(0)
   })
 
   it('clears everything when handed no frame', () => {
@@ -374,12 +558,16 @@ describe('applying a frame to the canvas', () => {
   })
 })
 
-describe('what a stopped walkthrough leaves on the canvas', () => {
+describe('what a walkthrough writes onto a component', () => {
   /*
-   * The reported bug: three components greyed out with a note stuck to one of them
-   * and nothing on screen to explain why. The cause was that the transport stops at
-   * the last tick rather than returning to -1, so the final frame's annotations --
-   * including the auto-opening tooltip -- stayed on the diagram indefinitely.
+   * Once: a note pinned open on whichever component the playhead was at. It covered the components
+   * either side of the one it described, and because a wave arrives at several at once it had to be
+   * capped at three and open *none* past that -- so a source feeding twenty destinations explained
+   * nothing at the moment it had most to explain. The notes moved to a lane above the diagram
+   * (simulation/NotesLane.jsx) and nothing is forced open on the canvas any more.
+   *
+   * What a component still carries is `paths`: the status that draws its ring, and the verdict, so
+   * hovering it says what happened to *this* event rather than what the component is for.
    */
   const nodes = () => [
     { id: 'a', type: 'segmentNode', data: { kind: 'source', name: 'A' } },
@@ -391,29 +579,46 @@ describe('what a stopped walkthrough leaves on the canvas', () => {
     edges: {},
   }
 
-  it('opens the playhead tooltip while the transport is running', () => {
-    const next = applyPathsToNodes(nodes(), frame, { playing: true })
-    expect(next.find((node) => node.id === 'a').data.anchor).toBe('step')
-    expect(next.find((node) => node.id === 'a').data.anchorStep).toBeTruthy()
+  it('pins nothing open on the diagram', () => {
+    const next = applyPathsToNodes(nodes(), frame)
+    expect(next.find((node) => node.id === 'a').data.anchor).toBeUndefined()
   })
 
-  it('closes it the moment the transport stops, and keeps the result', () => {
-    /* The rings and the dimming are the result -- the reason to have watched -- so
-       they stay. The tooltip is the claim "the event is here, now", which stops being
-       true when the transport does. */
-    const next = applyPathsToNodes(nodes(), frame, { playing: false })
-    const a = next.find((node) => node.id === 'a')
-    expect(a.data.anchor).toBeUndefined()
-    expect(a.data.anchorStep).toBeUndefined()
-    expect(a.data.paths).toHaveLength(1)
+  it('carries the verdict on the path entry, for whoever asks to read it', () => {
+    const runs = runScenarios(chain(), [scenario({ id: 'a', event: TRACK, sourceId: 'src' })])
+    const canvas = [{ id: 'fn', type: 'segmentNode', data: { kind: 'source_insert_function' } }]
+    const next = applyPathsToNodes(canvas, combinedFrameAt(runs, 99, {}))
+    const entry = next[0].data.paths[0]
+    expect(entry.step.nodeId).toBe('fn')
+    expect(entry.step.reason).toBeTruthy()
   })
 
-  it('defaults to playing, so an existing caller is unchanged', () => {
-    expect(applyPathsToNodes(nodes(), frame).find((n) => n.id === 'a').data.anchor).toBe('step')
+  /*
+   * The verdict rides inside `paths` rather than in a field of its own, and this is why: a frame is
+   * recomputed rather than mutated, so a separately-written step object is a *new* object every beat
+   * and comparing it by identity would rebuild every annotated node on every beat -- which is
+   * precisely what the identity contract above exists to prevent.
+   */
+  it('does not rebuild a component whose verdict was already recorded', () => {
+    const runsOf = () =>
+      runScenarios(chain(), [scenario({ id: 'a', event: TRACK, sourceId: 'src' })])
+    const canvas = [{ id: 'src', type: 'segmentNode', data: { kind: 'source' } }]
+
+    const before = applyPathsToNodes(canvas, combinedFrameAt(runsOf(), 2, {}))
+    /* A freshly simulated trace, so every step object inside it is new. */
+    const after = applyPathsToNodes(before, combinedFrameAt(runsOf(), 2, {}))
+    expect(after[0]).toBe(before[0])
+  })
+
+  it('keeps the result once the transport has stopped', () => {
+    /* The rings and the dimming are the result -- the reason to have watched -- so they stay put
+       when playback ends rather than clearing themselves. */
+    const next = applyPathsToNodes(nodes(), frame)
+    expect(next.find((node) => node.id === 'a').data.paths).toHaveLength(1)
   })
 
   it('clears everything when handed no frame at all', () => {
-    const annotated = applyPathsToNodes(nodes(), frame, { playing: true })
+    const annotated = applyPathsToNodes(nodes(), frame)
     const cleared = applyPathsToNodes(annotated, null)
     for (const node of cleared) {
       expect(node.data.paths).toBeUndefined()
@@ -421,9 +626,9 @@ describe('what a stopped walkthrough leaves on the canvas', () => {
     }
   })
 
-  it('leaves zones alone either way', () => {
+  it('leaves zones alone', () => {
     const withZone = [...nodes(), { id: 'zone-segment', type: 'zone', data: { id: 'segment' } }]
-    const next = applyPathsToNodes(withZone, frame, { playing: false })
+    const next = applyPathsToNodes(withZone, frame)
     expect(next.find((node) => node.type === 'zone').data).toEqual({ id: 'segment' })
   })
 })

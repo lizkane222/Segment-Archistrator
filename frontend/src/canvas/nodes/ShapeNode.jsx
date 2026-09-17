@@ -27,9 +27,13 @@ import { NodeResizer, useReactFlow } from '@xyflow/react'
 import { Lock } from 'lucide-react'
 
 import ConnectionHandles from './ConnectionHandles.jsx'
+import RichEditor from './RichEditor.jsx'
+import RichLabel from './RichLabel.jsx'
 import { LucidArt } from '../shapes/LucidArt.jsx'
 import { shapeById, shapePath } from '../shapes/geometry.js'
 import { useChrome } from '../chrome.js'
+import { labelLayout } from '../labelStyle.js'
+import { hasFormatting } from '../richText.js'
 import { MIN_NODE_HEIGHT, MIN_NODE_WIDTH, componentSize } from '../layout.js'
 
 /* How far in from the corner the rounding dot sits, in pixels. Far enough not to sit on the resizer's
@@ -41,10 +45,22 @@ const HANDLE_INSET = 12
    is a fraction, the *travel* is not. */
 const HANDLE_TRAVEL = 60
 
+/* An outline style as an SVG dash pattern, since a path has no `border-style`. Scaled by the stroke
+   width, or a 4px dashed outline reads as a solid line with nicks in it rather than as dashes. The
+   same mapping the inspector's preview uses -- see `dashFor` in inspector/StyleTab.jsx. */
+function dashFor({ borderStyle, borderWidth }) {
+  if (borderStyle === 'dashed') return `${borderWidth * 4} ${borderWidth * 3}`
+  if (borderStyle === 'dotted') return `${borderWidth} ${borderWidth * 2}`
+  return undefined
+}
+
 function ShapeNode({ id, data, selected }) {
   const { screenToFlowPosition } = useReactFlow()
-  const { walkthroughActive, rename, setRadius } = useChrome()
-  const [editing, setEditing] = useState(null)
+  const { walkthroughActive, rename, setRadius, updateData } = useChrome()
+  /* A boolean now rather than the draft text it used to hold: the draft lives in the DOM while a
+     rich edit is in progress -- see RichEditor.jsx -- and holding a copy here as well would be two
+     answers to "what does this label say". */
+  const [editing, setEditing] = useState(false)
 
   const locked = Boolean(data.locked)
   const chosen = componentSize(data)
@@ -57,6 +73,19 @@ function ShapeNode({ id, data, selected }) {
   const stroke = data.style?.border ?? '#354052'
   const fill = data.style?.bg ?? 'none'
   const text = data.style?.text ?? '#354052'
+
+  /*
+   * The outline, resolved the same way a component's is.
+   *
+   * A shape's default is 2px rather than the 1px hairline a card gets: a card's border sits around
+   * text and a shape's outline *is* the shape, so a hairline triangle reads as a scratch. The legacy
+   * `style.strokeWidth` is honoured ahead of everything, because shapes drawn before the Outline
+   * rows worked stored their width there.
+   */
+  const outline = {
+    borderStyle: data.style?.borderStyle ?? 'solid',
+    borderWidth: Number(data.style?.strokeWidth ?? data.style?.borderWidth ?? 2) || 2,
+  }
 
   const paths = data.paths ?? null
   const here = paths?.find((entry) => entry.current) ?? null
@@ -98,14 +127,28 @@ function ShapeNode({ id, data, selected }) {
     [screenToFlowPosition, radius, data, id],
   )
 
-  const commit = () => {
-    const next = editing?.trim()
-    setEditing(null)
-    if (next === undefined || next === data.name) return
-    /* Blank is allowed here, unlike on a component: a shape is its outline, and an unlabelled arrow or
-       swimlane is a perfectly ordinary thing to want. */
-    rename?.(id, next)
+  /*
+   * A finished edit, written as both halves of the same fact.
+   *
+   * `name` is the plain projection and stays authoritative -- export, search, the minimap and the
+   * server all read it -- and `nameRich` carries the formatting for whoever can draw it. Written
+   * together, in one patch, because a node whose two fields disagreed would render one thing and
+   * be found by searching for another.
+   *
+   * Blank is allowed here, unlike on a component: a shape is its outline, and an unlabelled arrow
+   * or swimlane is a perfectly ordinary thing to want. An unformatted label stores no `nameRich`
+   * at all, so a shape whose text has only ever been typed serializes exactly as it did before
+   * rich labels existed.
+   */
+  const commit = ({ rich, text: plain }) => {
+    setEditing(false)
+    const formatted = hasFormatting(rich) ? rich : undefined
+    if (plain === (data.name ?? '') && formatted === undefined && !data.nameRich) return
+    if (updateData) updateData(id, { name: plain, nameRich: formatted })
+    else rename?.(id, plain)
   }
+
+  const label = labelLayout(data.style)
 
   return (
     <>
@@ -131,7 +174,7 @@ function ShapeNode({ id, data, selected }) {
         data-kind="shape"
         data-node-id={id}
       >
-        <ConnectionHandles border={stroke} dim />
+        <ConnectionHandles border={stroke} />
 
         {/* The artwork fills the node exactly. `preserveAspectRatio="none"` on both sources, so the
             node's size is the only thing that decides how big the shape is and a resize never fights
@@ -148,7 +191,18 @@ function ShapeNode({ id, data, selected }) {
               d={shapePath(data.shape, radius)}
               fill={fill}
               stroke={stroke}
-              strokeWidth={data.style?.strokeWidth ?? 2}
+              /*
+               * The same two fields the inspector's Outline rows write, and the same ones a
+               * component's border reads. They used to be `style.strokeWidth`, which nothing else
+               * in the app has ever written -- so the Outline and Outline width rows moved their
+               * highlight and changed nothing on the shape, exactly as the Shape row did.
+               *
+               * A path has no `border-style`, so dashed and dotted become a dash array; `dashFor`
+               * scales it by the width, or a 4px dashed outline reads as a solid line with nicks in
+               * it. Legacy `strokeWidth` is still honoured, so a shape saved with one keeps it.
+               */
+              strokeWidth={outline.borderWidth}
+              strokeDasharray={dashFor(outline)}
               strokeLinejoin="round"
               strokeLinecap="round"
               /* So a shape stretched to 400px wide keeps a 2px outline rather than a smeared one. */
@@ -163,36 +217,48 @@ function ShapeNode({ id, data, selected }) {
           </div>
         )}
 
-        {/* The label, centred over the shape. Absolutely positioned so it does not participate in the
-            shape's box -- text inside a triangle would otherwise stretch it. */}
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-2">
-          {editing !== null ? (
-            <input
-              autoFocus
-              value={editing}
-              onChange={(event) => setEditing(event.target.value)}
-              onBlur={commit}
-              onFocus={(event) => event.target.select()}
-              onPointerDown={(event) => event.stopPropagation()}
-              onKeyDown={(event) => {
-                event.stopPropagation()
-                if (event.key === 'Enter') commit()
-                if (event.key === 'Escape') setEditing(null)
-              }}
-              className="nodrag nopan pointer-events-auto w-full rounded border border-twilio-blue bg-white/90 px-1 text-center text-[12px] font-semibold outline-none"
+        {/* The label, over the shape. Absolutely positioned so it does not participate in the
+            shape's box -- text inside a triangle would otherwise stretch it -- and laid out by the
+            two alignment settings the text toolbar writes, which is why the flex classes come from
+            `labelLayout` rather than being fixed at centre. */}
+        <div
+          className={`absolute inset-0 flex p-2 ${label.itemsClass} ${label.justifyClass} ${
+            editing ? '' : 'pointer-events-none'
+          }`}
+        >
+          {editing ? (
+            <RichEditor
+              value={data.nameRich}
+              text={data.name ?? ''}
+              sessionKey={`node:${id}`}
+              nodeId={id}
+              /* A shape's label is the one place on this canvas that is genuinely prose: a
+                 callout, a caveat, a numbered list of three things. So Enter is a new line and
+                 clicking away is what finishes. */
+              multiline
+              align={label.align}
+              onCommit={commit}
+              onCancel={() => setEditing(false)}
+              className="w-full rounded border border-twilio-blue bg-white/90 px-1 text-[12px] font-semibold"
+              style={{ color: text, ...label.textStyle }}
             />
           ) : (
-            data.name && (
+            (data.name || data.nameRich) && (
               <span
-                className="pointer-events-auto max-w-full break-words text-center text-[12px] font-semibold leading-tight"
-                style={{ color: text }}
+                className="pointer-events-auto max-w-full"
                 onDoubleClick={(event) => {
-                  if (!rename) return
+                  if (!updateData && !rename) return
                   event.stopPropagation()
-                  setEditing(data.name ?? '')
+                  setEditing(true)
                 }}
               >
-                {data.name}
+                <RichLabel
+                  value={data.nameRich}
+                  text={data.name}
+                  align={label.align}
+                  className="text-[12px] font-semibold leading-tight"
+                  style={{ color: text, ...label.textStyle }}
+                />
               </span>
             )
           )}

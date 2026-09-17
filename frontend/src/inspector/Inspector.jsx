@@ -12,9 +12,11 @@
  */
 
 import { useMemo, useState } from 'react'
-import { Frame, MousePointerClick, SquareDashed, X } from 'lucide-react'
+import { Frame, MousePointerClick, Spline, SquareDashed, X } from 'lucide-react'
 
 import BindTab from './BindTab.jsx'
+import CodeTab from './CodeTab.jsx'
+import EdgeStyleTab from './EdgeStyleTab.jsx'
 import FieldsTab from './FieldsTab.jsx'
 import LinksTab from './LinksTab.jsx'
 import OverviewTab from './OverviewTab.jsx'
@@ -22,10 +24,12 @@ import DataTab from './DataTab.jsx'
 import RulesTab from './RulesTab.jsx'
 import StyleTab from './StyleTab.jsx'
 import ZoneTab from './ZoneTab.jsx'
-import { iconFor, labelForKind, styleFor, zoneStyleFor } from '../canvas/kinds.js'
+import { borderColorFor, iconFor, labelForKind, styleFor, zoneStyleFor } from '../canvas/kinds.js'
 import { zoneLabel } from '../canvas/rules.js'
 import {
   BIND,
+  CODE,
+  EDGE_STYLE,
   FIELDS,
   LINKS,
   OVERVIEW,
@@ -46,9 +50,20 @@ export default function Inspector({
   topology,
   graph,
   workspaceReason,
+  /* The saved walkthrough paths. The Code tab offers their events to test a function
+     against -- those are the payloads the reader actually curated, as opposed to the
+     five skeletons -- and warns when a path *starts* at the function being edited,
+     since a walkthrough does not evaluate the component it begins at. */
+  scenarios,
+  /* Whether the panel is currently widened, and how to ask. Only the Code tab uses it: a
+     384px column is enough to read a function and not enough to work in one. Owned by the
+     shell because the width belongs to the layout, not to a tab. */
+  wide,
+  onWide,
   onConnect,
   onUpdateNode,
   onUpdateKind,
+  onUpdateEdge,
   onClose,
   onNotify,
 }) {
@@ -86,19 +101,43 @@ export default function Inspector({
   if (!node) return <Placeholder />
 
   const isZone = node.type === 'zone'
+  const isEdge = node.type === 'flow'
   const tabs = tabsFor(node)
   const data = node.data
-  const title = isZone ? data.label || 'Untitled zone' : data.name
+
+  /* A connector has no name of its own to show -- what identifies it is what it
+     connects, read the same way FlowEdge reads it: live off the two endpoint
+     nodes, so a rename on either side is reflected here without the edge
+     carrying a copy of either label. */
+  const sourceNode = isEdge ? nodes?.find((candidate) => candidate.id === node.source) : null
+  const targetNode = isEdge ? nodes?.find((candidate) => candidate.id === node.target) : null
+  const endpointLabel = (endpoint) => endpoint?.data?.name || endpoint?.data?.label || 'Unknown'
+  /* The same colour FlowEdge resolves for the line itself: an override first, then the
+     source component's own border, live off whichever zone it currently sits in. */
+  const sourceZoneNode = isEdge
+    ? nodes?.find((candidate) => candidate.id === sourceNode?.parentId)
+    : null
+  const edgeColor = isEdge ? (data?.color ?? borderColorFor(sourceNode?.data, sourceZoneNode?.data)) : null
+
+  const title = isZone
+    ? data.label || 'Untitled zone'
+    : isEdge
+      ? `${endpointLabel(sourceNode)} → ${endpointLabel(targetNode)}`
+      : data.name
   const subtitle = isZone
     ? data.custom
       ? 'Custom zone'
       : 'Pipeline zone'
-    : labelForKind(topology, data.kind)
+    : isEdge
+      ? 'Connector'
+      : labelForKind(topology, data.kind)
 
   const style = isZone
     ? { ...zoneStyleFor(data), text: zoneStyleFor(data).border }
-    : styleFor(data.kind, data.style)
-  const Icon = isZone ? (data.custom ? SquareDashed : Frame) : iconFor(data.kind)
+    : isEdge
+      ? { bg: '#ffffff', border: edgeColor, text: edgeColor }
+      : styleFor(data.kind, data.style)
+  const Icon = isZone ? (data.custom ? SquareDashed : Frame) : isEdge ? Spline : iconFor(data.kind)
 
   return (
     <div className="flex h-full flex-col">
@@ -175,6 +214,21 @@ export default function Inspector({
              heading while the fetch is in flight. */
           <FieldsTab key={space.spaceId ?? 'none'} node={node} spaces={spaces} space={space} />
         )}
+        {tab === CODE && (
+          /* Keyed on the node, because the tab holds the code as an uncommitted draft
+             and commits it on blur. Without this, clicking from one function to another
+             would carry the first one's half-typed body onto the second and write it
+             there on the next blur. */
+          <CodeTab
+            key={node.id}
+            node={node}
+            scenarios={scenarios}
+            wide={wide}
+            onWide={onWide}
+            onUpdate={(patch) => onUpdateNode(node.id, patch)}
+            onNotify={onNotify}
+          />
+        )}
         {tab === RULES && <RulesTab node={node} onNotify={onNotify} />}
         {tab === DATA && (
           <DataTab
@@ -192,6 +246,13 @@ export default function Inspector({
           />
         )}
         {tab === LINKS && <LinksTab node={node} />}
+        {tab === EDGE_STYLE && (
+          <EdgeStyleTab
+            edge={node}
+            nodes={nodes}
+            onUpdate={(patch) => onUpdateEdge(node.id, patch)}
+          />
+        )}
       </div>
     </div>
   )
