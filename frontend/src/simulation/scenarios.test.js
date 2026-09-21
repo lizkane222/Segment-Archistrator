@@ -18,12 +18,16 @@ import { describe, expect, it } from 'vitest'
 import { STATUS } from './router.js'
 import {
   PATH_COLORS,
+  PATH_STATE,
   PLAY_MODES,
   applyPathsToEdges,
   applyPathsToNodes,
   combinedFrameAt,
   newScenario,
   nextColor,
+  isSequential,
+  pathStateFor,
+  pathStatePatch,
   playbackLength,
   runScenarios,
   runnable,
@@ -630,5 +634,140 @@ describe('what a walkthrough writes onto a component', () => {
     const withZone = [...nodes(), { id: 'zone-segment', type: 'zone', data: { id: 'segment' } }]
     const next = applyPathsToNodes(withZone, frame)
     expect(next.find((node) => node.type === 'zone').data).toEqual({ id: 'segment' })
+  })
+})
+
+/*
+ * Several events in an order, rather than several accounts of one event.
+ *
+ * `sequence` lays the runs end to end and keeps each finished one lit, deliberately: comparing two
+ * paths that differ by a single toggle is what the multi-path feature is for, and a path that vanished
+ * when the next began could not be compared with it.
+ *
+ * That reasoning does not cover a *sequence of events*. "This happens, then this happens" played with
+ * nothing ever going out ends with the canvas showing everywhere every event went, all lit at once --
+ * which reads as one simultaneous flood and is the opposite of the sequence being demonstrated. So
+ * `chain` is the same end-to-end timing with the diagram cleared between runs.
+ */
+describe('playing several events one at a time', () => {
+  const runs = () =>
+    runScenarios(chain(), [
+      scenario({ id: 'first', sourceId: 'src' }),
+      scenario({ id: 'second', sourceId: 'fn' }),
+    ])
+
+  const lengths = (list) => list.map((run) => run.trace.phases.length)
+
+  it('lays the runs end to end, like sequence does', () => {
+    const list = runs()
+    const [a, b] = lengths(list)
+    expect(playbackLength(list, PLAY_MODES.chain)).toBe(a + b)
+    /* Same total as sequence: the timing is identical and only what stays on screen differs. */
+    expect(playbackLength(list, PLAY_MODES.chain)).toBe(playbackLength(list, PLAY_MODES.sequence))
+  })
+
+  it('clears the first event before the second starts', () => {
+    const list = runs()
+    const [first] = lengths(list)
+    /* One tick into the second run. Under `sequence` the first run is parked on its last frame and
+       everything it touched is still lit; under `chain` it has gone. */
+    const frame = combinedFrameAt(list, first + 1, { mode: PLAY_MODES.chain })
+    const stillLit = frame.runs.find((run) => run.scenario.id === 'first')
+    expect(stillLit.index).toBe(-1)
+    expect(Object.keys(frame.nodes).some((id) => frame.nodes[id].some((e) => e.scenarioId === 'first'))).toBe(false)
+  })
+
+  it('keeps the first event lit under sequence, which is the difference', () => {
+    /* The contrast, pinned so `chain` cannot be "fixed" by changing `sequence` instead. */
+    const list = runs()
+    const [first] = lengths(list)
+    const frame = combinedFrameAt(list, first + 1, { mode: PLAY_MODES.sequence })
+    const parked = frame.runs.find((run) => run.scenario.id === 'first')
+    expect(parked.index).toBe(first - 1)
+  })
+
+  it('shows the event that is currently playing, and only that one', () => {
+    const list = runs()
+    const frame = combinedFrameAt(list, 1, { mode: PLAY_MODES.chain })
+    const playing = frame.runs.filter((run) => run.index >= 0)
+    expect(playing).toHaveLength(1)
+    expect(playing[0].scenario.id).toBe('first')
+  })
+
+  it('reports both end-to-end modes as sequential', () => {
+    expect(isSequential(PLAY_MODES.chain)).toBe(true)
+    expect(isSequential(PLAY_MODES.sequence)).toBe(true)
+    expect(isSequential(PLAY_MODES.together)).toBe(false)
+  })
+})
+
+/*
+ * Pass / Skip / Block as one choice.
+ *
+ * `excluded` and `disabled` were always three mutually exclusive states wearing two field names, and
+ * the only control was a single `×` that toggled `excluded` -- so the red state was unreachable and the
+ * amber one looked like deletion. The patch builder is shared by the route bubble, the switched-off
+ * chips and the canvas right-click menu, which is what stops those three surfaces disagreeing: before
+ * it, the chips set `disabled` without clearing `excluded`, and `visit` checks stepped-over first, so a
+ * component could be both and the chip silently did nothing.
+ */
+describe('what a path does with one component', () => {
+  const path = () => scenario({ sourceId: 'src', excluded: [], disabled: [], revisit: [] })
+
+  it('reads Pass when neither field names it', () => {
+    expect(pathStateFor(path(), 'fn')).toBe(PATH_STATE.pass)
+  })
+
+  it('reads Skip from excluded and Block from disabled', () => {
+    expect(pathStateFor(scenario({ excluded: ['fn'] }), 'fn')).toBe(PATH_STATE.skip)
+    expect(pathStateFor(scenario({ disabled: ['fn'] }), 'fn')).toBe(PATH_STATE.block)
+  })
+
+  it('reports Block when a component is somehow in both, matching what the reducer does', () => {
+    /* Not reachable through `pathStatePatch`, but a scenario saved before it existed can hold both.
+       `visit` checks stepped-over first, so strictly the event is skipped -- but the honest thing to
+       *show* is the stronger claim, so the reader sees that something stops the event and can clear it. */
+    expect(pathStateFor(scenario({ excluded: ['fn'], disabled: ['fn'] }), 'fn')).toBe(PATH_STATE.block)
+  })
+
+  it('clears the other two states, so the fields cannot contradict', () => {
+    const skipped = pathStatePatch(scenario({ disabled: ['fn'] }), 'fn', PATH_STATE.skip)
+    expect(skipped.excluded).toEqual(['fn'])
+    expect(skipped.disabled).toEqual([])
+
+    const blocked = pathStatePatch(scenario({ excluded: ['fn'] }), 'fn', PATH_STATE.block)
+    expect(blocked.disabled).toEqual(['fn'])
+    expect(blocked.excluded).toEqual([])
+  })
+
+  it('returns a component to Pass by naming it in neither', () => {
+    const passed = pathStatePatch(scenario({ excluded: ['fn'], disabled: ['other'] }), 'fn', PATH_STATE.pass)
+    expect(passed.excluded).toEqual([])
+    /* Only the named component moves. Another component's state is not this choice's business. */
+    expect(passed.disabled).toEqual(['other'])
+  })
+
+  it('drops a second stop for anything not passed through', () => {
+    /* A component the event steps over or never reaches cannot be arrived at twice. */
+    const withRevisit = scenario({ revisit: ['fn'], excluded: [], disabled: [] })
+    expect(pathStatePatch(withRevisit, 'fn', PATH_STATE.skip).revisit).toEqual([])
+    expect(pathStatePatch(withRevisit, 'fn', PATH_STATE.block).revisit).toEqual([])
+    /* Pass leaves it alone -- it is the one state where stopping twice is meaningful. */
+    expect(pathStatePatch(withRevisit, 'fn', PATH_STATE.pass).revisit).toBeUndefined()
+  })
+
+  it('actually changes the walk, in the direction each state names', () => {
+    const at = (list, id) => list.trace.visited[id]?.status
+    const [passes] = runScenarios(chain(), [path()])
+    const [skips] = runScenarios(chain(), [{ ...path(), ...pathStatePatch(path(), 'fn', PATH_STATE.skip) }])
+    const [blocks] = runScenarios(chain(), [{ ...path(), ...pathStatePatch(path(), 'fn', PATH_STATE.block) }])
+
+    expect(at(passes, 'fn')).toBe(STATUS.transformed)
+    expect(at(skips, 'fn')).toBe(STATUS.bypassed)
+    expect(at(blocks, 'fn')).toBe(STATUS.blocked)
+
+    /* And the consequence that distinguishes Skip from Block: what happens downstream. */
+    expect(at(skips, 'dest')).toBe(STATUS.delivered)
+    expect(at(blocks, 'dest')).toBe(STATUS.blocked)
   })
 })

@@ -19,6 +19,8 @@ import {
   SIDES,
   alongBorder,
   anchorStringFor,
+  facingSide,
+  fanOutAnchors,
   distanceToBox,
   encodeFreeHandle,
   fixedHandleForSide,
@@ -26,8 +28,8 @@ import {
   parseFreeHandle,
   pointOnBorder,
 } from './handles.js'
-import { toFlowEdge } from './layout.js'
 import { serializeEdge } from '../diagram/serialize.js'
+import { toFlowEdge } from './layout.js'
 
 describe('SIDES', () => {
   it('covers all four sides exactly once', () => {
@@ -415,5 +417,191 @@ describe('anchorStringFor', () => {
       data: { discovered: false, phase: null, sourceAnchor: anchorStringFor(null) },
     })
     expect('sourceAnchor' in cleared).toBe(false)
+  })
+})
+
+/*
+ * Sharing out a side between the connectors that meet it.
+ *
+ * The complaint this answers: "many of them overlap with other components, merge with other
+ * connectors". Every connector attaching to a side landed on that side's midpoint, because that is
+ * where the handle is -- so four edges leaving one card shared a start point, a first 20px, and
+ * (targets being in a column) often a crossbar too. Four lines drawn as one.
+ */
+describe('fanOutAnchors', () => {
+  const at = (key, nodeId, side, order) => ({ key, nodeId, side, order })
+
+  it('leaves a side with one connector alone', () => {
+    /* The inertness guarantee, and the reason it is an absent entry rather than 0.5: a diagram with
+       no fan-out has to be drawn exactly as it was. */
+    expect(fanOutAnchors([at('e1:source', 'a', 'right', 0)]).size).toBe(0)
+  })
+
+  it('spreads two evenly about the middle, moving both', () => {
+    const spread = fanOutAnchors([
+      at('e1:source', 'a', 'right', 10),
+      at('e2:source', 'a', 'right', 20),
+    ])
+    expect(spread.get('e1:source')).toBeCloseTo(1 / 3)
+    expect(spread.get('e2:source')).toBeCloseTo(2 / 3)
+  })
+
+  it('keeps three symmetrical, with the middle one still in the middle', () => {
+    const spread = fanOutAnchors([
+      at('a:source', 'n', 'bottom', 1),
+      at('b:source', 'n', 'bottom', 2),
+      at('c:source', 'n', 'bottom', 3),
+    ])
+    expect([...spread.values()]).toEqual([0.25, 0.5, 0.75])
+  })
+
+  it('orders them by where they are going, so the lines do not cross', () => {
+    /* `order` is the opposite end's position across the side. Given in the wrong order here on
+       purpose: the arrangement is geometric, not array order. */
+    const spread = fanOutAnchors([
+      at('low:source', 'a', 'right', 900),
+      at('high:source', 'a', 'right', 100),
+    ])
+    expect(spread.get('high:source')).toBeLessThan(spread.get('low:source'))
+  })
+
+  it('breaks a tie stably, so two edges to the same place never swap', () => {
+    const once = fanOutAnchors([at('z:source', 'a', 'right', 5), at('y:source', 'a', 'right', 5)])
+    const again = fanOutAnchors([at('y:source', 'a', 'right', 5), at('z:source', 'a', 'right', 5)])
+    expect(once.get('y:source')).toBe(again.get('y:source'))
+    expect(once.get('z:source')).toBe(again.get('z:source'))
+  })
+
+  it('treats each side of each component separately', () => {
+    /* One connector on the right and one on the top is not a fan-out of two; it is two sides with one
+       each, and both keep their midpoint. */
+    expect(fanOutAnchors([at('e1:source', 'a', 'right', 0), at('e2:source', 'a', 'top', 0)]).size).toBe(0)
+    expect(fanOutAnchors([at('e1:source', 'a', 'right', 0), at('e2:source', 'b', 'right', 0)]).size).toBe(0)
+  })
+
+  it('shares out both ends of the same connector independently', () => {
+    const spread = fanOutAnchors([
+      at('e1:source', 'a', 'right', 1),
+      at('e2:source', 'a', 'right', 2),
+      at('e1:target', 'b', 'left', 1),
+      at('e2:target', 'b', 'left', 2),
+    ])
+    expect(spread.size).toBe(4)
+    expect(spread.get('e1:source')).toBeCloseTo(1 / 3)
+    expect(spread.get('e1:target')).toBeCloseTo(1 / 3)
+  })
+
+  it('survives malformed input rather than producing NaN fractions', () => {
+    /* A fraction of NaN reaches `pointOnBorder` and then the path string, where it makes the whole
+       connector disappear -- the failure mode this module's other guards all exist for. */
+    const spread = fanOutAnchors([null, at('e1:source', 'a', 'right', undefined), at('e2:source', 'a', 'right', 2)])
+    for (const t of spread.values()) expect(Number.isFinite(t)).toBe(true)
+    expect(fanOutAnchors(undefined).size).toBe(0)
+  })
+})
+
+/*
+ * Who placed a connector's bends, and why that has to survive a save.
+ *
+ * Obstacle avoidance ran once when a connector was drawn and never again, so a component moved later
+ * left its connectors routed for a layout that no longer existed. The fix is to recompute them -- but
+ * only the ones the router owns, because a hand-placed bend is a statement about a piece of empty
+ * space and re-deriving it would throw away the user's work. Nothing distinguished the two, so
+ * `routed: 'auto'` does, and it has to round-trip or every reload would forget.
+ *
+ * Absent means a hand placed them. That reading is deliberate and conservative: every route already in
+ * the database predates the field, so none of them is rewritten when a diagram is opened.
+ */
+describe('who placed a connector’s bends', () => {
+  const bent = (data) => ({
+    id: 'e1',
+    source: 'a',
+    target: 'b',
+    data: { discovered: false, phase: null, ...data },
+  })
+
+  it('stores the marker for a route the router computed', () => {
+    const saved = serializeEdge(bent({ waypoints: [{ x: 10, y: 20 }], routed: 'auto' }))
+    expect(saved.routed).toBe('auto')
+  })
+
+  it('omits it for a route a hand placed', () => {
+    const saved = serializeEdge(bent({ waypoints: [{ x: 10, y: 20 }] }))
+    expect('routed' in saved).toBe(false)
+  })
+
+  it('omits it when there are no bends to own', () => {
+    /* An unbent connector has to serialize byte-identically to the way it did before this field
+       existed, or `graphFingerprint` reads every diagram in the database as dirty on open. */
+    expect('routed' in serializeEdge(bent({ routed: 'auto' }))).toBe(false)
+    expect('waypoints' in serializeEdge(bent({}))).toBe(false)
+  })
+
+  it('round-trips, so a reload still knows whose route it is', () => {
+    const saved = serializeEdge(bent({ waypoints: [{ x: 10, y: 20 }], routed: 'auto' }))
+    const back = toFlowEdge(saved)
+    expect(back.data.routed).toBe('auto')
+    expect(serializeEdge(back).routed).toBe('auto')
+  })
+
+  it('reads a route saved before the marker existed as hand-placed', () => {
+    /* The migration case, and the one that decides whether opening an old diagram is safe. */
+    const back = toFlowEdge({ id: 'e1', source: 'a', target: 'b', waypoints: [{ x: 1, y: 2 }] })
+    expect(back.data.routed).toBeUndefined()
+  })
+})
+
+/*
+ * Which side of a component faces another.
+ *
+ * A connector's handle is stored once and the components move afterwards, so a side chosen sensibly can
+ * end up pointing the wrong way: draw A to a B on its right, drag B to the far left, and the line still
+ * leaves A's east side -- exiting east, turning, and crossing back over A. Thirteen connector ends in the
+ * saved diagrams were in that state, one facing away by 2095px.
+ *
+ * Worth saying what this is *not* fixing. The event never travelled against an arrow: the walk only
+ * follows connectors out of a component, and that held for all 294 hops in those diagrams. What doubles
+ * back is the first leg of the line.
+ */
+describe('facingSide', () => {
+  const box = (x, y) => ({ x, y, width: 100, height: 50 })
+
+  it('picks the side the other component is on', () => {
+    expect(facingSide(box(0, 0), box(400, 0))).toBe('right')
+    expect(facingSide(box(400, 0), box(0, 0))).toBe('left')
+    expect(facingSide(box(0, 400), box(0, 0))).toBe('top')
+    expect(facingSide(box(0, 0), box(0, 400))).toBe('bottom')
+  })
+
+  it('takes the axis the two are further apart on', () => {
+    /* Mostly to the right and slightly down is a right-hand connector, not a downward one. */
+    expect(facingSide(box(0, 0), box(400, 60))).toBe('right')
+    expect(facingSide(box(0, 0), box(60, 400))).toBe('bottom')
+  })
+
+  it('answers from the centres, so a slight overlap does not flip it', () => {
+    /* Nearest-edge arithmetic reverses when two boxes overlap by a pixel; centres do not. */
+    expect(facingSide(box(0, 0), box(90, 0))).toBe('right')
+  })
+
+  it('is the mirror of itself, so the two ends of one connector agree', () => {
+    const a = box(0, 0)
+    const b = box(500, 20)
+    expect(facingSide(a, b)).toBe('right')
+    expect(facingSide(b, a)).toBe('left')
+  })
+
+  it('gives null for geometry it does not have, rather than guessing a side', () => {
+    /* A node reports no size for the frame after it mounts. Falling back to React Flow's own handle is
+       better than moving a connector onto a side computed from zero. */
+    expect(facingSide(null, box(0, 0))).toBe(null)
+    expect(facingSide(box(0, 0), null)).toBe(null)
+  })
+
+  it('resolves to a handle id the node actually registers', () => {
+    /* The whole point of going through `fixedHandleForSide`: a side name is not a handle, and an edge
+       naming something unregistered is an edge React Flow declines to draw. */
+    expect(fixedHandleForSide(facingSide(box(0, 0), box(400, 0)))).toBe('e')
+    expect(fixedHandleForSide(facingSide(box(400, 0), box(0, 0)))).toBe('w')
   })
 })

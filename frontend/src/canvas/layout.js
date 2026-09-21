@@ -1041,6 +1041,10 @@ export function toFlowEdge(edge) {
          would then persist, marking every diagram dirty on open. */
       ...(edge.line ? { line: edge.line } : {}),
       ...(edge.waypoints?.length ? { waypoints: edge.waypoints } : {}),
+      /* Who placed those bends -- see `serializeEdge`. Absent means a hand did, which is what every
+         route stored before this field existed is treated as, so opening an old diagram never
+         re-routes it. */
+      ...(edge.waypoints?.length && edge.routed ? { routed: edge.routed } : {}),
       /* The precise point along `sourceHandle`'s side a free anchor sits at -- see
          `fixedHandleForSide` in canvas/handles.js for why the fixed id above and this exact
          point are two separate facts rather than one. */

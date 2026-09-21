@@ -103,6 +103,24 @@ function anchorPoint(node, handleId) {
 }
 
 /**
+ * Where this end sits once its side has been shared out between several connectors, or null when it
+ * has not been -- see `fanOutAnchors` in canvas/handles.js.
+ *
+ * Separate from `anchorPoint` because the two answer different questions and must not be confused: an
+ * anchor is a *stored* decision the reader made and always wins, while this is a derived arrangement
+ * that exists only for as long as the siblings do. Nothing here is written to the document, so adding
+ * or deleting a connector re-balances the rest with no migration and no dirty diagram.
+ */
+function spreadPoint(node, position, t) {
+  if (t == null || !node || !position) return null
+  const at = node.internals?.positionAbsolute
+  const width = node.measured?.width
+  const height = node.measured?.height
+  if (!at || !width || !height) return null
+  return pointOnBorder({ x: at.x, y: at.y, width, height }, { side: position, t })
+}
+
+/**
  * A node's centre in flow coordinates, or null while it is unmeasured.
  *
  * Centres rather than the border anchors the line is actually drawn between, because the menu
@@ -148,7 +166,8 @@ export default function FlowEdge({
   selected,
 }) {
   const { screenToFlowPosition } = useReactFlow()
-  const { onWaypoints, adjustingEdgeId, walkthroughActive, flowPreview, routes } = useChrome()
+  const { onWaypoints, adjustingEdgeId, walkthroughActive, flowPreview, routes, fanAnchors } =
+    useChrome()
   /* Double-clicking the line puts it in adjust mode -- see Canvas's `onEdgeDoubleClick`. Held there
      rather than here so only one connector is ever in it: two edges showing handles at once means two
      sets of dots competing for the same few pixels wherever the lines cross. */
@@ -191,8 +210,20 @@ export default function FlowEdge({
    */
   const fromNode = useInternalNode(source)
   const toNode = useInternalNode(target)
-  const fromAnchor = anchorPoint(fromNode, data?.sourceAnchor)
-  const toAnchor = anchorPoint(toNode, data?.targetAnchor)
+  /*
+   * A hand-placed anchor first, then the share of the side this connector was given because it has
+   * siblings arriving at the same one -- see `fanOutAnchors` in canvas/handles.js, computed once per
+   * render in Canvas because no single edge can see its own siblings.
+   *
+   * Both fall through to React Flow's own coordinates below, which are the side's midpoint. That is
+   * still the answer for a side with one connector on it, which is most sides on most diagrams.
+   */
+  const fromAnchor =
+    anchorPoint(fromNode, data?.sourceAnchor) ??
+    spreadPoint(fromNode, sourcePosition, fanAnchors?.get(`${id}:source`))
+  const toAnchor =
+    anchorPoint(toNode, data?.targetAnchor) ??
+    spreadPoint(toNode, targetPosition, fanAnchors?.get(`${id}:target`))
 
   /* `?? 0` on the coordinates, not just on the anchor -- a floor that keeps `NaN` out of the path
      string on the frame before a node is measured, which would make the whole edge vanish. */
@@ -224,6 +255,9 @@ export default function FlowEdge({
    * and abandoned leaves nothing behind and puts nothing on the undo stack.
    */
   const [dragging, setDragging] = useState(null)
+  /* Whether the pointer is on this connector, which is what reveals its route handles -- see
+     `editable` below. Local, because no other component and no other edge needs to know. */
+  const [hovered, setHovered] = useState(false)
   const committed = useRef(waypoints)
   committed.current = waypoints
 
@@ -349,7 +383,17 @@ export default function FlowEdge({
 
   /* Selected *or* in adjust mode. Selection is how you get here by accident and find the handles;
      the double-click is the deliberate way in, and is what the request asked for. */
-  const editable = (selected || adjusting) && Boolean(onWaypoints)
+  /*
+   * Whether the bend, corner and segment handles are shown.
+   *
+   * `hovered` is the addition, and it is the whole of the fix for "I'm not able to edit these
+   * connectors route on the diagram". The handles were always here and always worked -- they were
+   * gated on the connector being *selected*, with nothing anywhere advertising that. So a reader who
+   * did not already know to click a line first had no way to discover that its route was adjustable,
+   * and reasonably concluded it was not. Revealing them under the pointer costs nothing and answers
+   * the question before it is asked.
+   */
+  const editable = (hovered || selected || adjusting) && Boolean(onWaypoints)
 
   return (
     <>
@@ -379,6 +423,18 @@ export default function FlowEdge({
           />
         </marker>
       </defs>
+      {/*
+        * Hover, so the route handles have an affordance before anyone thinks to click.
+        *
+        * The handlers go on a wrapper `g` rather than on a hit path of this component's own, and that
+        * detail was the difference between working and not. `BaseEdge` already draws a 20-unit
+        * `strokeOpacity: 0` interaction path, and SVG hit-testing takes the topmost element -- so a
+        * ribbon of ours rendered before it was simply underneath it and never saw the pointer, while one
+        * rendered after it would have stolen the clicks React Flow needs for selection. Letting the
+        * library's own hit area bubble up to a wrapper gets both: the same generous reach that selects
+        * the edge, and no interference with it.
+        */}
+      <g onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}>
       <BaseEdge
         id={id}
         path={drawnPath}
@@ -402,6 +458,7 @@ export default function FlowEdge({
           strokeWidth: merged ? Math.min(1 + Math.log2(merged), 4) : style?.strokeWidth,
         }}
       />
+      </g>
 
       {/*
         * The Flow preview, drawn above the base line and below the scenario overlays.

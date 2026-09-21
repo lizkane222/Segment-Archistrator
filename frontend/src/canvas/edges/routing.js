@@ -276,24 +276,59 @@ export function orthogonalCorners({ source, target, sourcePosition, targetPositi
 }
 
 /**
- * Axis-aligned corners through a list of user waypoints.
- *
- * Used only when there *are* waypoints -- with none, `orthogonalCorners` above is the router,
- * because it knows about both handle directions and this does not.
+ * Axis-aligned corners through a list of user waypoints, leaving and arriving perpendicular.
  *
  * Between two consecutive points the line turns once. Which axis it travels first is taken from
  * the direction the line is already going: a line that left a component's right-hand side goes
  * horizontal first, and after each turn the next segment starts on the axis the last one ended
  * on. Choosing per segment by "whichever delta is larger" -- the obvious alternative -- makes the
  * line change its mind halfway along and produce a staircase.
+ *
+ * ## The stubs, and why they were missing
+ *
+ * This used to take `fromDirection` only, and its own docstring said so: "with none,
+ * `orthogonalCorners` above is the router, because it knows about both handle directions and this
+ * does not." That reads as a note about a helper's scope and was in fact a rendering bug. The moment
+ * an edge had a single waypoint -- which every auto-avoided and every hand-adjusted route has -- the
+ * arrival direction stopped being considered at all, so the last leg came in along whatever axis the
+ * preceding corner happened to leave it on. A connector landing on the *top* of a component would
+ * approach horizontally and stop, putting its arrowhead flat against the border pointing *along* it
+ * rather than into it. Visually the line ran alongside the component instead of meeting it, which is
+ * exactly what it looked like: a connector attached to nothing.
+ *
+ * So both ends are now bracketed with a `STEP_OFFSET` stub along their own outward normal, the same
+ * two points `orthogonalCorners` builds as `fromGap`/`toGap`. Those stubs are axis-aligned by
+ * construction, so the corner walk below passes them through its "already aligned" branch untouched
+ * and the first and last segments are guaranteed perpendicular to the sides they touch.
  */
-function orthogonalThrough(points, fromDirection) {
+function orthogonalThrough(points, fromDirection, toDirection) {
+  const source = points[0]
+  const target = points[points.length - 1]
+  const middle = points.slice(1, -1)
+
+  const fromGap = {
+    x: source.x + fromDirection.x * STEP_OFFSET,
+    y: source.y + fromDirection.y * STEP_OFFSET,
+  }
+  /* Tolerated rather than required, so a caller with no target side still gets the old behaviour
+     instead of a route through NaN. */
+  const toGap = toDirection
+    ? { x: target.x + toDirection.x * STEP_OFFSET, y: target.y + toDirection.y * STEP_OFFSET }
+    : null
+
+  const through = [source, fromGap, ...middle, ...(toGap ? [toGap] : []), target]
   let horizontal = Math.abs(fromDirection.x) >= Math.abs(fromDirection.y)
 
-  const corners = [points[0]]
-  for (let index = 1; index < points.length; index += 1) {
+  const corners = [through[0]]
+  for (let index = 1; index < through.length; index += 1) {
     const from = corners[corners.length - 1]
-    const to = points[index]
+    const to = through[index]
+    if (Math.abs(to.x - from.x) < 0.5 && Math.abs(to.y - from.y) < 0.5) {
+      /* A stub that collapsed, because a waypoint already sits where the gap would go. Dropped
+         rather than emitted, for the same reason the dogleg below is: a zero-length segment is a
+         handle `segmentHandles` cannot aim and `dragSegment` cannot slide. */
+      continue
+    }
     if (Math.abs(to.x - from.x) < 0.5 || Math.abs(to.y - from.y) < 0.5) {
       /* Already aligned on one axis: one straight segment, no corner, and the axis of travel is
          whichever one actually changed. Emitting a zero-length dogleg here is what produces the
@@ -396,7 +431,7 @@ export function routeEdge({
     points = [source, ...orthogonalCorners({ source, target, sourcePosition, targetPosition }), target]
     path = roundedPolyline(points)
   } else {
-    points = orthogonalThrough(through, fromDirection)
+    points = orthogonalThrough(through, fromDirection, toDirection)
     path = roundedPolyline(points)
   }
 
@@ -814,7 +849,7 @@ export function avoidingWaypoints({
   }
 
   for (const waypoints of candidates) {
-    const route = orthogonalThrough([source, ...waypoints, target], fromDirection)
+    const route = orthogonalThrough([source, ...waypoints, target], fromDirection, toDirection)
     if (!routeHitsAny(route, obstacles)) return interiorOf([source, ...waypoints, target])
   }
 

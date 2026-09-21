@@ -12,9 +12,18 @@
 import { RotateCcw } from 'lucide-react'
 
 import { borderColorFor } from '../canvas/kinds.js'
-import { Section } from './primitives.jsx'
+import { Row, Section } from './primitives.jsx'
 
 const LINE_STYLES = ['solid', 'dashed', 'dotted']
+
+/* The three route shapes, paired with what a reader calls them rather than with the stored id --
+   `orthogonal` is the field's value and nobody would pick it off a menu. Mirrors `LINE_STYLES` in
+   canvas/edges/routing.js, which is the list that actually decides what is drawn. */
+const ROUTE_SHAPES = [
+  ['orthogonal', 'Right angles'],
+  ['curved', 'Curved'],
+  ['straight', 'Straight'],
+]
 
 const DASH_FOR_PREVIEW = {
   solid: undefined,
@@ -42,6 +51,12 @@ export default function EdgeStyleTab({ edge, nodes, onUpdate }) {
     override.strokeStyle != null ||
     override.arrowStart != null ||
     override.arrowEnd != null
+
+  const shape = override.line ?? 'orthogonal'
+  const bends = override.waypoints?.length ?? 0
+  /* Absent means a hand placed them -- see `serializeEdge`. Read here only to word the note below,
+     because "these will be recalculated" and "these are yours" are opposite promises. */
+  const routedBy = bends > 0 ? (override.routed ?? 'hand') : null
 
   const set = (patch) => onUpdate(patch)
 
@@ -144,6 +159,68 @@ export default function EdgeStyleTab({ edge, nodes, onUpdate }) {
             </button>
           </div>
         </div>
+      </Section>
+
+      {/*
+        * Route: the shape of the line, and the bends in it.
+        *
+        * Here because this panel is where a reader looks, and until now it offered colour, pattern and
+        * arrows and said nothing whatever about routing -- so a user who could not find the on-canvas
+        * bend handles had every reason to conclude connectors could not be re-routed at all. They
+        * always could. The line-style switch existed only in the right-click menu, which is not
+        * somewhere anyone looks to answer "can I change this".
+        *
+        * The sentence at the bottom is doing real work: the handles are on the canvas, and no panel
+        * control can substitute for dragging one. What a panel can do is say they are there.
+        */}
+      <Section title="Route">
+        <Row label="Shape">
+          <div className="flex overflow-hidden rounded border border-twilio-gray-20">
+            {ROUTE_SHAPES.map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => set({ line: value })}
+                aria-pressed={shape === value}
+                className={`px-2 py-0.5 text-[11px] transition-colors ${
+                  shape === value
+                    ? 'bg-twilio-blue text-white'
+                    : 'bg-white text-twilio-gray-60 hover:bg-twilio-gray-10'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </Row>
+        {/* The count and the button are both children rather than `value` plus children, because `Row`
+            resolves them with `children ?? value` -- and a `false` from a short-circuited `&&` is not
+            nullish, so a conditional child silently blanks the row instead of falling back. */}
+        <Row label="Bends">
+          <span className="pt-px text-twilio-navy">
+            {bends === 0 ? 'None' : `${bends}${routedBy === 'auto' ? ' (automatic)' : ''}`}
+          </span>
+          {bends > 0 && (
+            <button
+              type="button"
+              /* Clears the router's marker along with the bends. A straightened connector is a
+                 decision, and leaving `routed: 'auto'` behind would let the next component move
+                 re-derive the very route that was just flattened. */
+              onClick={() => set({ waypoints: undefined, routed: undefined })}
+              className="ml-auto shrink-0 rounded border border-twilio-gray-20 px-2 py-0.5 text-[11px] text-twilio-gray-60 transition-colors hover:border-twilio-gray-40"
+            >
+              Straighten
+            </button>
+          )}
+        </Row>
+        <p className="mt-1 text-[10px] leading-relaxed text-twilio-gray-40">
+          Hover the connector on the canvas to show its handles: drag a diamond to move a corner, a
+          bar to slide a whole segment sideways, or a dot to add a bend. Double-click a bend to remove
+          it.{' '}
+          {routedBy === 'auto'
+            ? 'These bends were placed automatically to get around a component, and will be recalculated when either end moves — dragging any of them makes the route yours and stops that.'
+            : 'A route you have adjusted by hand is never recalculated when components move.'}
+        </p>
       </Section>
 
       <Section title="Preview">

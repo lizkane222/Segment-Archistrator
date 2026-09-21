@@ -149,10 +149,16 @@ export const DATA_KINDS = new Set(['sql_table', 'data_graph'])
 export function tabsFor(node) {
   if (!node) return []
 
-  /* A zone shares none of a component's tabs -- it has no kind, so no rules, no
-     fields, and nothing to bind to -- so it gets its own single one rather than a
-     row of tabs that all render empty. */
-  if (node.type === 'zone') return [ZONE]
+  /*
+   * A zone shares none of a component's *content* tabs -- it has no kind, so no rules, no fields, and
+   * nothing to bind to -- but it is a drawn thing with a colour, an outline and corners, so it gets
+   * Style alongside its own.
+   *
+   * Style used to be withheld, which is why a zone had six colour swatches and nothing else while a
+   * component had a free picker, an outline style, a width and a shape. The renderer could not have
+   * honoured the rest anyway until `zoneStyleFor` learned to resolve them; now it can.
+   */
+  if (node.type === 'zone') return [ZONE, STYLE]
 
   /* A connector, same reasoning: no kind, no fields, no rules -- only the one thing
      worth setting on it. */

@@ -35,7 +35,14 @@ import {
 
 import CopyButton from '../ui/CopyButton.jsx'
 import { EVENT_TYPES, skeleton } from './payload.js'
-import { PLAY_MODES, runStatus } from './scenarios.js'
+import {
+  PATH_STATE,
+  PATH_STATE_ROWS,
+  PLAY_MODES,
+  pathStateFor,
+  pathStatePatch,
+  runStatus,
+} from './scenarios.js'
 import {
   moveBranch,
   sequenceBranches,
@@ -322,6 +329,10 @@ function Transport({ transport, mode, onModeChange, runCount }) {
           {[
             [PLAY_MODES.together, 'Together'],
             [PLAY_MODES.sequence, 'One after another'],
+            /* Named for what is on screen rather than for the timing, because that is the only thing
+               that distinguishes it from the row above: end to end either way, but here only one
+               path is lit at a time. This is the mode for several *events* in an order. */
+            [PLAY_MODES.chain, 'One at a time'],
           ].map(([value, label]) => (
             <button
               key={value}
@@ -544,6 +555,17 @@ function ScenarioEditor({
    * Rejoins are excluded. A second connector into a component already reached is not a choice about
    * where to go next -- the component has its verdict, and the connector is travelled either way.
    *
+   * Blocked arms are excluded too, and that is a bug fix rather than a refinement. A reader who had set
+   * ten components to Block still saw them listed here, still ordered them, and still watched the event
+   * animate through them -- because a fork was read straight off the walk, and pass two records a
+   * blocked component as a step like any other. A component the event never reaches is not one of the
+   * ways this path can go. Dropping them can leave a fork with a single arm, and a fork with one arm is
+   * not a fork, so the length test comes *after* the filter rather than before it -- otherwise a card
+   * would sit there offering an order over one row.
+   *
+   * Skipped arms stay. A skipped component genuinely does pass the event on to whatever it feeds, so it
+   * is a real branch of the route; that is the whole distinction between Skip and Block.
+   *
    * Grouped by parent *step* and not by parent component, which matters once a path stops at one
    * component twice: keying on the id pools both stops' children, so a component with one connector out
    * of each pass would look like a single two-armed fork that neither pass actually has. The `branches`
@@ -555,14 +577,18 @@ function ScenarioEditor({
     const nameOf = (id) => byId.get(id)?.data?.name ?? byId.get(id)?.name ?? id
     const steps = trace?.steps ?? []
 
+    const stopped = new Set(scenario.disabled ?? [])
+
     const kids = new Map()
     for (const step of steps) {
       if (step.fromIndex == null || step.rejoin) continue
+      if (stopped.has(step.nodeId)) continue
       if (!kids.has(step.fromIndex)) kids.set(step.fromIndex, [])
       kids.get(step.fromIndex).push(step.nodeId)
     }
 
     return [...kids]
+      /* After the filter, so a fork reduced to one arm stops being offered at all. */
       .filter(([, children]) => children.length > 1)
       .map(([parentIndex, children]) => {
         const parentId = steps[parentIndex].nodeId
@@ -584,7 +610,7 @@ function ScenarioEditor({
           children,
         }
       })
-  }, [trace, graph, scenario.branches])
+  }, [trace, graph, scenario.branches, scenario.disabled])
 
   /*
    * Only the components this path actually passes, and only those where "off" means something.
@@ -613,12 +639,19 @@ function ScenarioEditor({
 
   const disabled = new Set(scenario.disabled ?? [])
 
-  const toggle = (nodeId) => {
-    const next = new Set(disabled)
-    if (next.has(nodeId)) next.delete(nodeId)
-    else next.add(nodeId)
-    onChange({ disabled: [...next] })
-  }
+  /*
+   * The switched-off chips, routed through the same patch as the route bubbles.
+   *
+   * These write `disabled`, which is now the Block half of one three-way choice -- so they used to be
+   * able to disagree with the bubble: this handler set `disabled` without clearing `excluded`, leaving a
+   * component both stepped over and switched off. `visit` checks stepped-over first, so Skip silently
+   * won and the chip looked like it had done nothing. Going through `pathStatePatch` makes the two
+   * surfaces one control with two shapes, which is what they always were.
+   */
+  const toggle = (nodeId) =>
+    onChange(
+      pathStatePatch(scenario, nodeId, disabled.has(nodeId) ? PATH_STATE.pass : PATH_STATE.block),
+    )
 
   /* All three go through `onChange` like every other field, so a reorder lands on the same undo stack
      and the same dirty check as renaming the path. */
@@ -632,17 +665,25 @@ function ScenarioEditor({
         : unsequenceBranches(scenario.branches, parentId),
     })
 
-  const toggleExcluded = (nodeId) => {
-    const next = new Set(excluded)
-    if (next.has(nodeId)) next.delete(nodeId)
-    else next.add(nodeId)
-    /* Switching-off is cleared for a component being left out, so the two controls cannot make
-       contradictory claims about the same component. Being visited twice goes the same way, and for a
-       plainer reason: a component the event steps over cannot be stopped at, let alone twice. */
-    const stillDisabled = (scenario.disabled ?? []).filter((id) => !next.has(id))
-    const stillRevisited = (scenario.revisit ?? []).filter((id) => !next.has(id))
-    onChange({ excluded: [...next], disabled: stillDisabled, revisit: stillRevisited })
-  }
+  /*
+   * What this path does with one component: Pass, Skip or Block.
+   *
+   * One choice over two stored fields, which is the point. `excluded` and `disabled` have always been
+   * three states in disguise -- they are mutually exclusive, they map exactly onto the green, amber and
+   * red the reducer already produces, and the only control for either was a single `×` that toggled one
+   * of them. A reader could not tell from it that "the event steps over this" and "the event stops here"
+   * were different claims, let alone pick between them.
+   *
+   *   Pass   neither field    the component acts on the event      green
+   *   Skip   `excluded`       stepped over, event carries on        amber
+   *   Block  `disabled`       the event stops here                  red
+   *
+   * Setting any one of them clears the other two, so the fields can never make contradictory claims
+   * about the same component. `revisit` goes with them: a component the event steps over or never
+   * reaches cannot be stopped at, let alone twice.
+   */
+  const setPathState = (nodeId, state) => onChange(pathStatePatch(scenario, nodeId, state))
+  const pathStateOf = (nodeId) => pathStateFor(scenario, nodeId)
 
   const revisited = new Set(scenario.revisit ?? [])
 
@@ -832,11 +873,11 @@ function ScenarioEditor({
 
       <PathTimeline
         rows={timeline}
-        excluded={excluded}
+        stateOf={pathStateOf}
         revisited={revisited}
         canRevisit={canRevisit}
         hasStart={Boolean(scenario.sourceId)}
-        onToggle={toggleExcluded}
+        onSetState={setPathState}
         onRevisit={toggleRevisit}
         onFocusNode={onFocusNode}
       />
@@ -901,11 +942,11 @@ function ScenarioEditor({
  */
 function PathTimeline({
   rows,
-  excluded,
+  stateOf,
   revisited,
   canRevisit,
   hasStart,
-  onToggle,
+  onSetState,
   onRevisit,
   onFocusNode,
 }) {
@@ -946,10 +987,10 @@ function PathTimeline({
                      rows, and keying on its id would be a duplicate key within the same list. */
                   key={entry.stepIndex}
                   entry={entry}
-                  off={excluded.has(entry.nodeId)}
+                  state={stateOf(entry.nodeId)}
                   twice={revisited.has(entry.nodeId)}
                   offerRevisit={canRevisit.has(entry.nodeId)}
-                  onToggle={onToggle}
+                  onSetState={onSetState}
                   onRevisit={onRevisit}
                   onFocusNode={onFocusNode}
                 />
@@ -959,10 +1000,11 @@ function PathTimeline({
         ))}
       </ol>
       <p className="mt-1 text-[10px] leading-relaxed text-twilio-gray-40">
-        Each row is one moment — components on the same row receive the event together. Click × to
-        leave a component out of this path: the event steps over it and carries on to whatever it
-        feeds. Click ↺ where the path doubles back through a component, to stop at it a second time
-        instead of only lighting the connector.
+        Each row is one moment — components on the same row receive the event together. The second
+        target on each says what this path does with that component: <strong>Pass</strong> it through,
+        <strong> Skip</strong> it so the event steps over and carries on, or <strong>Block</strong> it so
+        the event stops there. Click ↺ where the path doubles back through a component, to stop at it a
+        second time instead of only lighting the connector.
       </p>
     </div>
   )
@@ -1202,11 +1244,20 @@ function bubbleTone(status, off) {
   return 'border-twilio-warning/40 bg-orange-50 text-twilio-gray-80'
 }
 
-function TimelineBubble({ entry, off, twice, offerRevisit, onToggle, onRevisit, onFocusNode }) {
+/* The mark on the state target, and the whole of what it has to say at a glance. */
+const PATH_STATE_MARK = {
+  [PATH_STATE.pass]: '✓',
+  [PATH_STATE.skip]: '↷',
+  [PATH_STATE.block]: '×',
+}
+
+function TimelineBubble({ entry, state, twice, offerRevisit, onSetState, onRevisit, onFocusNode }) {
   const { nodeId, name, status, isStart, returning } = entry
+  const [choosing, setChoosing] = useState(false)
+  const off = state !== PATH_STATE.pass
 
   return (
-    <span className="flex min-w-0 items-center">
+    <span className="relative flex min-w-0 items-center">
       <button
         type="button"
         onClick={() => onFocusNode?.(nodeId)}
@@ -1218,9 +1269,8 @@ function TimelineBubble({ entry, off, twice, offerRevisit, onToggle, onRevisit, 
             differently would say the walk found something new here. */}
         {returning ? `↺ ${name}` : name}
       </button>
-      {/* Separate targets from the name, so "show me this", "leave this out" and "come back through
-          this" cannot be mis-hit for one another -- the middle one is destructive to the route being
-          described.
+      {/* Separate targets from the name, so "show me this", "what does this path do with it" and "come
+          back through this" cannot be mis-hit for one another.
 
           The return control is offered only where the diagram has a second way in, because everywhere
           else it is a button that cannot change anything. */}
@@ -1232,7 +1282,7 @@ function TimelineBubble({ entry, off, twice, offerRevisit, onToggle, onRevisit, 
           aria-pressed={twice}
           title={
             off
-              ? `“${name}” is left out of this path, so there is nothing to stop at.`
+              ? `“${name}” is not passed through on this path, so there is nothing to stop at.`
               : twice
                 ? `Stop at “${name}” once — a second arrival will just light the connector`
                 : `Stop at “${name}” twice, where this path doubles back through it`
@@ -1244,24 +1294,73 @@ function TimelineBubble({ entry, off, twice, offerRevisit, onToggle, onRevisit, 
           ↺
         </button>
       )}
+      {/*
+        * Three states behind one target, where there used to be a two-way toggle.
+        *
+        * The `×` this replaces could only reach `excluded`, and nothing about it said that "the event
+        * steps over this" was one of three answers rather than the only alternative to Pass -- so the
+        * red state was unreachable and the amber one looked like deletion. Opening a small menu costs a
+        * click and makes all three visible at once, which is the only way a reader learns the middle one
+        * exists.
+        */}
       <button
         type="button"
-        onClick={() => !isStart && onToggle(nodeId)}
+        onClick={() => !isStart && setChoosing((open) => !open)}
         disabled={isStart}
-        aria-pressed={off}
+        aria-haspopup="menu"
+        aria-expanded={choosing}
         title={
           isStart
-            ? 'This is where the path starts, so it cannot be left out.'
-            : off
-              ? `Put “${name}” back into this path`
-              : `Leave “${name}” out of this path — the event will step over it`
+            ? 'This is where the path starts, so the event always passes through it.'
+            : `This path ${state === PATH_STATE.pass ? 'passes the event through' : state === PATH_STATE.skip ? 'steps over' : 'stops the event at'} “${name}” — click to change`
         }
         className={`rounded-r-full border border-l-0 px-1.5 py-0.5 text-[10px] transition-colors ${bubbleTone(status, off)} ${
           isStart ? 'cursor-default opacity-40' : 'hover:brightness-95'
         }`}
       >
-        {isStart ? '◆' : off ? '+' : '×'}
+        {isStart ? '◆' : PATH_STATE_MARK[state]}
       </button>
+
+      {choosing && (
+        <>
+          {/* Closes on the next click anywhere, which is what a menu with no framework behind it needs.
+              Behind the menu in paint order and in front of everything else. */}
+          <span
+            className="fixed inset-0 z-20"
+            onClick={() => setChoosing(false)}
+            aria-hidden="true"
+          />
+          <span
+            role="menu"
+            aria-label={`What this path does with “${name}”`}
+            className="absolute left-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-md border border-twilio-gray-20 bg-white shadow-lg"
+          >
+            {PATH_STATE_ROWS.map(([value, label, note]) => (
+              <button
+                key={value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={state === value}
+                onClick={() => {
+                  onSetState(nodeId, value)
+                  setChoosing(false)
+                }}
+                className={`block w-full px-2 py-1.5 text-left transition-colors hover:bg-twilio-gray-10 ${
+                  state === value ? 'bg-twilio-blue-light' : ''
+                }`}
+              >
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-twilio-navy">
+                  <span className="w-3 text-center">{PATH_STATE_MARK[value]}</span>
+                  {label}
+                </span>
+                <span className="mt-0.5 block pl-[18px] text-[10px] leading-snug text-twilio-gray-60">
+                  {note}
+                </span>
+              </button>
+            ))}
+          </span>
+        </>
+      )}
     </span>
   )
 }

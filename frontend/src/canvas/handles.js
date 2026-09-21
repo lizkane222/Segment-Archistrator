@@ -93,6 +93,93 @@ export function encodeFreeHandle(side, t) {
 }
 
 /**
+ * Where several connectors meeting the same side of the same component should each sit on it.
+ *
+ * ## The problem
+ *
+ * Every connector attaching to a side landed on that side's *midpoint*, because that is where the
+ * handle is. So four edges leaving one card's right-hand side shared an identical start point and an
+ * identical first 20px, and -- since the router puts its crossbar halfway between the two gapped
+ * points, and a column of targets shares an x -- frequently an identical crossbar as well. Four lines
+ * were drawn as one line with four stubs, and no reader could tell which went where. The free border
+ * anchor was built to fix this by hand, one drag at a time; this does it for the default case, which
+ * is the case nearly every diagram is in.
+ *
+ * ## The rules that matter
+ *
+ * A side with **one** connector gets no entry at all, so it keeps the midpoint and every diagram that
+ * has no fan-out is untouched. `(i + 1) / (n + 1)` spreads n of them evenly and symmetrically about
+ * the middle, so two sit at 1/3 and 2/3 rather than one of them staying put and the other moving.
+ *
+ * `order` decides which connector gets which slot, and it has to be a property of the *geometry* --
+ * the opposite end's position along the side's perpendicular axis -- so that lines fan out without
+ * crossing each other. Ties break on `key`, which is stable, because two edges to the same place must
+ * not swap slots between renders. Anything already carrying a hand-placed anchor is excluded by the
+ * caller and keeps it: this fills silence, it does not overrule a choice.
+ *
+ * Pure, and takes plain attachment records rather than edges, so the geometry it needs is the caller's
+ * problem and this stays testable against numbers.
+ *
+ * @param attachments `[{key, nodeId, side, order}]` -- one per edge *end*, hand-anchored ends omitted
+ * @returns Map of `key` to the fraction along that side
+ */
+export function fanOutAnchors(attachments) {
+  const bySide = new Map()
+  for (const item of attachments ?? []) {
+    if (!item || item.nodeId == null || !item.side) continue
+    const at = `${item.nodeId}|${item.side}`
+    if (!bySide.has(at)) bySide.set(at, [])
+    bySide.get(at).push(item)
+  }
+
+  const spread = new Map()
+  for (const group of bySide.values()) {
+    /* One connector keeps the midpoint. This is what makes the whole thing inert for a diagram with
+       no fan-out, and it is why there is no entry rather than an entry of 0.5. */
+    if (group.length < 2) continue
+    group.sort(
+      (a, b) =>
+        (Number(a.order) || 0) - (Number(b.order) || 0) ||
+        String(a.key).localeCompare(String(b.key)),
+    )
+    group.forEach((item, index) => spread.set(item.key, (index + 1) / (group.length + 1)))
+  }
+  return spread
+}
+
+/**
+ * Which side of `from` faces `to` -- a `Position` string, ready for `fixedHandleForSide`.
+ *
+ * ## What this is for
+ *
+ * A connector's handle says which side of a component the line leaves or arrives on, and it is stored
+ * once. Move either component afterwards and that side can end up pointing the wrong way: draw A to a B
+ * on its right, then drag B to the far left, and the line still leaves A's *east* side -- so it exits
+ * east, turns, and crosses back over the component it just left. Measured across the saved diagrams, 13
+ * connector ends were in that state, one of them facing away by 2095px.
+ *
+ * The event was never going backwards -- the walk only ever follows connectors out of a component, and
+ * that holds for all 294 hops in those diagrams. It is the first *leg of the line* that doubles back,
+ * which is what reads as backflow.
+ *
+ * ## The rule, and what it must not touch
+ *
+ * Whichever axis the two centres are further apart on wins, and then the sign picks the side. Centres
+ * rather than nearest edges, so the answer does not flip when two components overlap slightly.
+ *
+ * Applied only where the reader has expressed no preference: an end carrying a hand-placed anchor is a
+ * decision and is left exactly as it is, and no stored diagram is rewritten on open. A handle chosen
+ * deliberately to route a line around something would otherwise be undone by the tool.
+ */
+export function facingSide(from, to) {
+  if (!from || !to) return null
+  const dx = to.x + to.width / 2 - (from.x + from.width / 2)
+  const dy = to.y + to.height / 2 - (from.y + from.height / 2)
+  if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left'
+  return dy >= 0 ? 'bottom' : 'top'
+}
+
+/**
  * A registry anchor as the string an edge stores, or `undefined` when the drag left no point.
  *
  * `undefined` rather than `null` on purpose: the caller spreads the result into `edge.data`, and this

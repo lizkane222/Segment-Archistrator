@@ -282,16 +282,34 @@ export function collapseGraph(nodes, edges, collapsed) {
       continue
     }
 
+    /*
+     * Everything about *where* the member edge attached is dropped, and this is not tidiness.
+     *
+     * `...edge` used to carry `sourceHandle`/`targetHandle` through -- whichever member happened to be
+     * first in array order. A group stack registers exactly two handles and both have **no id**
+     * (see nodes/GroupStackNode.jsx), so React Flow's handle lookup for `'e'` or `'w'` found nothing,
+     * `getEdgePosition` returned null, and the aggregate edge was **not drawn at all**. Collapsing a
+     * group silently lost connectors, which is precisely the failure the comment below says this
+     * module could most plausibly have had -- and it had it.
+     *
+     * The anchors and bends go for a plainer reason: a `free:right:0.73` fraction and a list of
+     * absolute waypoints were measured against the *member's* box, and applying them to the stack's
+     * box puts the line somewhere nobody put it.
+     */
+    const { sourceHandle, targetHandle, ...rest } = edge
+    const { sourceAnchor, targetAnchor, waypoints, routed, ...carried } = edge.data ?? {}
     const created = {
-      ...edge,
+      ...rest,
       id: `${AGGREGATE_PREFIX}${pair}`,
       source,
       target,
+      sourceHandle: null,
+      targetHandle: null,
       /* Not deletable: one click would delete every real edge underneath it, and
          the thing clicked is not any one of them. Expand the group and delete the
          edge that is actually meant. */
       deletable: false,
-      data: { ...(edge.data ?? {}), count: 1, aggregated: [edge.id] },
+      data: { ...carried, count: 1, aggregated: [edge.id] },
     }
     merged.set(pair, created)
     outEdges.push(created)

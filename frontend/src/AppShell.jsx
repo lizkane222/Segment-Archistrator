@@ -11,7 +11,7 @@
  * the provider.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { ReactFlowProvider, useOnViewportChange, useReactFlow } from '@xyflow/react'
 import { KeyRound, LogOut, MessageSquarePlus, RefreshCw, TriangleAlert, Workflow } from 'lucide-react'
@@ -76,6 +76,7 @@ import {
   arrangeNodes,
   distributeNodes,
   groupNodes,
+  patched,
   setLocked,
   ungroupNodes,
 } from './canvas/selection.js'
@@ -84,6 +85,7 @@ import { usePlayback } from './simulation/usePlayback.js'
 import { useWorkspaceGraph } from './hooks/useWorkspaceGraph.js'
 import {
   PLAY_MODES,
+  isSequential,
   applyPathsToEdges,
   applyPathsToNodes,
   combinedFrameAt,
@@ -95,6 +97,7 @@ import {
   tickDurations,
 } from './simulation/scenarios.js'
 import { createAnchorFocus } from './canvas/anchors.js'
+import { NOTES_LANE_OPEN } from './ui/preferences.js'
 import { choreograph } from './simulation/choreography.js'
 import { notesInView, notesSoFar } from './simulation/notes.js'
 import NotesLane from './simulation/NotesLane.jsx'
@@ -559,6 +562,46 @@ function Workbench({
 
   const { setNodes } = graphState
 
+  /*
+   * The same patch, applied to every component the reader has selected.
+   *
+   * Style was single-node only, because the inspector resolves one `inspectedId` and `StyleTab` wrote
+   * `onUpdateNode(node.id, patch)`. The only bulk surface was "Match style", which copies one node's
+   * *whole* override onto the others -- so it silently wiped their font size and alignment along the way.
+   *
+   * `style` is merged per node rather than replaced, which is the difference and the reason this is not
+   * just a loop: two cards with different backgrounds given one border colour keep their own backgrounds.
+   * Everything else in a patch is a plain overwrite, as it is for one node.
+   *
+   * Zones are included when they are what is selected. They are excluded from `selectedComponents` in
+   * canvas/selection.js for align and group -- a backdrop is not a card -- but a colour applies to one
+   * just as well, and now that a zone reaches the Style tab it would be odd for it to be the one thing a
+   * multi-selection could not restyle.
+   */
+  /*
+   * Which nodes a style change should reach.
+   *
+   * Selection and inspection are separate ideas here -- `node.selected` is React Flow's, `inspectedId`
+   * is the panel's -- and they are usually the same node. When they are not, the inspected node wins
+   * and is styled alone: a panel headed with one component's name must not quietly repaint four others.
+   * So this is only a multi-write when the inspected node is genuinely *part of* the selection.
+   */
+  const styleTargets = useMemo(() => {
+    const selected = graphState.nodes.filter((node) => node.selected).map((node) => node.id)
+    if (!inspectedId) return selected
+    return selected.includes(inspectedId) && selected.length > 1 ? selected : [inspectedId]
+  }, [graphState.nodes, inspectedId])
+
+  const updateNodes = useCallback(
+    (ids, patch) => {
+      const wanted = new Set(ids ?? [])
+      if (wanted.size === 0) return
+      /* The merge itself is `patched` in canvas/selection.js -- pure, and tested there. */
+      setNodes((current) => current.map((node) => (wanted.has(node.id) ? patched(node, patch) : node)))
+    },
+    [setNodes],
+  )
+
   const updateNode = useCallback(
     (id, patch) => {
       setNodes((current) => {
@@ -824,7 +867,7 @@ function Workbench({
    * arithmetic `indicesAt` does in beats, done here in milliseconds.
    */
   const eventPlans = useMemo(() => {
-    const sequential = playMode === PLAY_MODES.sequence
+    const sequential = isSequential(playMode)
     let beat = 0
     let offset = 0
     return runs.map((run) => {
@@ -909,7 +952,19 @@ function Workbench({
    * id in state would put a whole-canvas render on every mouse move across a 300-component diagram.
    */
   const anchorFocus = useMemo(() => createAnchorFocus(), [])
-  const [notesCollapsed, setNotesCollapsed] = useState(false)
+
+  /*
+   * Whether the notes lane is folded away -- remembered, not per-pane state.
+   *
+   * It was `useState(false)` here, and "here" is inside `Workbench`, which is keyed by tab id. So the
+   * choice was lost on reload *and* on every diagram-tab switch, and in split view the two panes each
+   * had their own idea of it. Reading it from a store at module scope fixes all three at once: the value
+   * outlives this component, both panes subscribe to the same one, and the `storage` event carries a
+   * change to any other browser tab. See ui/preferences.js.
+   */
+  const notesOpen = useSyncExternalStore(NOTES_LANE_OPEN.subscribe, NOTES_LANE_OPEN.get)
+  const notesCollapsed = !notesOpen
+  const setNotesCollapsed = (collapsed) => NOTES_LANE_OPEN.set(!collapsed)
 
   /*
    * The notes for the lane above the diagram.
@@ -2355,6 +2410,10 @@ function Workbench({
                 onWide={setInspectorWide}
                 onConnect={() => setConnectOpen(true)}
                 onUpdateNode={updateNode}
+                /* Style writes fan out to the whole selection; everything else on the panel is about
+                   one component and keeps using `onUpdateNode`. */
+                onUpdateStyle={(patch) => updateNodes(styleTargets, patch)}
+                styleTargetCount={styleTargets.length}
                 onUpdateKind={updateKindStyle}
                 onUpdateEdge={actions.edgeStyle}
                 onClose={() => setInspectedId(null)}

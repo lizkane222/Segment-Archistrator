@@ -39,6 +39,21 @@ import { hasFormatting } from '../richText.js'
 import { MIN_ZONE_HEIGHT, MIN_ZONE_WIDTH } from '../layout.js'
 import { zoneStyleFor } from '../kinds.js'
 
+/*
+ * The corner treatments a zone can take, as classes rather than radii.
+ *
+ * The same four names a component's `style.shape` uses, so one control serves both -- but a zone is
+ * hundreds of pixels across, and a component's `rounded-full` pill would turn a region into a lozenge.
+ * `pill` therefore means "generously rounded" here. `notched` has no meaning on a plain rectangle and
+ * falls back to square, which is the honest reading of it.
+ */
+const ZONE_SHAPES = {
+  rounded: 'rounded-xl',
+  pill: 'rounded-[2rem]',
+  square: 'rounded-none',
+  notched: 'rounded-none',
+}
+
 function ZoneNode({ id, data, selected }) {
   const style = zoneStyleFor(data)
   const { updateData, walkthroughActive } = useChrome()
@@ -115,11 +130,24 @@ function ZoneNode({ id, data, selected }) {
           means the same thing on a 900px region as on a card. */}
       <ConnectionHandles border={style.border} />
 
+      {/*
+        * The backdrop, drawn from the resolved style rather than from a fixed class list.
+        *
+        * `rounded-xl border-2 border-dashed` used to be hardcoded here, which meant a zone could be
+        * given a colour and nothing else: the renderer had no way to honour an outline style, a width or
+        * a corner, so the panel could not offer them. The defaults are unchanged -- they have moved into
+        * `zoneStyleFor` -- so every existing diagram draws exactly as it did.
+        */}
       <div
-        className={`pointer-events-none h-full w-full rounded-xl border-2 border-dashed ${
+        className={`pointer-events-none h-full w-full ${ZONE_SHAPES[style.shape] ?? ZONE_SHAPES.rounded} ${
           aside ? 'walkthrough-aside-zone' : ''
         }`}
-        style={{ background: style.bg, borderColor: style.border }}
+        style={{
+          background: style.bg,
+          borderColor: style.border,
+          borderStyle: style.borderStyle,
+          borderWidth: `${style.borderWidth}px`,
+        }}
       >
         {/* The grab cursor goes with the drag, so a locked zone must not advertise one --
             otherwise the header says "drag me" and then refuses, which reads as a stuck

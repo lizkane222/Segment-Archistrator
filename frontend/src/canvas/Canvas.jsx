@@ -59,7 +59,7 @@ import EventLayer from '../simulation/EventLayer.jsx'
 import { AnchorContext, createAnchorFocus } from './anchors.js'
 import { GroupCollapseContext } from './groupCollapse.js'
 import { ChromeContext, dragAnchor, edgeRoutes, handleReveal, textEditing } from './chrome.js'
-import { orientConnection } from './direction.js'
+import { orientConnection, sideOf } from './direction.js'
 import { FlashContext } from './flash.js'
 import { codeSeed } from '../functions/defaults.js'
 import { EDGE_MENU, NODE_MENU, PANE_MENU } from '../commands/registry.js'
@@ -100,7 +100,10 @@ import {
   alongBorder,
   anchorStringFor,
   encodeFreeHandle,
+  facingSide,
+  fanOutAnchors,
   fixedHandleForSide,
+  parseFreeHandle,
 } from './handles.js'
 import { styleFor } from './kinds.js'
 import SelectionToolbar from './SelectionToolbar.jsx'
@@ -142,6 +145,23 @@ export const DRAG_MIME = 'application/segment-arch-kind'
  * zone on its way to everything inside it.
  */
 const BORDER_REVEAL = 32
+
+/*
+ * The style every *component* gets when it is dragged onto the canvas.
+ *
+ * A constant rather than three literals at the drop site, so the palette, the catalog and anything
+ * added later cannot drift apart.
+ *
+ * Not applied to the two kinds that are drawings rather than components. A `shape` is an outline drawn
+ * around or beside components and `ShapeNode` defaults it to 2px for a stated reason -- "a hairline
+ * triangle reads as a scratch" -- while `rounded` is meaningless against an explicit geometry and a
+ * radius the shapes palette already supplies. A `table` is furniture too. Both would be actively worse
+ * for being made to match a card.
+ */
+export const DROPPED_STYLE = { borderStyle: 'solid', borderWidth: 1, shape: 'rounded' }
+
+/* Drawings, not components: they keep their own defaults -- see `DROPPED_STYLE`. */
+const DRAWING_KINDS = new Set(['shape', 'table'])
 
 export default function Canvas({
   topology,
@@ -188,13 +208,19 @@ export default function Canvas({
   /*
    * Whether the "Unbound" badge is drawn.
    *
-   * Defaults to *off* rather than to `connected`, so the badges are opt-in even once there
-   * is a workspace: an architecture being drawn from scratch against a real workspace is
-   * mostly placeholders for a while, and forty badges is the same wall of orange whether or
-   * not a token is present. What `connected` gates is whether the control appears at all --
-   * with no workspace the distinction the badge draws does not exist yet.
+   * On by default, which it did not used to be.
+   *
+   * The old reasoning was that forty badges is a wall of orange and the dashed border already said
+   * "placeholder" quietly enough. The first half is still true and the second is not: a dragged
+   * component now gets an explicit solid 1px outline (see `DROPPED_STYLE`), so dashed no longer means
+   * unbound and nothing else would say so. Given the choice between a wall of orange and silently
+   * losing the distinction between a placeholder and a real workspace component, the badge wins -- and
+   * it is one click to turn off, where the lost signal was one nobody could get back.
+   *
+   * What `connected` gates is whether the control appears at all: with no workspace the distinction
+   * the badge draws does not exist yet.
    */
-  const [showFlags, setShowFlags] = useState(false)
+  const [showFlags, setShowFlags] = useState(true)
 
   /* The one place React Flow is handed the list, so the one place its ordering rule has
      to be satisfied -- see orderForFlow. Everything else here reads the props, because
@@ -262,7 +288,21 @@ export default function Canvas({
       setEdges((current) =>
         current.map((edge) =>
           edge.id === edgeId
-            ? { ...edge, data: { ...edge.data, waypoints: waypoints?.length ? waypoints : undefined } }
+            ? {
+                ...edge,
+                data: {
+                  ...edge.data,
+                  waypoints: waypoints?.length ? waypoints : undefined,
+                  /*
+                   * Touched by a hand, so no longer the router's to recompute.
+                   *
+                   * Cleared on every commit, including one that *removes* the last bend: a straightened
+                   * connector is a decision too, and re-deriving a route the user had just flattened
+                   * would be the app arguing with them.
+                   */
+                  routed: undefined,
+                },
+              }
             : edge,
         ),
       )
@@ -307,6 +347,42 @@ export default function Canvas({
      the same cost a selection change already has. */
   const editingLabel = useSyncExternalStore(editingText.subscribe, editingText.current)
 
+  /*
+   * Where each connector sits along the side it meets, when several meet the same one.
+   *
+   * Computed here because it is the only question in this file that no single edge can answer: a
+   * connector cannot know how many siblings share its arrival side. One pass over the edge list,
+   * turned into per-end fractions by `fanOutAnchors` (canvas/handles.js), and read back by each
+   * `FlowEdge` for its own two ends.
+   *
+   * Hand-placed anchors are left out and therefore keep exactly where the user put them -- this
+   * only fills the default, which was "every line lands on the midpoint" and drew four connectors
+   * as one. `order` is the *opposite* end's position across the side, so the lines fan out in the
+   * order they are going rather than in whatever order the array happens to hold.
+   */
+  const fanAnchors = useMemo(() => {
+    const attachments = []
+    for (const edge of edges) {
+      for (const end of ['source', 'target']) {
+        const nodeId = end === 'source' ? edge.source : edge.target
+        const stored = end === 'source' ? edge.data?.sourceAnchor : edge.data?.targetAnchor
+        if (parseFreeHandle(stored)) continue
+        const other = getInternalNode(end === 'source' ? edge.target : edge.source)
+        const at = other?.internals?.positionAbsolute
+        if (!at) continue
+        const side = sideOf(edge, nodeId)
+        const across =
+          side === 'left' || side === 'right'
+            ? at.y + (other.measured?.height ?? 0) / 2
+            : at.x + (other.measured?.width ?? 0) / 2
+        attachments.push({ key: `${edge.id}:${end}`, nodeId, side, order: across })
+      }
+    }
+    return fanOutAnchors(attachments)
+    /* `nodes` is a dependency because the ordering is geometric: moving a card changes which slot
+       its connectors deserve. */
+  }, [edges, nodes, getInternalNode])
+
   const chrome = useMemo(
     () => ({
       showFlags,
@@ -319,6 +395,7 @@ export default function Canvas({
       walkthroughActive,
       flowPreview,
       routes,
+      fanAnchors,
       dragAnchor: dragAnchorRegistry,
       handleReveal: reveal,
       textEditing: editingText,
@@ -334,6 +411,7 @@ export default function Canvas({
       walkthroughActive,
       flowPreview,
       routes,
+      fanAnchors,
       dragAnchorRegistry,
       reveal,
       editingText,
@@ -380,6 +458,33 @@ export default function Canvas({
    * necessarily touches it. So are zones: a zone is a region the diagram is drawn *in*, and a
    * connector routing around Connections rather than through it would have nowhere to go.
    */
+  /*
+   * The handle ids for the two ends of a connection, each facing the other component.
+   *
+   * Null for an end whose geometry is not measured yet, so the caller falls back to whatever React Flow
+   * reported rather than to a guess. See `facingSide` in canvas/handles.js for the rule and for what it
+   * deliberately does not touch.
+   */
+  const facingFor = useCallback(
+    (connection) => {
+      const boxOf = (id) => {
+        const node = getInternalNode?.(id)
+        const at = node?.internals?.positionAbsolute
+        const width = node?.measured?.width
+        const height = node?.measured?.height
+        return at && width && height ? { x: at.x, y: at.y, width, height } : null
+      }
+      const from = boxOf(connection.source)
+      const to = boxOf(connection.target)
+      if (!from || !to) return { source: null, target: null }
+      return {
+        source: fixedHandleForSide(facingSide(from, to)),
+        target: fixedHandleForSide(facingSide(to, from)),
+      }
+    },
+    [getInternalNode],
+  )
+
   const avoidanceFor = useCallback(
     (connection) => {
       const from = getInternalNode?.(connection.source)
@@ -691,6 +796,51 @@ export default function Canvas({
            members are still re-homed. */
         return !before || !same(before.position, item.position)
       })
+      /*
+       * Connector sides are re-faced before the "did anything actually move" guard below, because they
+       * are a question about where things are *now* rather than about whether the document changed. It
+       * is idempotent -- an end already on the right side is left alone -- so running it on every drag
+       * stop costs nothing.
+       *
+       * It has to be before the guard for a blunter reason too: that guard compares each dragged node
+       * against `documentNodes`, which React Flow has already updated through `onNodesChange` during the
+       * drag, so it is comparing the new position with itself and returns early on a drag that plainly
+       * moved something. Worth a look on its own account -- everything after it is behind that early
+       * return -- but not something to change quietly from here.
+       */
+      /*
+       * Moving a component can leave its connectors attached to the wrong side.
+       *
+       * Draw A to a B on its right, then drag B to the far left: the line still leaves A's *east* side,
+       * so it exits east, turns, and crosses back over A. That is how 13 connector ends in the saved
+       * diagrams came to face away from where they were going, one of them by 2095px -- nobody chose it,
+       * a component moved afterwards.
+       *
+       * Only ends with no hand-placed anchor, and only connectors touching something that just moved. A
+       * reader who dragged an end to a particular point on a border said something, and it is not this
+       * function's business to argue.
+       */
+      const moving = new Set(moved.map((item) => item.id))
+      setEdges((current) =>
+        current.map((edge) => {
+          if (!moving.has(edge.source) && !moving.has(edge.target)) return edge
+          const facing = facingFor(edge)
+          const sourceFixed = parseFreeHandle(edge.data?.sourceAnchor) ? null : facing.source
+          const targetFixed = parseFreeHandle(edge.data?.targetAnchor) ? null : facing.target
+          if (
+            (sourceFixed == null || sourceFixed === edge.sourceHandle) &&
+            (targetFixed == null || targetFixed === edge.targetHandle)
+          ) {
+            return edge
+          }
+          return {
+            ...edge,
+            ...(sourceFixed ? { sourceHandle: sourceFixed } : {}),
+            ...(targetFixed ? { targetHandle: targetFixed } : {}),
+          }
+        }),
+      )
+
       if (!shifted) return
 
       /* Computed twice, deliberately, and cheaply -- once here over the props to work out
@@ -722,8 +872,41 @@ export default function Canvas({
           ),
         )
       }
+
+      /*
+       * Re-route the connectors whose route the router owns.
+       *
+       * Obstacle avoidance used to run once, when a connector was drawn, and never again -- so every
+       * component moved after that left its connectors on a route computed for a layout that no longer
+       * existed, and they accumulated crossings through the very cards they were meant to dodge. The
+       * bends *look* deliberate, which is why this went unnoticed: nothing distinguished a route the
+       * router had computed from one a hand had placed.
+       *
+       * `data.routed === 'auto'` is that distinction, and it is checked strictly. A hand-adjusted route
+       * is a statement about a piece of empty space and is never touched; so is a route stored before
+       * the marker existed, which is every route already in the database. The safe direction.
+       */
+      const touched = new Set(moved.map((item) => item.id))
+
+      setEdges((current) =>
+        current.map((edge) => {
+          if (edge.data?.routed !== 'auto') return edge
+          if (!touched.has(edge.source) && !touched.has(edge.target)) return edge
+          const next = avoidanceFor(edge)
+          /* An empty result means the direct route is clear now, so the bends are dropped along with
+             the marker -- the connector goes back to being one the router derives from its endpoints. */
+          return {
+            ...edge,
+            data: {
+              ...edge.data,
+              waypoints: next.length ? next : undefined,
+              routed: next.length ? 'auto' : undefined,
+            },
+          }
+        }),
+      )
     },
-    [documentNodes, setNodes, topology, onAdvise, edges, setEdges],
+    [documentNodes, setNodes, topology, onAdvise, edges, setEdges, avoidanceFor, facingFor],
   )
 
   /* Deleting a zone deletes its children -- React Flow pulls them into the set
@@ -798,16 +981,27 @@ export default function Canvas({
       const landing = dragAnchorRegistry.take(connection.target)
       const sourceAnchor = anchor ? encodeFreeHandle(anchor.side, anchor.t) : null
       const targetAnchor = landing ? encodeFreeHandle(landing.side, landing.t) : null
-      if (anchor || landing) {
-        connection = {
-          ...connection,
-          ...(anchor
-            ? { sourceHandle: fixedHandleForSide(anchor.side) ?? connection.sourceHandle }
-            : {}),
-          ...(landing
-            ? { targetHandle: fixedHandleForSide(landing.side) ?? connection.targetHandle }
-            : {}),
-        }
+      /*
+       * An end the reader did not place gets the side that faces the other component.
+       *
+       * Without this the source end keeps whichever handle the drag happened to start from and the
+       * target end keeps whatever `connectionRadius` snapped to -- neither of which knows where the
+       * other component is. A connector to something on the left that leaves the *east* side has to
+       * exit east, turn, and cross back over the component it just left, which is what reads as the
+       * event running backwards. (It never is: the walk only ever follows connectors out of a
+       * component. It is the first leg of the line that doubles back.)
+       *
+       * A hand-placed anchor always wins, because it is a decision.
+       */
+      const facing = facingFor(connection)
+      connection = {
+        ...connection,
+        sourceHandle: anchor
+          ? (fixedHandleForSide(anchor.side) ?? connection.sourceHandle)
+          : (facing.source ?? connection.sourceHandle),
+        targetHandle: landing
+          ? (fixedHandleForSide(landing.side) ?? connection.targetHandle)
+          : (facing.target ?? connection.targetHandle),
       }
 
       /* A stack has handles because the aggregated edges have to land somewhere, but an
@@ -1091,8 +1285,25 @@ export default function Canvas({
           name: payload.name ?? topology?.kinds?.[kind]?.label ?? kind,
           description: payload.description ?? '',
           /* Catalog drops carry a slug and docs link but no workspace instance
-             behind them yet, so they start unbound and render dashed. */
+             behind them yet, so they start unbound. */
           bound: payload.bound ?? false,
+          /*
+           * The look every component starts with, stated rather than inherited.
+           *
+           * Without it a dropped component resolved through `styleFor` -> `KIND_STYLES` -> `DEFAULT`,
+           * which meant two surprises. `outlineFor` forces dashed 2px on anything unbound, and a
+           * catalog drop is unbound by definition -- so a freshly dragged component came out dashed
+           * and heavier than the same component after binding. And `KIND_STYLES` overrides the shape
+           * per kind, so a warehouse arrived square and a source function notched.
+           *
+           * An explicit override beats both, which is the point: a reader who drags four things onto a
+           * canvas gets four things that look like each other. It costs the dashed border as a signal
+           * for "not bound yet" -- that now rests entirely on the Unbound badge, which is why its
+           * default is on rather than off.
+           *
+           * Before `payload.data` deliberately, so a palette tile that knows better still wins.
+           */
+          ...(DRAWING_KINDS.has(kind) ? {} : { style: DROPPED_STYLE }),
           /* A function drawn by hand starts with the out-of-the-box body for its type, so
              it does something the moment it is on the canvas. A function dragged out of
              the *workspace* tab deliberately does not: its real body is not something the
@@ -1218,21 +1429,31 @@ export default function Canvas({
              */
             connectionMode={ConnectionMode.Loose}
             /*
-             * Swallow one specific complaint, and only for the case it is wrong about.
+             * `008` is "couldn't create edge for handle id X", and it is never survivable.
              *
-             * `008` is "couldn't create edge for handle id X". React Flow raises it whenever an edge
-             * names a handle that is not currently mounted -- which is *every* free border anchor a
-             * moment after the drag that made it, because that handle follows the cursor and then
-             * stops existing (see canvas/handles.js). The edge is fine: `FlowEdge` resolves the point
-             * from the node's own box. Left alone this logs on every render of every such edge, which
-             * on a diagram with a few of them is a console nobody can read -- and this app pipes its
-             * console into a drawer the user is meant to consult.
+             * This used to swallow it whenever the message mentioned a `free:` anchor, on the stated
+             * grounds that "the edge is fine: `FlowEdge` resolves the point from the node's own box".
+             * That was wrong about the library's control flow, and expensively so. When `008` fires,
+             * `getEdgePosition` has already returned null and React Flow's own `EdgeWrapper` has
+             * already returned null -- `FlowEdge` is never mounted and resolves nothing. The edge is
+             * not drawn at all, on this render or any other. So the filter was not quietening a
+             * cosmetic warning; it was hiding the diagnostic for a permanently invisible connector,
+             * which is the single hardest thing to debug in this app.
              *
-             * Every other code, and an `008` about a handle that is *not* a free anchor, goes through
-             * to the default so a genuinely broken edge still says so.
+             * Nothing should reach a handle field with a free id now -- `fixedHandleForSide` puts the
+             * fixed id there and the precise point rides in `data.sourceAnchor`/`data.targetAnchor`
+             * (see canvas/handles.js) -- so an `008` mentioning one is a real regression and has to be
+             * loud. It is called out by name to say so, rather than passed through anonymously.
              */
             onError={(code, message) => {
-              if (code === '008' && /free:/.test(message)) return
+              if (code === '008' && /free:/.test(message)) {
+                console.error(
+                  `[React Flow] ${message} — a connector is naming a free border anchor as its handle, ` +
+                    'so it will not be drawn at all. The anchor belongs in the edge’s data, not in ' +
+                    'sourceHandle/targetHandle; see canvas/handles.js.',
+                )
+                return
+              }
               console.warn(`[React Flow] ${message}`)
             }}
             onNodeDragStop={onNodeDragStop}
@@ -1554,10 +1775,10 @@ function withParent(node, zone, position) {
  * always the innermost, because a single answer to "which zone is this in?" is all the
  * stored field can hold.
  *
- * The topology's tree is now advice rather than the rule it was. A zone lands wherever
- * the cursor was, and the only thing still refused outright is a duplicate -- two zones
- * with one id would collide on save, which is a different kind of problem from an
- * unconventional arrangement.
+ * The topology's tree is now advice rather than the rule it was: a zone lands wherever the cursor
+ * was. Nothing is refused outright any more -- a duplicate used to be, because two zones sharing an
+ * id collide on save, and that is solved below by giving the copy an id of its own rather than by
+ * turning the drop away.
  *
  * @param zone  the zone already under the cursor, if any
  */

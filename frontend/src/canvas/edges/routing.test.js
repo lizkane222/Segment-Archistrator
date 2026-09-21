@@ -924,3 +924,72 @@ describe('cornerHandles', () => {
     expect(cornerHandles(undefined)).toEqual([])
   })
 })
+
+/*
+ * A connector has to meet a component's side head-on, not run along it.
+ *
+ * The bug, from a screenshot: a connector landing on the *top* of a component approached horizontally
+ * and simply stopped, so its arrowhead lay flat against the border pointing *along* it. The line read
+ * as passing beside the component rather than arriving at it -- as attached to nothing at all.
+ *
+ * The cause was a helper's scope, stated in its own docstring as though it were harmless:
+ * `orthogonalThrough` took the source direction only, so the moment an edge had a single waypoint the
+ * arrival side stopped being considered. Every auto-avoided and every hand-adjusted route has at least
+ * one waypoint, so this was the normal case, not an edge case. `orthogonalCorners` -- the no-waypoint
+ * router -- always had both, which is why plain connectors looked right and adjusted ones did not.
+ */
+describe('meeting a component head-on', () => {
+  const first = (points) => [points[0], points[1]]
+  const last = (points) => [points[points.length - 2], points[points.length - 1]]
+  const vertical = ([a, b]) => Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) > 0.5
+  const horizontal = ([a, b]) => Math.abs(a.y - b.y) < 0.5 && Math.abs(a.x - b.x) > 0.5
+
+  /* A route that has to turn a corner to get where it is going, so the arrival axis is not simply
+     whatever the departure axis was. */
+  const bent = (targetPosition, waypoints) =>
+    routeEdge({
+      source: { x: 0, y: 0 },
+      target: { x: 400, y: 300 },
+      sourcePosition: 'right',
+      targetPosition,
+      waypoints,
+      line: 'orthogonal',
+    }).points
+
+  it('arrives vertically at a top handle, with a waypoint in the way', () => {
+    const points = bent('top', [{ x: 200, y: 100 }])
+    expect(vertical(last(points))).toBe(true)
+    expect(horizontal(first(points))).toBe(true)
+  })
+
+  it('arrives vertically at a bottom handle too', () => {
+    expect(vertical(last(bent('bottom', [{ x: 200, y: 100 }])))).toBe(true)
+  })
+
+  it('arrives horizontally at a left handle', () => {
+    expect(horizontal(last(bent('left', [{ x: 200, y: 100 }])))).toBe(true)
+  })
+
+  it('still leaves perpendicular when the first waypoint is straight ahead', () => {
+    /* The collapse case: a waypoint sitting exactly where the departure stub would end. The stub is
+       dropped rather than emitted as a zero-length segment, and the first leg stays horizontal. */
+    const points = bent('left', [{ x: 20, y: 0 }])
+    expect(horizontal(first(points))).toBe(true)
+  })
+
+  it('keeps the endpoints exactly where they were given', () => {
+    /* The stubs are interior corners, not new endpoints. A route that moved its own ends would
+       detach the connector from the handle it is drawn to. */
+    const points = bent('top', [{ x: 200, y: 100 }])
+    expect(points[0]).toEqual({ x: 0, y: 0 })
+    expect(points[points.length - 1]).toEqual({ x: 400, y: 300 })
+  })
+
+  it('was already right for a connector nobody has re-routed', () => {
+    /* The regression guard: `orthogonalCorners` knew both directions all along, and this change must
+       not have altered the shape of a plain connector. */
+    const points = bent('left', undefined)
+    expect(horizontal(first(points))).toBe(true)
+    expect(horizontal(last(points))).toBe(true)
+  })
+})
