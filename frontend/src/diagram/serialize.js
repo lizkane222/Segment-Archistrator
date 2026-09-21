@@ -195,6 +195,19 @@ export function serializeEdge(edge) {
         }
       : {}),
     /*
+     * Who put those bends there: `'auto'` for the router's own obstacle-avoidance, absent for a hand.
+     *
+     * Needed because the two used to be indistinguishable and the app has to treat them completely
+     * differently -- a computed route should be recomputed when a component moves, and a hand-placed
+     * bend is a statement about a piece of empty space and must never be touched. Absent means hand,
+     * which is the safe reading: every route already in the database predates this field, so none of
+     * them is rewritten on open.
+     *
+     * Only ever written alongside waypoints, and omitted otherwise, so an unbent connector still
+     * serializes byte-identically -- the `graphFingerprint` rule the whole block obeys.
+     */
+    ...(edge.data?.waypoints?.length && edge.data?.routed ? { routed: edge.data.routed } : {}),
+    /*
      * Line colour, dash pattern and arrow direction -- the same omit-when-absent reasoning as
      * `line`/`waypoints` above, so an edge nobody has styled serializes byte-identically to how
      * it did before styling existed. `arrowEnd` is the one exception: its *default* is `true`

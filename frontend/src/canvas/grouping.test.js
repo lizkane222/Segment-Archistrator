@@ -17,6 +17,7 @@ import {
   GROUP_PREFIX,
   MIN_GROUP_SIZE,
   UNCATEGORISED,
+  AGGREGATE_PREFIX,
   collapseGraph,
   groupKey,
   groupLabel,
@@ -650,5 +651,74 @@ describe('internalSections', () => {
     expect(internalSections({ kind: 'quantum_toaster' }, TOPOLOGY)).toEqual([])
     expect(internalSections(null, TOPOLOGY)).toEqual([])
     expect(internalSections({ kind: 'profile' }, null)).toEqual([])
+  })
+})
+
+/*
+ * What an aggregate edge must NOT inherit from the member it was built from.
+ *
+ * A group stack registers exactly two handles and both have **no id** (nodes/GroupStackNode.jsx).
+ * `collapseGraph` used to build its aggregate with `...edge`, carrying through whichever member
+ * happened to be first in array order -- so an aggregate would name `'e'` or `'w'`, React Flow's
+ * handle lookup would find nothing, `getEdgePosition` would return null and its own `EdgeWrapper`
+ * would return null before `FlowEdge` was ever mounted. The connector was not drawn at all.
+ *
+ * Collapsing a group therefore lost lines. The module's own comment above says that is "the failure
+ * mode this whole module could most plausibly have"; these pin the case where it actually had it.
+ */
+describe('an aggregate edge and the member it came from', () => {
+  const sided = (source, target, extra = {}) => ({
+    ...edge(source, target),
+    sourceHandle: 'e',
+    targetHandle: 'w',
+    data: { phase: null, discovered: true, ...extra },
+  })
+
+  const collapsedFanIn = (build) => {
+    const destinations = Array.from({ length: 3 }, (_, index) =>
+      node(`d${index}`, 'destination', { name: `Dest ${index}`, categories: ['Email Marketing'] }),
+    )
+    const nodes = [zone('connections'), node('s1', 'source'), ...destinations]
+    const view = collapseGraph(nodes, build(destinations), ['destination:Email Marketing'])
+    return view.edges.find((e) => e.id.startsWith(AGGREGATE_PREFIX))
+  }
+
+  it('names no handle, because a stack registers none it could name', () => {
+    const aggregate = collapsedFanIn((destinations) =>
+      destinations.map((destination) => sided('s1', destination.id)),
+    )
+    expect(aggregate).toBeTruthy()
+    expect(aggregate.sourceHandle).toBe(null)
+    expect(aggregate.targetHandle).toBe(null)
+  })
+
+  it('drops a border anchor measured against the member’s own box', () => {
+    /* A fraction along the member's side means nothing on the stack that replaced it, and applying it
+       anyway puts the line's end somewhere nobody put it. */
+    const aggregate = collapsedFanIn((destinations) =>
+      destinations.map((destination) =>
+        sided('s1', destination.id, { sourceAnchor: 'free:right:0.73', targetAnchor: 'free:left:0.2' }),
+      ),
+    )
+    expect(aggregate.data.sourceAnchor).toBeUndefined()
+    expect(aggregate.data.targetAnchor).toBeUndefined()
+  })
+
+  it('drops bends, which were absolute coordinates for a different route', () => {
+    const aggregate = collapsedFanIn((destinations) =>
+      destinations.map((destination) =>
+        sided('s1', destination.id, { waypoints: [{ x: 10, y: 20 }], routed: 'auto' }),
+      ),
+    )
+    expect(aggregate.data.waypoints).toBeUndefined()
+    expect(aggregate.data.routed).toBeUndefined()
+  })
+
+  it('still carries what does belong to the pair, and its count', () => {
+    const aggregate = collapsedFanIn((destinations) =>
+      destinations.map((destination) => sided('s1', destination.id, { color: '#ff0000' })),
+    )
+    expect(aggregate.data.color).toBe('#ff0000')
+    expect(aggregate.data.count).toBe(3)
   })
 })
