@@ -562,9 +562,11 @@ describe('a document with resized components', () => {
  * Every other case in this file uses a miniature, which is the right call for a rule:
  * a fixture with two sources says what it means. This one deliberately does not, and
  * reads apps/diagrams/fixtures/templates.json instead. The reason is what that
- * template is *for*: it is a specific arrangement somebody drew -- eleven zones, two
- * of them regions outside Segment that cannot be regenerated from the topology, and
- * seventeen components placed by hand. A miniature would prove buildLayout handles
+ * template is *for*: it is a specific arrangement somebody drew -- thirteen zones, two
+ * of them regions outside Segment that cannot be regenerated from the topology, twenty
+ * components placed by hand, and a connector arrangement to match: every one of the
+ * twenty-two meets its components at a point chosen by hand, and two are routed through
+ * dragged corners. A miniature would prove buildLayout handles
  * nesting, which is already proven above, and would not prove the thing that can
  * actually break: that the arrangement we ship is one buildLayout gives back
  * unchanged. If it drifts, the template opens as a diagram nobody drew.
@@ -586,8 +588,35 @@ describe('the shipped end-to-end template', () => {
 
   it('is in the fixture at all', () => {
     expect(entry).toBeDefined()
-    expect(entry.nodes).toHaveLength(18)
-    expect(entry.zones).toHaveLength(12)
+    expect(entry.nodes).toHaveLength(20)
+    expect(entry.zones).toHaveLength(13)
+  })
+
+  it('carries the connector arrangement it was drawn with', () => {
+    /*
+     * The fixture's whole reason for declaring a layout, and the thing that was being dropped on
+     * the way in: `seed_templates._build_edge` returned a fixed dict of id/source/target and every
+     * hand-placed anchor and dragged corner went with it. Nothing failed -- the template validated,
+     * seeded and opened, looking nothing like the diagram it came from.
+     */
+    const anchored = entry.edges.filter((edge) => edge.sourceAnchor || edge.targetAnchor)
+    expect(anchored).toHaveLength(entry.edges.length)
+    expect(entry.edges.filter((edge) => edge.waypoints)).toHaveLength(2)
+  })
+
+  it('opens and re-saves with every anchor and waypoint intact', () => {
+    /* Positions are checked below; this is the same claim for the connectors, which travel by a
+       different path -- `data.sourceAnchor` rather than a node field -- and so can drift alone. */
+    const saved = serializeGraph(open(graph))
+    for (const edge of entry.edges) {
+      const stored = saved.edges.find((candidate) => candidate.id === edge.id)
+      expect(stored, edge.id).toBeDefined()
+      expect(stored.sourceHandle, edge.id).toBe(edge.sourceHandle)
+      expect(stored.targetHandle, edge.id).toBe(edge.targetHandle)
+      expect(stored.sourceAnchor ?? null, edge.id).toEqual(edge.sourceAnchor ?? null)
+      expect(stored.targetAnchor ?? null, edge.id).toEqual(edge.targetAnchor ?? null)
+      expect(stored.waypoints ?? null, edge.id).toEqual(edge.waypoints ?? null)
+    }
   })
 
   it('places every component in a zone the template also declares', () => {

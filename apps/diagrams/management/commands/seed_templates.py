@@ -133,7 +133,14 @@ class Command(BaseCommand):
             nodes_by_id[node["id"]] = node
             nodes.append(node)
 
-        edges = [self._build_edge(key, raw, nodes_by_id) for raw in entry.get("edges", [])]
+        # A template that states its own zones is a drawing somebody made; see this
+        # module's docstring. That is also what decides whether an off-table edge is a
+        # mistake or a liberty -- see `_build_edge`.
+        hand_arranged = bool(zones)
+        edges = [
+            self._build_edge(key, raw, nodes_by_id, hand_arranged=hand_arranged)
+            for raw in entry.get("edges", [])
+        ]
 
         graph = {"nodes": nodes, "edges": edges}
         # Omitted rather than written as `[]` when the fixture declares none. An
@@ -142,7 +149,44 @@ class Command(BaseCommand):
         # reference architectures onto bare canvas.
         if zones:
             graph["zones"] = zones
+        # Saved walkthroughs, passed through as authored.
+        #
+        # Nothing is derived here, unlike a node or an edge, because a path is not a claim
+        # about Segment's architecture -- it is a claim about which story this diagram is
+        # for, and there is no second source of truth to check it against. What it *is*
+        # checked for is dangling references: a path naming a component the template does
+        # not contain would start a walkthrough nowhere, and silently.
+        scenarios = [
+            self._build_scenario(key, raw, nodes_by_id) for raw in entry.get("scenarios", [])
+        ]
+        if scenarios:
+            graph["scenarios"] = scenarios
         return graph
+
+    def _build_scenario(self, key: str, raw: dict, nodes_by_id: dict[str, dict]) -> dict:
+        """A saved walkthrough, checked only for references it could not resolve."""
+        scenario_id = raw.get("id")
+        if not scenario_id:
+            raise CommandError(f"{key}: every scenario needs an id. Got {raw!r}.")
+
+        source_id = raw.get("sourceId")
+        if source_id and source_id not in nodes_by_id:
+            raise CommandError(
+                f"{key}: scenario {scenario_id!r} starts at {source_id!r}, which this "
+                f"template does not contain -- so the walkthrough would begin nowhere."
+            )
+
+        # `excluded` and `disabled` name components to step over or stop at. A stale id in
+        # either is inert rather than broken, but it is still a fixture that does not mean
+        # what it says, so it fails here rather than going out in a shipped template.
+        for field in ("excluded", "disabled", "revisit"):
+            for node_id in raw.get(field) or []:
+                if node_id not in nodes_by_id:
+                    raise CommandError(
+                        f"{key}: scenario {scenario_id!r} lists unknown node {node_id!r} "
+                        f"under {field!r}."
+                    )
+        return dict(raw)
 
     def _build_zone(self, key: str, raw: dict, index: int) -> dict:
         """
@@ -282,7 +326,9 @@ class Command(BaseCommand):
             )
         return {**binds, "kind": kind}
 
-    def _build_edge(self, key: str, raw: dict, nodes_by_id: dict[str, dict]) -> dict:
+    def _build_edge(
+        self, key: str, raw: dict, nodes_by_id: dict[str, dict], hand_arranged: bool = False
+    ) -> dict:
         source, target = raw.get("source"), raw.get("target")
         for end in (source, target):
             if end not in nodes_by_id:
@@ -295,14 +341,34 @@ class Command(BaseCommand):
         # service", which is false and is the reason `custom` is not a topology kind.
         rule_free = {from_kind, to_kind} & RULE_FREE_KINDS
         if not rule_free and not topology.is_valid_edge(from_kind, to_kind):
-            raise CommandError(
-                f"{key}: {source} -> {target} is not a legal connection "
-                f"({from_kind} -> {to_kind}). The canvas would let a user draw it, but a "
-                f"shipped template is a reference architecture -- it should not be the "
-                f"thing that teaches somebody a connection Segment does not make."
+            # Advice for a hand-arranged template, a refusal for a generated one, and the
+            # split is the same one `placement_advisories` already draws for zones.
+            #
+            # A template that states no layout is a claim about the shape of the pipeline,
+            # and an off-table edge in one is straightforwardly a mistake. A hand-arranged
+            # template is a drawing somebody made, and a drawing legitimately contains
+            # edges that are not data flow: "this is the same warehouse at both ends",
+            # "this destination forwards to their own system". validators.py already
+            # decided this for user-drawn edges -- ALLOWED_EDGES is "only for linting the
+            # bundled templates" -- and refusing here was the last place that made a
+            # diagram the canvas accepts unshippable as the template it came from.
+            #
+            # Still said out loud, every seed, because the alternative is that a genuine
+            # gap in the table (two were found this way) goes unnoticed forever.
+            complaint = (
+                f"{key}: {source} -> {target} is not in the adjacency table "
+                f"({from_kind} -> {to_kind})."
             )
+            if not hand_arranged:
+                raise CommandError(
+                    f"{complaint} The canvas would let a user draw it, but a template that "
+                    f"declares no layout is a reference architecture -- it should not be "
+                    f"the thing that teaches somebody a connection Segment does not make. "
+                    f"If the edge is deliberate, the template should state its own zones."
+                )
+            self.stdout.write(self.style.WARNING(f"  warn {complaint}"))
 
-        return {
+        edge = {
             "id": raw.get("id") or f"{source}->{target}",
             "source": source,
             "target": target,
@@ -311,3 +377,14 @@ class Command(BaseCommand):
             # which is a fact about the customer's setup.
             "discovered": False,
         }
+        # Which side of each component the line meets, where along that side, and any
+        # corners it was dragged through. Carried rather than derived, because there is
+        # nothing to derive them from: they are the difference between the drawing somebody
+        # made and a default route between two boxes. Dropping them -- which this did until
+        # a hand-arranged template with 19 anchored ends and 2 routed edges was added --
+        # loses the arrangement silently, leaving a template that validates, seeds, opens,
+        # and looks nothing like the diagram it was made from.
+        for field in ("sourceHandle", "targetHandle", "sourceAnchor", "targetAnchor", "waypoints"):
+            if raw.get(field):
+                edge[field] = raw[field]
+        return edge

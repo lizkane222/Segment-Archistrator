@@ -468,7 +468,13 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # Not terminal after all: a destination's own mapping detail is drawn hanging off
     # it, and Profiles Sync's "audience membership from Engage" input is drawn from
     # the destination an audience activates rather than from the audience itself.
-    "destination": {"destination_mapping", "profile_sync"},
+    #
+    # Reaches a profile because of one specific destination: Segment Profiles, which is
+    # how a source's events get into a space at all. Drawn as a destination because that
+    # is what it is in the catalogue and what you configure in Connections, but what it
+    # feeds is Unify -- so without this edge the commonest way profiles are populated is
+    # the one thing a diagram cannot say.
+    "destination": {"destination_mapping", "profile_sync", "profile"},
     "warehouse": {"reverse_etl_model", "sql_table", "data_graph"},
     "reverse_etl_model": {"destination"},
     # A table feeds the entity model that describes it, and the audience that queries it. The arrow
@@ -480,7 +486,12 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     "data_graph": {"linked_audience", "space"},
     # Terminal in the same sense a destination is: it is the thing being built, and what happens to
     # an audience afterwards -- a sync to a destination -- is drawn from the audience side.
-    "linked_audience": {"destination", "destination_function"},
+    #
+    # The debugger's source for the same reason `computed_trait`, `audience` and `journey` all have
+    # it: these are the things a walkthrough demonstrates by feeding events in and watching them
+    # arrive. A Linked Audience was the one sibling missing it, which made it the one kind of
+    # audience a walkthrough could not be drawn against.
+    "linked_audience": {"destination", "destination_function", "source"},
     # Not an event path: a plan is a definition, and the arrow says "this source is
     # connected to this plan, and its schema controls enforce it". Drawn in the
     # direction of enforcement rather than of data, because the alternative is a

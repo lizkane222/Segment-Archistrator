@@ -118,19 +118,80 @@ def test_every_hand_arranged_node_carries_a_position(seeded):
             assert "position" in node, (template.key, node["id"])
 
 
-def test_every_template_edge_is_legal(seeded):
+def test_every_edge_in_a_generated_template_is_legal(seeded):
     """
-    Mirrors seed_templates.py's own bypass for a rule-free kind: `custom` has no
-    adjacency table and no business getting one, so an edge touching it is legal by
-    definition rather than something to look up.
+    A template that declares no zones is a claim about the shape of the pipeline, so every
+    edge in one has to be on the adjacency table. A *hand-arranged* template is a drawing
+    somebody made and is held to a weaker rule -- see the next test for what it may contain
+    and why.
+
+    Mirrors seed_templates.py's own bypass for a rule-free kind: `custom` has no adjacency
+    table and no business getting one, so an edge touching it is legal by definition rather
+    than something to look up.
     """
     for template in seeded:
+        if template.graph.get("zones"):
+            continue
         kinds = {n["id"]: n["kind"] for n in template.graph["nodes"]}
         for edge in template.graph["edges"]:
             from_kind, to_kind = kinds[edge["source"]], kinds[edge["target"]]
             if {from_kind, to_kind} & seed_module.RULE_FREE_KINDS:
                 continue
             assert topology.is_valid_edge(from_kind, to_kind), (template.key, edge["id"])
+
+
+def test_a_hand_arranged_template_may_hold_an_edge_that_is_not_data_flow(seeded):
+    """
+    The off-table edges a hand-arranged template is allowed to contain, named individually.
+
+    Not a blanket exemption: the point of listing them is that adding a *fourth* has to be a
+    deliberate edit to this test rather than something that slips in. Each of these is a
+    drawing statement rather than a path an event takes --
+
+      warehouse -> warehouse        "these two are usually the same warehouse"
+      destination -> destination     a destination forwarding into the customer's own system
+      source -> profile_sync        the debugger source drawn as the thing a walkthrough feeds
+
+    -- and each is the kind of claim `ALLOWED_EDGES` cannot express, because that table is
+    about which components Segment connects, not about what a diagram may say.
+    """
+    allowed_liberties = {
+        ("warehouse", "warehouse"),
+        ("destination", "destination"),
+        ("source", "profile_sync"),
+    }
+    for template in seeded:
+        if not template.graph.get("zones"):
+            continue
+        kinds = {n["id"]: n["kind"] for n in template.graph["nodes"]}
+        for edge in template.graph["edges"]:
+            pair = (kinds[edge["source"]], kinds[edge["target"]])
+            if set(pair) & seed_module.RULE_FREE_KINDS:
+                continue
+            if topology.is_valid_edge(*pair):
+                continue
+            assert pair in allowed_liberties, (template.key, edge["id"], pair)
+
+
+def test_the_segment_profiles_destination_may_reach_a_profile():
+    """
+    The gap that shipping a real hand-drawn diagram exposed.
+
+    Segment Profiles is a destination in the catalogue and is what you configure in
+    Connections, but what it feeds is a space -- so it is how profiles get populated at all.
+    Without this pair the commonest path in Unify was the one thing a diagram could not draw.
+    """
+    assert topology.is_valid_edge("destination", "profile")
+
+
+def test_a_linked_audience_may_reach_the_debugger_source():
+    """
+    `computed_trait`, `audience` and `journey` all already pointed at `source` -- the
+    stand-in for "play a walkthrough and watch events arrive". A Linked Audience is the same
+    kind of thing and was the one sibling missing it, which made it the only audience a
+    walkthrough could not be drawn against.
+    """
+    assert topology.is_valid_edge("linked_audience", "source")
 
 
 def test_shipped_templates_pass_the_same_validation_a_save_does(seeded):
@@ -200,8 +261,16 @@ def _run_fixture(tmp_path, monkeypatch, payload):
     call_command("seed_templates", verbosity=0)
 
 
-def test_an_illegal_edge_in_a_fixture_fails_the_load(tmp_path, monkeypatch):
-    with pytest.raises(CommandError, match="not a legal connection"):
+def _two_nodes():
+    return [
+        {"id": "d", "kind": "destination", "binds": {"kind": "destination"}},
+        {"id": "s", "kind": "source", "binds": {"kind": "source"}},
+    ]
+
+
+def test_an_illegal_edge_in_a_generated_fixture_fails_the_load(tmp_path, monkeypatch):
+    """A template that states no layout is still held to the adjacency table."""
+    with pytest.raises(CommandError, match="not in the adjacency table"):
         _run_fixture(
             tmp_path,
             monkeypatch,
@@ -209,15 +278,185 @@ def test_an_illegal_edge_in_a_fixture_fails_the_load(tmp_path, monkeypatch):
                 {
                     "key": "bad",
                     "name": "Backwards",
-                    "nodes": [
-                        {"id": "d", "kind": "destination", "binds": {"kind": "destination"}},
-                        {"id": "s", "kind": "source", "binds": {"kind": "source"}},
-                    ],
+                    "nodes": _two_nodes(),
                     "edges": [{"source": "d", "target": "s"}],
                 }
             ],
         )
     assert not Template.objects.filter(key="bad").exists()
+
+
+def test_the_same_edge_is_allowed_once_the_template_states_its_own_layout(tmp_path, monkeypatch):
+    """
+    The one that keeps the deploy green.
+
+    A hand-arranged template is reproduced as drawn, and refusing an off-table edge here was
+    the last thing that made a diagram the canvas accepts unshippable as the template it came
+    from. It warns instead -- so a genuine gap in the table is still said out loud -- and it
+    seeds.
+    """
+    _run_fixture(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "key": "drawn",
+                "name": "As drawn",
+                "zones": [
+                    {
+                        "id": "connections",
+                        "position": {"x": 0, "y": 0},
+                        "width": 400,
+                        "height": 300,
+                    }
+                ],
+                "nodes": _two_nodes(),
+                "edges": [{"source": "d", "target": "s"}],
+            }
+        ],
+    )
+    template = Template.objects.get(key="drawn")
+    assert [(e["source"], e["target"]) for e in template.graph["edges"]] == [("d", "s")]
+
+
+def test_an_edge_keeps_the_route_it_was_drawn_with(tmp_path, monkeypatch):
+    """
+    The silent one.
+
+    `_build_edge` used to return a fixed dict of id/source/target/phase/discovered, so every
+    hand-placed anchor and every dragged corner was dropped on the way in. Nothing failed:
+    the template validated, seeded, and opened -- looking nothing like the diagram it was made
+    from. There is nothing to derive these from, so if they are not carried they are gone.
+    """
+    _run_fixture(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "key": "routed",
+                "name": "Routed",
+                "zones": [
+                    {"id": "connections", "position": {"x": 0, "y": 0}, "width": 400, "height": 300}
+                ],
+                "nodes": _two_nodes(),
+                "edges": [
+                    {
+                        "source": "s",
+                        "target": "d",
+                        "sourceHandle": "n",
+                        "targetHandle": "w",
+                        "sourceAnchor": "free:top:0.25",
+                        "targetAnchor": "free:left:0.75",
+                        "waypoints": [{"x": 10, "y": 20}, {"x": 30, "y": 40}],
+                    }
+                ],
+            }
+        ],
+    )
+    edge = Template.objects.get(key="routed").graph["edges"][0]
+    assert edge["sourceHandle"] == "n"
+    assert edge["targetHandle"] == "w"
+    assert edge["sourceAnchor"] == "free:top:0.25"
+    assert edge["targetAnchor"] == "free:left:0.75"
+    assert edge["waypoints"] == [{"x": 10, "y": 20}, {"x": 30, "y": 40}]
+
+
+def test_an_edge_drawn_with_no_route_stays_clean(tmp_path, monkeypatch):
+    """
+    The other half: absent keys stay absent rather than becoming nulls.
+
+    A `sourceAnchor: null` is not the same as no anchor -- `serializeEdge` omits a falsy one
+    and the edge falls back to its fixed handle, so writing the key at all would put a value
+    into every saved copy of a diagram that never had one.
+    """
+    _run_fixture(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "key": "plain",
+                "name": "Plain",
+                "nodes": _two_nodes(),
+                "edges": [{"source": "s", "target": "d"}],
+            }
+        ],
+    )
+    edge = Template.objects.get(key="plain").graph["edges"][0]
+    for field in ("sourceHandle", "targetHandle", "sourceAnchor", "targetAnchor", "waypoints"):
+        assert field not in edge
+
+
+def test_the_shipped_pipeline_keeps_the_arrangement_it_was_drawn_with(seeded):
+    """The hand-arranged template is the reason the two tests above exist."""
+    graph = Template.objects.get(key="end-to-end-full-pipeline").graph
+    anchored = [e for e in graph["edges"] if e.get("sourceAnchor") or e.get("targetAnchor")]
+    routed = [e for e in graph["edges"] if e.get("waypoints")]
+    assert len(anchored) == 22, "every connector in this diagram was placed by hand"
+    assert len(routed) == 2
+
+
+def test_a_template_may_ship_a_walkthrough(seeded):
+    """
+    A template with no path opens as a still diagram, and the walkthrough is the thing the app
+    is for -- so the one hand-arranged reference architecture carries a path that plays.
+    """
+    graph = Template.objects.get(key="end-to-end-full-pipeline").graph
+    assert len(graph["scenarios"]) == 1
+    path = graph["scenarios"][0]
+    ids = {n["id"] for n in graph["nodes"]}
+    assert path["sourceId"] in ids
+    # Ships ready to play rather than in somebody's working state: a template that opens with
+    # nine components left out reads as a broken diagram, not as a curated view.
+    assert path["excluded"] == []
+    assert path["disabled"] == []
+
+
+def test_a_walkthrough_that_starts_nowhere_fails_the_load(tmp_path, monkeypatch):
+    """
+    Otherwise it ships silently: a path whose `sourceId` names nothing simply never plays, and
+    the reader is left wondering what they did wrong.
+    """
+    with pytest.raises(CommandError, match="does not contain"):
+        _run_fixture(
+            tmp_path,
+            monkeypatch,
+            [
+                {
+                    "key": "bad-path",
+                    "name": "X",
+                    "nodes": _two_nodes(),
+                    "edges": [{"source": "s", "target": "d"}],
+                    "scenarios": [{"id": "path:1", "sourceId": "ph:not-here"}],
+                }
+            ],
+        )
+
+
+def test_a_walkthrough_that_names_an_unknown_component_fails_the_load(tmp_path, monkeypatch):
+    with pytest.raises(CommandError, match="unknown node"):
+        _run_fixture(
+            tmp_path,
+            monkeypatch,
+            [
+                {
+                    "key": "bad-path",
+                    "name": "X",
+                    "nodes": _two_nodes(),
+                    "edges": [{"source": "s", "target": "d"}],
+                    "scenarios": [{"id": "path:1", "sourceId": "s", "excluded": ["ph:gone"]}],
+                }
+            ],
+        )
+
+
+def test_a_template_with_no_walkthrough_says_so_by_omission(tmp_path, monkeypatch):
+    """`scenarios` absent rather than `[]`, matching how `zones` is handled."""
+    _run_fixture(
+        tmp_path,
+        monkeypatch,
+        [{"key": "quiet", "name": "X", "nodes": _two_nodes(), "edges": []}],
+    )
+    assert "scenarios" not in Template.objects.get(key="quiet").graph
 
 
 def test_an_unknown_kind_in_a_fixture_fails_the_load(tmp_path, monkeypatch):
