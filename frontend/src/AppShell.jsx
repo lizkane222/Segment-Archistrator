@@ -64,6 +64,7 @@ import {
 import SplitView from './ui/SplitView.jsx'
 import TabStrip from './diagram/TabStrip.jsx'
 import { useTabs } from './diagram/tabs.js'
+import { readSession, writeSession } from './diagram/session.js'
 import { centreOf, toZoneLocal, zoneAtPosition } from './canvas/rules.js'
 import { autoAlignNodes } from './canvas/autoAlign.js'
 import { growZones, toFlowEdge, toFlowNode, zoneSize } from './canvas/layout.js'
@@ -200,7 +201,20 @@ export default function AppShell({
    *     unmount capture below runs: no key, and React would reuse the component and quietly show
    *     the new tab's name over the old tab's drawing.
    */
-  const tabs = useTabs()
+  /*
+   * Restored from storage, so signing in does not cost the reader their open diagrams.
+   *
+   * Read once, in a lazy initialiser, rather than in an effect: `useTabs` needs the tabs at its
+   * first render, and restoring them afterwards would mount a blank pane and then replace it --
+   * which is a visible flash and, worse, a mount that reports itself clean over the top of the
+   * restored one.
+   *
+   * See diagram/session.js for why this is needed at all (sign-in is a full-page navigation) and
+   * for what a restored tab does and does not carry.
+   */
+  const restored = useRef(null)
+  if (restored.current === null) restored.current = readSession() ?? false
+  const tabs = useTabs(restored.current?.tabs, restored.current || {})
 
   /* Which pane the shared controls act on. The last one clicked, held here rather than derived,
      because "the active tab" and "the pane you are working in" are different questions once there
@@ -219,7 +233,20 @@ export default function AppShell({
    * only because its last report is still in this map. That is right, and it survives switching
    * back and forth; what it would not survive is a page reload, which loses the tab anyway.
    */
-  const [dirtyByTab, setDirtyByTab] = useState({})
+  /*
+   * Seeded from the restored session, and that is load-bearing rather than cosmetic.
+   *
+   * The effect below mirrors the tab set to storage, and `session.js` keeps a graph only for tabs
+   * it is told are dirty. A restored dirty tab that also has a database id would read as clean here
+   * until its pane mounts and reports -- so the very first write after a sign-in would drop the
+   * graph holding the unsaved work, which is precisely the work this whole path exists to carry
+   * across. Starting from what was stored closes that window.
+   */
+  const [dirtyByTab, setDirtyByTab] = useState(() =>
+    Object.fromEntries(
+      (restored.current?.tabs ?? []).filter((tab) => tab.dirty).map((tab) => [tab.id, true]),
+    ),
+  )
   const reportDirty = useCallback((tabId, dirty) => {
     setDirtyByTab((current) => (current[tabId] === dirty ? current : { ...current, [tabId]: dirty }))
   }, [])
@@ -237,6 +264,97 @@ export default function AppShell({
      unsaved work is reason enough -- and two panes running their own interval would ping
      twice as often for no extra safety. See auth/useSessionKeepAlive.js. */
   useSessionKeepAlive({ dirty: dirtyIds.size > 0, onLost: onRefreshSession })
+
+  /*
+   * Where a mounted pane publishes a way to read its live graph.
+   *
+   * The problem this solves: a pane hands its graph up to `useTabs` on *unmount only* -- serializing
+   * three hundred nodes on every drag frame would cost the frame rate -- so `tabs.tabs` holds
+   * `graph: null` for a tab that has never been switched away from. A freshly opened diagram being
+   * actively drawn in is exactly that case, and it is the one that matters most. Writing the session
+   * from tab state alone therefore stored nothing at all for it, which a browser run caught and no
+   * unit test could have.
+   *
+   * A registry of getters rather than the graphs themselves, so nothing is serialized until somebody
+   * actually asks -- which is on a tab change or on the way out of the page, not per frame.
+   */
+  const liveGraphs = useRef(new Map())
+  const publishLiveGraph = useCallback((tabId, read) => {
+    if (!tabId) return undefined
+    liveGraphs.current.set(tabId, read)
+    return () => liveGraphs.current.delete(tabId)
+  }, [])
+
+  /* The tab set with each mounted pane's *current* graph substituted in. */
+  const currentTabs = useCallback(
+    () =>
+      tabs.tabs.map((tab) => {
+        const read = liveGraphs.current.get(tab.id)
+        if (!read) return tab
+        try {
+          return { ...tab, graph: read() ?? tab.graph }
+        } catch {
+          /* A pane mid-teardown. Its stored graph is stale but real, which beats dropping the tab. */
+          return tab
+        }
+      }),
+    [tabs.tabs],
+  )
+
+  const saveSession = useCallback(() => {
+    writeSession(
+      {
+        tabs: currentTabs(),
+        activeId: tabs.activeId,
+        split: tabs.split,
+        orientation: tabs.orientation,
+      },
+      dirtyIds,
+    )
+  }, [currentTabs, tabs.activeId, tabs.split, tabs.orientation, dirtyIds])
+
+  /* On the arrangement changing: open, close, fork, switch, split, save. Not per drag frame. */
+  useEffect(() => {
+    saveSession()
+  }, [saveSession])
+
+  /*
+   * And on a slow tick while anything is unsaved, which is what covers a crash.
+   *
+   * `pagehide` below handles every *orderly* exit -- a sign-in, a close, a reload, a phone putting
+   * the tab in the background. It does not fire for a force-quit, an OOM kill, or a power cut, and
+   * those are exactly the events somebody who redownloads the same diagram five times is guarding
+   * against. Without this, storage holds whatever it held at the last tab change, so an hour of
+   * drawing in one tab would still be an hour lost.
+   *
+   * Every twelve seconds, and only while something is actually dirty: a serialize of a large diagram
+   * is single-digit milliseconds, so the cost is negligible at this interval and there is no cost at
+   * all once everything is saved. Deliberately not per edit -- that would serialize on every drag
+   * frame, which is the reason the graph is not in tab state to begin with.
+   */
+  useEffect(() => {
+    if (!dirtyIds.size) return undefined
+    const tick = setInterval(saveSession, 12_000)
+    return () => clearInterval(tick)
+  }, [dirtyIds, saveSession])
+
+  /*
+   * And on the way out of the page, which is the case the whole thing exists for.
+   *
+   * Signing in is a full-page navigation to Google (see diagram/session.js), and a navigation runs
+   * no React cleanup -- so without this the session on disk is whatever it was at the last tab
+   * change, and everything drawn since is lost with the document.
+   *
+   * `pagehide` rather than `beforeunload`: it fires for the back/forward cache and on mobile Safari
+   * where `beforeunload` does not, and it does not ask the browser for a confirm dialog.
+   * Deliberately no dialog -- the work is being kept, so stopping somebody to warn them they are
+   * about to lose it would be both irritating and false.
+   */
+  useEffect(() => {
+    const keep = () => saveSession()
+    globalThis.addEventListener?.('pagehide', keep)
+    return () => globalThis.removeEventListener?.('pagehide', keep)
+  }, [saveSession])
 
   /*
    * Where the shared chrome lands.
@@ -292,6 +410,7 @@ export default function AppShell({
               topologyError={topologyError}
               tab={tab}
               onCaptureTab={tabs.capture}
+              onPublishLiveGraph={publishLiveGraph}
               /* Clicking anywhere in a pane makes it the one the tab strip is about. */
               onFocusPane={() => setFocused(index)}
               onDirtyChange={reportDirty}
@@ -373,6 +492,7 @@ function Workbench({
   topologyError,
   tab = null,
   onCaptureTab,
+  onPublishLiveGraph,
   onFocusPane,
   onDirtyChange,
   tabStrip = null,
@@ -1184,7 +1304,38 @@ function Workbench({
     /* The document first: `applyGraph` calls `markSaved`, and the dirty comparison is against the
        document this graph belongs to. */
     docs.adopt(tab.doc)
-    if (tab.graph) applyGraph(tab.graph)
+    if (tab.graph) {
+      applyGraph(tab.graph)
+      return undefined
+    }
+    /*
+     * A tab restored from a previous page load, which was clean and saved.
+     *
+     * `session.js` deliberately stores no graph for one of those -- the server has it, and a
+     * three-hundred-node diagram per tab would not fit the storage budget -- so this is where it
+     * comes back. A tab that was *dirty* carries its graph and took the branch above; this path is
+     * only ever the recoverable case.
+     */
+    if (!tab.doc?.id) return undefined
+    let cancelled = false
+    docs
+      .openDiagram(tab.doc.id)
+      .then((graph) => {
+        if (!cancelled) applyGraph(graph)
+      })
+      .catch(() => {
+        /* Deleted, or the session lapsed. Says so rather than sitting on an empty canvas that
+           looks like the diagram opened and turned out to be blank. */
+        if (!cancelled) {
+          notify({
+            tone: 'error',
+            message: `Could not reopen “${tab.doc.name}”. It may have been deleted.`,
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
     /* Mount only. The component is keyed by tab id, so "the tab changed" is a remount and there is
        no second case to handle -- and re-running this on any other change would throw away the
        user's edits and reload the stored graph over them.
@@ -1210,6 +1361,32 @@ function Workbench({
        eslint-disable-next-line react-hooks/exhaustive-deps */
     [],
   )
+
+  /*
+   * Publish a way to read this pane's *current* graph, for the shell to persist.
+   *
+   * The unmount capture above is what keeps `useTabs` correct across a tab switch, and it is
+   * sufficient for that -- but it is not sufficient for a page that is about to be navigated away
+   * from, because a navigation runs no cleanup. So the shell needs to be able to ask a live pane
+   * what it is holding, at a moment of the shell's choosing. See `publishLiveGraph` in AppShell.
+   *
+   * A getter, not a value: this must not serialize anything until somebody asks, or it would cost a
+   * full serialize per render of a pane that is being drawn in.
+   */
+  useEffect(() => {
+    if (!tab) return undefined
+    return onPublishLiveGraph?.(tab.id, () => {
+      const held = snapshot.current
+      if (!held) return null
+      return serializeGraph({
+        nodes: held.nodes,
+        edges: held.edges,
+        scenarios: held.scenarios,
+        collapsed: held.collapsed,
+      })
+    })
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [tab?.id, onPublishLiveGraph])
 
   /*
    * Report the *document* up as it changes, rather than only on the way out.

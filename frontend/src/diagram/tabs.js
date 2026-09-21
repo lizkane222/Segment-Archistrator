@@ -163,11 +163,23 @@ export function visibleTabs(tabs, activeId, { split = false } = {}) {
  * collapsing). Storing every keystroke here instead would mean serializing a 300-node diagram on
  * every drag frame.
  */
-export function useTabs(initial) {
-  const [tabs, setTabs] = useState(() => (initial?.length ? initial : [newTab()]))
-  const [activeId, setActiveId] = useState(() => (initial?.length ? initial[0].id : tabs[0].id))
-  const [split, setSplit] = useState(false)
-  const [orientation, setOrientation] = useState(SPLIT_VERTICAL)
+export function useTabs(initial, restored = {}) {
+  /* Mapped through `newTab` rather than trusted as-is: a restored tab comes from storage, so it
+     may be missing a field a later build added, and `newTab` is where a tab's defaults live. */
+  const [tabs, setTabs] = useState(() =>
+    initial?.length ? initial.map((tab) => newTab(tab)) : [newTab()],
+  )
+  /* The tab that was on screen, when it is still among them. Falls back to the first rather than
+     to nothing, so a stored id that no longer matches cannot leave the strip with no selection. */
+  const [activeId, setActiveId] = useState(() => {
+    const first = tabs[0].id
+    if (!initial?.length) return first
+    return tabs.some((tab) => tab.id === restored.activeId) ? restored.activeId : first
+  })
+  /* Split view and its orientation are part of the arrangement too: coming back from a sign-in to
+     one pane, having left two side by side, reads as work having been lost even when none was. */
+  const [split, setSplit] = useState(() => Boolean(restored.split))
+  const [orientation, setOrientation] = useState(() => restored.orientation ?? SPLIT_VERTICAL)
 
   const visible = useMemo(() => visibleTabs(tabs, activeId, { split }), [tabs, activeId, split])
 
