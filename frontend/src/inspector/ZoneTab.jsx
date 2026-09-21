@@ -12,13 +12,18 @@ import { RotateCcw } from 'lucide-react'
 
 import { EditableText, EmptyNote, Row, Section } from './primitives.jsx'
 import { ZONE_STYLES, ZONE_SWATCHES, zoneStyleFor } from '../canvas/kinds.js'
+import { zoneProductOf } from '../canvas/frames.js'
 import { zoneSize } from '../canvas/layout.js'
 
 export default function ZoneTab({ node, onUpdate }) {
   const data = node.data
   const { width, height } = zoneSize(node)
   const style = zoneStyleFor(data)
-  const isProduct = Boolean(ZONE_STYLES[data.id])
+  /* By product, so the second copy of a zone reports as the product it is a copy of. Reading the raw
+     id meant `destinations~2` was not a product zone, and its colour-reset button offered a generic
+     "Default" instead of the Segment default it actually falls back to -- `zoneStyleFor` in
+     canvas/kinds.js has resolved by product all along. */
+  const isProduct = Boolean(ZONE_STYLES[zoneProductOf(data.id)])
 
   return (
     <>

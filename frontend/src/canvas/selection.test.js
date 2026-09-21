@@ -25,6 +25,7 @@ import {
   ungroupNodes,
   groupSelectionChanges,
   withGroupMates,
+  patched,
 } from './selection.js'
 
 const zone = (id, x, y, parentId = undefined) => ({
@@ -644,5 +645,45 @@ describe('setLocked and anyLocked', () => {
     const nodes = setLocked([card('a', 0, 0), card('b', 100, 0)], ['a'], true)
     expect(anyLocked(nodes, ['a', 'b'])).toBe(true)
     expect(anyLocked(nodes, ['b'])).toBe(false)
+  })
+})
+
+/*
+ * Applying one style change to a whole selection.
+ *
+ * Style used to be single-node: the inspector resolves one `inspectedId`, so the only way to give four
+ * cards one border colour was "Match style", which copies a model's *whole* override and therefore also
+ * replaced their backgrounds. Two different actions were wearing one name.
+ */
+describe('patched', () => {
+  const node = (id, data = {}) => ({ id, type: 'segmentNode', data: { kind: 'source', ...data } })
+
+  it('merges style, so each node keeps what the patch did not mention', () => {
+    /* The point of the whole change. Four cards given one border colour keep their own backgrounds. */
+    const before = node('a', { style: { bg: '#eef', fontSize: 14 } })
+    const after = patched(before, { style: { border: '#c00' } })
+    expect(after.data.style).toEqual({ bg: '#eef', fontSize: 14, border: '#c00' })
+  })
+
+  it('overwrites a style field the patch does name', () => {
+    const after = patched(node('a', { style: { border: '#eee' } }), { style: { border: '#c00' } })
+    expect(after.data.style.border).toBe('#c00')
+  })
+
+  it('overwrites anything that is not style', () => {
+    /* A plain field is a plain field: only `style` is a bag of independent choices. */
+    const after = patched(node('a', { name: 'Old', size: { width: 10 } }), { name: 'New' })
+    expect(after.data.name).toBe('New')
+    expect(after.data.size).toEqual({ width: 10 })
+  })
+
+  it('leaves the original untouched', () => {
+    const before = node('a', { style: { bg: '#eef' } })
+    patched(before, { style: { border: '#c00' } })
+    expect(before.data.style).toEqual({ bg: '#eef' })
+  })
+
+  it('copes with a node that has no style yet', () => {
+    expect(patched(node('a'), { style: { border: '#c00' } }).data.style).toEqual({ border: '#c00' })
   })
 })

@@ -62,6 +62,11 @@ export default function Inspector({
   onWide,
   onConnect,
   onUpdateNode,
+  /* Style writes, which reach every selected component rather than only the inspected one -- see
+     `styleTargets` in AppShell.jsx. Optional: a caller that does not pass it gets the single-node
+     behaviour, which is what every other tab uses. */
+  onUpdateStyle,
+  styleTargetCount,
   onUpdateKind,
   onUpdateEdge,
   onClose,
@@ -241,8 +246,13 @@ export default function Inspector({
           <StyleTab
             node={node}
             topology={topology}
-            onUpdate={(patch) => onUpdateNode(node.id, patch)}
+            /* Style reaches the whole selection when the inspected node is part of one -- see
+               `styleTargets` in AppShell. Size and shape geometry stay with `onUpdateNode`, because
+               "make these the same size" is a separate action the user asked for separately. */
+            onUpdate={onUpdateStyle ?? ((patch) => onUpdateNode(node.id, patch))}
+            onUpdateOne={(patch) => onUpdateNode(node.id, patch)}
             onUpdateKind={onUpdateKind}
+            selectedCount={styleTargetCount ?? 1}
           />
         )}
         {tab === LINKS && <LinksTab node={node} />}

@@ -254,10 +254,24 @@ function ZonesSection({ topology, zonesOnCanvas, needle }) {
       kind: 'zone',
       icon: Frame,
       label: zone.label,
-      /* Offered even while present, disabled, rather than hidden: a zone that
-         vanished from the list after being deleted looks unrecoverable. */
-      disabled: present.has(zone.id),
-      hint: present.has(zone.id) ? 'Already on the canvas.' : zone.description,
+      /*
+       * Never disabled, and that single word is the whole of "let a zone be added twice".
+       *
+       * The machinery for a second copy has been in place for some time and is tested end to end:
+       * `dropZone` in canvas/Canvas.jsx mints `connections~2` via `nextZoneInstance`
+       * (canvas/frames.js), the rules and colour tables resolve it by product, and the backend's
+       * `topology.zone_product` does the same. None of it could ever run, because this tile was
+       * rendered with `draggable={false}` the moment its zone was on the canvas -- so no `dragstart`
+       * fired and the drop handler was never reached.
+       *
+       * The hint still says what will happen, because a reader who has already placed Destinations
+       * and drags it again deserves to know they are getting a second one rather than moving the
+       * first: one canvas holding Destinations inside Connections *and* inside Engage is the case
+       * this is for.
+       */
+      hint: present.has(zone.id)
+        ? `Already on the canvas — dragging it again adds a second ${zone.label}.`
+        : zone.description,
       payload: {
         zone: {
           id: zone.id,

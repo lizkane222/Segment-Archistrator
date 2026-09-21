@@ -24,7 +24,7 @@
 import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronRight, Paintbrush, RotateCcw } from 'lucide-react'
 
-import { SHAPES, outlineFor, styleFor } from '../canvas/kinds.js'
+import { SHAPES, outlineFor, styleFor, zoneStyleFor } from '../canvas/kinds.js'
 import { SHAPES as GEOMETRY, shapeById, shapePath } from '../canvas/shapes/geometry.js'
 import { CHANNELS, styleForChannels } from '../canvas/palettes.js'
 import {
@@ -126,6 +126,9 @@ function IntegerField({ label, value, placeholder, min, onCommit }) {
  * The geometry list is every shape, in the palette's order, as its own outline: nobody scans a column
  * of words looking for a cylinder.
  */
+/* `onUpdate` here is deliberately the *per-node* writer. A geometry and a corner radius are facts about
+   one drawing -- pushing a cylinder onto four selected shapes because one of them was inspected is not
+   what "style the selection" means. Colours and outlines, which are shared, go through the other one. */
 function ShapeGeometry({ node, onUpdate }) {
   const current = node.data.shape ?? null
   const geometry = current ? shapeById(current) : null
@@ -227,8 +230,30 @@ const nearestPreset = (radius) =>
     Math.abs(preset.value - radius) < Math.abs(best.value - radius) ? preset : best,
   ).value
 
-export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
+export default function StyleTab({
+  node,
+  topology,
+  onUpdate,
+  /* Per-node, always: size and a shape's own geometry are not things a selection shares. */
+  onUpdateOne = onUpdate,
+  onUpdateKind,
+  selectedCount = 1,
+}) {
   const kind = node.data.kind
+  /*
+   * A zone is a styled box too, and now reaches this panel.
+   *
+   * It resolves its look through `zoneStyleFor` rather than `styleFor`, because a zone's default is not
+   * a kind's: it comes from the product palette, or from the single `color` it can be given, and its
+   * background is *derived* from that colour rather than picked. So the effective values shown here have
+   * to come from the same function the renderer uses, or the swatches would describe a zone that is not
+   * on the canvas.
+   *
+   * Three of the controls below are meaningless on a zone and are hidden rather than greyed: there is no
+   * kind to apply a style to every one of, no bind state to be a placeholder of, and its size belongs to
+   * the resize handles (which is what the Zone tab says).
+   */
+  const isZone = node.type === 'zone'
   /* A shape draws an SVG path rather than a styled box, which changes what the controls below can
      honestly offer -- see the note beside the Shape row. `data.lucid` is a converted icon: it has no
      geometry of its own to swap, so it takes the colours and nothing else. */
@@ -240,15 +265,19 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
    */
   const shapeless = kind === 'table' || Boolean(node.data.lucid)
   const override = node.data.style ?? {}
-  const effective = styleFor(kind, override)
+  const effective = isZone ? zoneStyleFor(node.data) : styleFor(kind, override)
   /* Resolved rather than read off `effective`, so the highlighted button is the border
      the canvas is drawing -- an unstyled placeholder draws dashed while `effective` still
      says solid. */
-  const outline = outlineFor(node.data)
-  const isPlaceholder = node.data.bound === false
+  const outline = isZone
+    ? { borderStyle: effective.borderStyle, borderWidth: effective.borderWidth }
+    : outlineFor(node.data)
+  /* A zone is never a placeholder: nothing binds to one, so the dashed-means-unbound reading that the
+     outline rows explain does not apply and would be a false note on the panel. */
+  const isPlaceholder = !isZone && node.data.bound === false
   /* Last fallback is a word rather than the kind, because the kind can be absent: a
      custom component carries none, and this label is interpolated into a sentence. */
-  const kindLabel = topology?.kinds?.[kind]?.label ?? kind ?? 'component'
+  const kindLabel = isZone ? 'zone' : (topology?.kinds?.[kind]?.label ?? kind ?? 'component')
   const [palettesOpen, setPalettesOpen] = useState(false)
   /* Which of background/border/text a palette swatch writes. All three to begin with, which is what
      this always did -- see the note beside the toggles. */
@@ -264,13 +293,19 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
   const setSize = (patch) => {
     const next = { width: chosen.width, height: chosen.height, ...patch }
     const cleared = next.width == null && next.height == null
-    onUpdate({ size: cleared ? undefined : next })
+    onUpdateOne({ size: cleared ? undefined : next })
   }
 
   return (
     <>
       <Section
-        title="This component"
+        title={
+          selectedCount > 1
+            ? `These ${selectedCount} components`
+            : isZone
+              ? 'This zone'
+              : 'This component'
+        }
         actions={
           Object.keys(override).length > 0 && (
             <button
@@ -371,7 +406,7 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
           corners -- and a component keeps the four it always had.
         */}
         {isShape ? (
-          <ShapeGeometry node={node} onUpdate={onUpdate} />
+          <ShapeGeometry node={node} onUpdate={onUpdateOne} />
         ) : shapeless ? null : (
           <div className="flex items-center gap-2 py-1 text-xs">
             <span className="w-28 shrink-0 text-twilio-gray-60">Shape</span>
@@ -397,6 +432,9 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
         )}
       </Section>
 
+      {/* A zone's geometry belongs to its resize handles -- the Zone tab says so, and two panels
+          disagreeing about one rectangle is worse than one of them staying quiet. */}
+      {!isZone && (
       <Section
         title="Size"
         note="Or drag a corner of the component on the canvas. Leave a field empty to go back to the default."
@@ -431,6 +469,7 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
           onCommit={(height) => setSize({ height })}
         />
       </Section>
+      )}
 
       <Section
         title="Palettes"
@@ -548,6 +587,9 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
         </div>
       </Section>
 
+      {/* Nothing to apply it to: a zone has no kind, so "every zone of this kind" is every zone, which
+          is not a thing anyone asked for and would repaint the whole canvas from a per-zone panel. */}
+      {!isZone && (
       <Section
         title={`All ${kindLabel} components`}
         /* Size is left out on purpose, and the request itself is the reason: "make same
@@ -570,6 +612,7 @@ export default function StyleTab({ node, topology, onUpdate, onUpdateKind }) {
           </p>
         )}
       </Section>
+      )}
     </>
   )
 }

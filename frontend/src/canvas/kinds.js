@@ -284,13 +284,37 @@ export const ZONE_SWATCHES = ['#606b85', '#0263e0', '#6f42c1', '#0e7c3a', '#e67e
  * tint is derived from the one hex rather than stored beside it, so the two cannot
  * be saved out of step.
  */
-export function zoneStyleFor({ id, color } = {}) {
-  if (color) return { bg: tint(color, 0.06), border: color }
-  /* By product, not by id, so a second copy of Connections is Connections blue. The two are the
-     same string for every zone that appears once -- see `zoneProductOf` in canvas/frames.js -- and
-     without this the copy would fall through to the custom-zone grey, which says "not Segment"
-     about a backdrop that is Connections. */
-  return ZONE_STYLES[id] ?? ZONE_STYLES[zoneProductOf(id)] ?? CUSTOM_ZONE
+/*
+ * A zone's own default look, before any override.
+ *
+ * Dashed and 2px, which is what `ZoneNode` used to hardcode into its class list. Stated here instead so
+ * a zone can be given the same style controls a component has: the renderer could not honour a border
+ * width it never read, and this function only ever returned a background and a border colour.
+ *
+ * Dashed is the default rather than solid on purpose -- a zone is a region, and a dashed edge reads as
+ * "this area" where a solid one reads as "this object". A reader who wants solid can now say so.
+ */
+const ZONE_DEFAULT = { borderStyle: 'dashed', borderWidth: 2, shape: 'rounded' }
+
+export function zoneStyleFor({ id, color, style } = {}) {
+  /*
+   * Three layers, outermost last: the product's own palette, then the single colour a zone can be
+   * given, then the explicit style overrides.
+   *
+   * The colour layer stays where it was and keeps deriving the background from it (`tint(color, 0.06)`)
+   * rather than being replaced by `style.bg`, because every diagram in existence relies on that
+   * derivation -- a zone with a colour and no explicit background has to stay tinted, not turn white.
+   * An explicit `bg` wins over the tint because a reader who picked a background meant it.
+   */
+  const base = color
+    ? { bg: tint(color, 0.06), border: color }
+    : /* By product, not by id, so a second copy of Connections is Connections blue. The two are the
+         same string for every zone that appears once -- see `zoneProductOf` in canvas/frames.js -- and
+         without this the copy would fall through to the custom-zone grey, which says "not Segment"
+         about a backdrop that is Connections. */
+      (ZONE_STYLES[id] ?? ZONE_STYLES[zoneProductOf(id)] ?? CUSTOM_ZONE)
+
+  return { ...ZONE_DEFAULT, ...base, ...(style ?? {}) }
 }
 
 function tint(hex, alpha) {

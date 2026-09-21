@@ -415,6 +415,26 @@ export function matchSize(nodes, ids, modelId) {
  * because the request asked for "make same size" and "apply same style" as two separate
  * actions, and one of them quietly doing the other is the failure that would follow.
  */
+/**
+ * One node with a patch applied, merging `style` and overwriting everything else.
+ *
+ * Pure and exported so the multi-select style write can be tested without a DOM -- `updateNodes` in
+ * AppShell.jsx is a `useCallback` around this, and the interesting behaviour is all here.
+ *
+ * The asymmetry is the whole of it. A reader who selects four cards and picks one border colour means
+ * "give all four this border", not "make all four identical" -- so each keeps its own background, and
+ * `style` merges. Everything else in a patch is a plain field and overwrites, as it does for one node.
+ *
+ * Deliberately *not* what `matchStyle` does: that one replaces the whole override, because "make these
+ * look like that one" can only mean it, and a merge would leave the receivers carrying keys the model
+ * does not have.
+ */
+export function patched(node, patch) {
+  const data = { ...node.data, ...patch }
+  if (patch?.style) data.style = { ...(node.data?.style ?? {}), ...patch.style }
+  return { ...node, data }
+}
+
 export function matchStyle(nodes, ids, modelId) {
   const members = selectedComponents(nodes, ids)
   const model = members.find((node) => node.id === modelId)

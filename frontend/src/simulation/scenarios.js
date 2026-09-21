@@ -41,7 +41,76 @@ export const PATH_COLORS = [
   '#354052', // slate
 ]
 
-export const PLAY_MODES = { together: 'together', sequence: 'sequence' }
+/*
+ * How several paths share the transport.
+ *
+ *   together  every run starts at tick zero and they advance side by side. For comparing two paths
+ *             that differ by one toggle, which is what the whole multi-path feature is for.
+ *   sequence  laid end to end, and a run that has finished stays lit. Still a comparison: by the last
+ *             tick the canvas holds the union of everywhere any path went.
+ *   chain     laid end to end, and the canvas *clears* between them.
+ *
+ * `chain` is the one to reach for when the several paths are several *events* rather than several
+ * accounts of one -- "this happens, then this happens". Keeping the finished run lit, as `sequence`
+ * does, then reads as one enormous simultaneous flood rather than as a sequence, because nothing ever
+ * goes out. It is a third mode rather than a change to `sequence` because the accumulation is
+ * deliberate and load-bearing there, as the note on `indicesAt` says.
+ */
+export const PLAY_MODES = { together: 'together', sequence: 'sequence', chain: 'chain' }
+
+/*
+ * What a path does with one component.
+ *
+ * Three states that have always existed and were never presented as a set. `excluded` and `disabled`
+ * are mutually exclusive fields on a scenario, they correspond exactly to the amber and red the reducer
+ * produces, and the only control for either was one `×` on a route bubble that toggled `excluded`. So a
+ * reader had no way to reach "the event stops here" at all, and no way to tell that it differed from
+ * "the event steps over this".
+ *
+ *   pass   the component acts on the event and the path continues  -> `passed`    green
+ *   skip   stepped over; the event carries on to whatever it feeds  -> `bypassed`  amber
+ *   block  the event stops here and nothing downstream receives it  -> `blocked`   red
+ *
+ * Named here rather than in the drawer because the canvas right-click menu offers the same three, and a
+ * second spelling of them in `commands/registry.js` is how the two surfaces would come to disagree.
+ * The *storage* stays as two arrays: this is a control over existing fields, not a schema change, so
+ * every saved path keeps working and nothing needs migrating.
+ */
+export const PATH_STATE = { pass: 'pass', skip: 'skip', block: 'block' }
+
+/** The three, with what a reader calls them and what each one does. One list, so both menus agree. */
+export const PATH_STATE_ROWS = [
+  [PATH_STATE.pass, 'Pass', 'The component acts on the event, and the path carries on.'],
+  [PATH_STATE.skip, 'Skip', 'The event steps over it and carries on to whatever it feeds.'],
+  [PATH_STATE.block, 'Block', 'The event stops here. Nothing downstream receives it.'],
+]
+
+/** Which state a path currently has a component in. Shared by the drawer and the menu. */
+export function pathStateFor(scenario, nodeId) {
+  if ((scenario?.disabled ?? []).includes(nodeId)) return PATH_STATE.block
+  if ((scenario?.excluded ?? []).includes(nodeId)) return PATH_STATE.skip
+  return PATH_STATE.pass
+}
+
+/**
+ * A scenario patch putting one component into one of the three states.
+ *
+ * Returns the whole patch rather than mutating, so the drawer and the context menu produce byte-identical
+ * changes and both land on the same undo stack. Setting any state clears the other two -- they are one
+ * choice -- and `revisit` is cleared for anything but Pass, because a component the event steps over or
+ * never reaches cannot be stopped at twice.
+ */
+export function pathStatePatch(scenario, nodeId, state) {
+  const without = (list) => (list ?? []).filter((id) => id !== nodeId)
+  return {
+    excluded: state === PATH_STATE.skip ? [...without(scenario?.excluded), nodeId] : without(scenario?.excluded),
+    disabled: state === PATH_STATE.block ? [...without(scenario?.disabled), nodeId] : without(scenario?.disabled),
+    ...(state === PATH_STATE.pass ? {} : { revisit: without(scenario?.revisit) }),
+  }
+}
+
+/** Do the runs play end to end, whichever way finished ones are treated? */
+export const isSequential = (mode) => mode === PLAY_MODES.sequence || mode === PLAY_MODES.chain
 
 /** The colour least used by `existing`, so the first few scenarios never collide. */
 export function nextColor(existing = []) {
@@ -175,7 +244,7 @@ export function runScenarios(graph, scenarios) {
 export function playbackLength(runs, mode = PLAY_MODES.together) {
   const lengths = (runs ?? []).map((run) => run.trace?.phases?.length ?? 0)
   if (lengths.length === 0) return 0
-  return mode === PLAY_MODES.sequence
+  return isSequential(mode)
     ? lengths.reduce((total, length) => total + length, 0)
     : Math.max(...lengths)
 }
@@ -213,7 +282,7 @@ export function tickDurations(runs, mode = PLAY_MODES.together, { hopMs } = {}) 
   )
 
   if (perRun.length === 0) return []
-  if (mode === PLAY_MODES.sequence) return perRun.flat()
+  if (isSequential(mode)) return perRun.flat()
 
   /* Played together, so tick n lasts as long as the slowest run's tick n. A run that has already
      finished contributes nothing rather than padding the tick to a full beat. */
@@ -226,16 +295,24 @@ export function tickDurations(runs, mode = PLAY_MODES.together, { hopMs } = {}) 
 /*
  * Which step of each run is showing at tick `tick`.
  *
- * `sequence` keeps the runs that have already played fully lit rather than
- * clearing them: the reason to play several paths at all is to compare them, and a
- * path that vanishes when the next one starts cannot be compared with it. So the
- * two modes differ in *timing* only -- which is exactly the distinction between
- * "in tandem" and "one after another" -- and not in what ends up on screen.
+ * `sequence` keeps the runs that have already played fully lit rather than clearing them: the reason
+ * to play several paths at all is usually to compare them, and a path that vanishes when the next one
+ * starts cannot be compared with it. So `together` and `sequence` differ in *timing* only -- exactly
+ * the distinction between "in tandem" and "one after another" -- and not in what ends up on screen.
+ *
+ * `chain` is the case that reasoning does not cover. When the several paths are several *events* in
+ * an order, a finished one staying lit means nothing ever goes out, and by the last tick the canvas
+ * shows every component every event touched, all at once -- the opposite of the sequence being
+ * demonstrated. So a run that has finished is rewound to `-1` and the diagram clears before the next
+ * event starts from its own source.
  */
 function indicesAt(runs, tick, mode) {
-  if (mode !== PLAY_MODES.sequence) {
+  if (!isSequential(mode)) {
     return runs.map((run) => ({ index: tick, playing: tick < (run.trace?.phases?.length ?? 0) }))
   }
+
+  /* Where a finished run is parked: its last frame, held for comparison, or nothing at all. */
+  const spent = mode === PLAY_MODES.chain ? null : 'last'
 
   let remaining = tick
   let started = true
@@ -248,7 +325,7 @@ function indicesAt(runs, tick, mode) {
       return { index, playing: true }
     }
     remaining -= length
-    return { index: length - 1, playing: false }
+    return { index: spent === 'last' ? length - 1 : -1, playing: false }
   })
 }
 
