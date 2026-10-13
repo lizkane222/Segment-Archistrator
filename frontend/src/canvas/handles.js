@@ -38,6 +38,7 @@
  */
 
 import { Position } from '@xyflow/react'
+import { endBox } from './edges/looseEnds.js'
 
 /*
  * East and west first, in that order, for the backwards-compatibility reason above. North and
@@ -226,6 +227,103 @@ const SIDE_BY_POSITION = new Map(SIDES.map((side) => [side.position, side]))
  */
 export function fixedHandleForSide(side) {
   return SIDE_BY_POSITION.get(side)?.id ?? null
+}
+
+/* Where along a side a connector sits when the side was *chosen* rather than dragged to.
+
+   The midpoint, which is the side's own natural point -- picking "top" from a menu says which side
+   and nothing about where along it, and anything else would be inventing a preference the reader
+   did not express. */
+const CHOSEN_SIDE_T = 0.5
+
+/**
+ * The edge fields that pin one end to a side, or release it back to the default.
+ *
+ * ## Why a chosen side is stored as an anchor
+ *
+ * A side picked from a menu has to *stick*, and there are three separate things that would
+ * otherwise move it: `onNodeDragStop` re-faces every end when either component moves,
+ * `fanOutAnchors` reassigns a share of the side when a sibling connector appears, and
+ * `facingSide` decides the side afresh for anything with no stated preference.
+ *
+ * All three already have one exception in common, and it is the *anchor*: an anchor means a reader
+ * placed this end deliberately, so the re-facing skips it, the fan-out excludes it, and
+ * `anchorPoint` in edges/FlowEdge.jsx honours it over the handle. Writing the choice as an anchor
+ * at the midpoint therefore buys every one of those behaviours -- plus `serializeEdge`'s
+ * round-trip and `reverseEdge`'s swap -- with no new field to store and nothing to migrate.
+ *
+ * The alternative, a `sideChosen: true` flag beside the handle, would mean teaching all five of
+ * those places about a second way of saying the same thing.
+ *
+ * @param end   'source' or 'target'
+ * @param side  a `Position` string (`'right'`), or null to hand the end back to `facingSide`
+ * @returns a patch for the *edge*, with `handle` for the top-level field and `anchor` for `data`.
+ *   Both `undefined` when releasing, which is what makes them go away rather than be stored as
+ *   null -- see `anchorStringFor`.
+ */
+export function endpointSidePatch(end, side) {
+  const key = end === 'source' ? 'sourceHandle' : 'targetHandle'
+  const anchorKey = end === 'source' ? 'sourceAnchor' : 'targetAnchor'
+  return {
+    handle: { [key]: side ? fixedHandleForSide(side) : null },
+    anchor: { [anchorKey]: side ? encodeFreeHandle(side, CHOSEN_SIDE_T) : undefined },
+  }
+}
+
+/**
+ * A node's absolute box as the geometry helpers here want it, or null while it is unmeasured.
+ *
+ * React Flow's *internal* node, not the document one: `internals.positionAbsolute` already has the
+ * parent chain applied and `measured` is what the browser actually laid out, which for a card the
+ * user has resized is the only version that matches the line on screen.
+ *
+ * Null rather than a guess for an unmeasured node, and every caller treats that as "no opinion" and
+ * leaves the handle alone. A node reports no size for the frame after it mounts, and a side computed
+ * from a zero-sized box is not merely imprecise, it is the wrong side roughly half the time.
+ */
+export function internalBox(node) {
+  const at = node?.internals?.positionAbsolute
+  const width = node?.measured?.width
+  const height = node?.measured?.height
+  return at && width && height ? { x: at.x, y: at.y, width, height } : null
+}
+
+/**
+ * A handle patch with any *released* end resolved to the side that now faces the other component.
+ *
+ * `endpointSidePatch(end, null)` -- the panel's `Auto` -- says "this end has no stated preference
+ * any more". It clears the anchor, which is where the preference actually lives, and nulls the
+ * handle. Storing that null is the bug this exists to prevent: React Flow resolves a null handle by
+ * taking the node's *first registered* one, which is whichever of the four happened to mount first
+ * and has nothing to do with where the other component is. Releasing an end therefore moved the
+ * line to an arbitrary side instead of the facing one -- observed jumping to the right-hand edge of
+ * a component whose partner was off-screen to the left.
+ *
+ * The null is still the right thing for the panel to *send*: it does not have measured geometry, and
+ * "no preference" is the honest description of what the button means. Resolving it belongs here,
+ * next to `facingSide`, with the same answer `onNodeDragStop` reaches for an anchor-less end -- so an
+ * end put back on Auto sits where it would have sat had it never been touched.
+ *
+ * @param boxOf  id -> box, normally `(id) => internalBox(getInternalNode(id))`
+ */
+export function resolveReleasedHandles(edge, handle, boxOf) {
+  const out = {}
+  for (const [key, value] of Object.entries(handle ?? {})) {
+    if (value != null) {
+      out[key] = value
+      continue
+    }
+    const end = key === 'sourceHandle' ? 'source' : 'target'
+    /* `endBox`, so an end whose partner is loose -- a point, not a component, see
+       edges/looseEnds.js -- still faces it. */
+    const near = endBox(edge, end, boxOf)
+    const far = endBox(edge, end === 'source' ? 'target' : 'source', boxOf)
+    /* `facingSide` is null for an unmeasured pair and `fixedHandleForSide(null)` is null too, so an
+       end released before its components are laid out keeps the null it would have had anyway.
+       No worse than today, and the next node drag re-faces it. */
+    out[key] = fixedHandleForSide(facingSide(near, far))
+  }
+  return out
 }
 
 /**

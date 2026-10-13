@@ -22,7 +22,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from apps.auth_workspace.crypto import TokenDecryptionError, rotate_token
-from apps.auth_workspace.models import WorkspaceSession
+from apps.auth_workspace.models import RememberedConnection, WorkspaceSession
 
 BATCH_SIZE = 200
 
@@ -74,6 +74,35 @@ class Command(BaseCommand):
 
         verb = "Would re-encrypt" if dry_run else "Re-encrypted"
         self.stdout.write(self.style.SUCCESS(f"{verb} {rotated} session token(s)."))
+
+        # Remembered connections hold the same ciphertext under the same keys. Missing
+        # them here would be silent until step 5 dropped the old key and every signed-in
+        # account's saved connection stopped decrypting.
+        remembered_rotated = 0
+        remembered_unreadable = []
+        for row in RememberedConnection.objects.only("id", "encrypted_token").iterator(
+            chunk_size=BATCH_SIZE
+        ):
+            try:
+                new_blob = rotate_token(row.encrypted_token)
+            except TokenDecryptionError:
+                remembered_unreadable.append(row.id)
+                continue
+            if not dry_run:
+                RememberedConnection.objects.filter(pk=row.pk).update(encrypted_token=new_blob)
+            remembered_rotated += 1
+        self.stdout.write(
+            self.style.SUCCESS(f"{verb} {remembered_rotated} remembered connection token(s).")
+        )
+        if remembered_unreadable:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"{len(remembered_unreadable)} remembered connection(s) could not be "
+                    "decrypted under any configured key."
+                )
+            )
+            if options["purge_unreadable"] and not dry_run:
+                RememberedConnection.objects.filter(id__in=remembered_unreadable).delete()
 
         if not unreadable:
             self.stdout.write("All stored tokens are readable under the current keys.")

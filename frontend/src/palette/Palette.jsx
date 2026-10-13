@@ -7,9 +7,12 @@
  *   Components — the topology kinds. Always available, no network.
  *   Catalog    — the global Segment catalog from Postgres. Costs the customer no
  *                rate budget, so search-as-you-type is safe here.
- *   Workspace  — the customer's real components, already in memory from
- *                /api/workspace/graph. Filtered locally.
- *   Events     — the five event types, for the simulator rather than the canvas.
+ *   Workspace  — the customer's real components, read once on connect from
+ *                /api/workspace/graph and filtered locally. Listed, never put on the canvas
+ *                by themselves: drag one onto a card to bind it, onto empty canvas to add it,
+ *                or "Visualize all" to open the whole workspace in a new tab.
+ *   Events     — the five event types, their payloads and saved examples, for the simulator
+ *                rather than the canvas. See EventsTab.jsx.
  *
  * Everything draggable sets the same dataTransfer payload, so Canvas has one drop
  * handler regardless of which tab the item came from.
@@ -17,10 +20,14 @@
 
 import { useEffect, useMemo, useReducer, useState } from 'react'
 
+import EventsTab from './EventsTab.jsx'
 import ShapesTab from './ShapesTab.jsx'
 import {
   Box,
   Boxes,
+  Check,
+  LayoutGrid,
+  RefreshCw,
   ChevronDown,
   ChevronRight,
   Filter as FilterIcon,
@@ -33,7 +40,8 @@ import {
 import { catalog as catalogApi } from '../services/api.js'
 import { DRAG_MIME } from '../canvas/Canvas.jsx'
 import { groupSections } from '../canvas/grouping.js'
-import { EVENT_KINDS, KIND_STYLES, iconFor, zoneStyleFor } from '../canvas/kinds.js'
+import { boundSegmentIds } from '../binding/bindMatch.js'
+import { KIND_STYLES, iconFor, zoneStyleFor } from '../canvas/kinds.js'
 import {
   BOUND_ANY,
   BOUND_NO,
@@ -59,8 +67,15 @@ const SINGLETON_KINDS = new Set(['identity_resolution', 'profile_api'])
 export default function Palette({
   topology,
   graph,
+  /* The diagram on the canvas, as opposed to `graph`, which is the workspace. The Events tab reads the
+     identity resolution rules drawn on it. */
+  diagram,
   zonesOnCanvas,
   workspaceReason,
+  workspaceStatus = 'idle',
+  workspaceError = null,
+  onRetryWorkspace,
+  onVisualizeAll,
   onConnect,
   onStartSimulation,
 }) {
@@ -131,6 +146,10 @@ export default function Palette({
           <WorkspaceTab
             topology={topology}
             graph={graph}
+            diagram={diagram}
+            status={workspaceStatus}
+            error={workspaceError}
+            onRetry={onRetryWorkspace}
             workspaceReason={workspaceReason}
             onConnect={onConnect}
             filters={filters}
@@ -138,9 +157,25 @@ export default function Palette({
           />
         )}
         {filters.tab === TABS.events && (
-          <EventsTab onStartSimulation={onStartSimulation} />
+          <EventsTab diagram={diagram} onStartSimulation={onStartSimulation} />
         )}
       </div>
+
+      {filters.tab === TABS.workspace && !workspaceReason && graph && (
+        <div className="shrink-0 border-t border-twilio-gray-20 p-3">
+          <button
+            type="button"
+            onClick={onVisualizeAll}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-twilio-blue px-3 py-2 text-xs font-medium text-white hover:bg-twilio-blue-dark"
+          >
+            <LayoutGrid size={13} aria-hidden="true" />
+            Visualize all
+          </button>
+          <p className="mt-1.5 text-center text-[10px] text-twilio-gray-60">
+            Opens all {graph.nodes?.length ?? 0} components in a new tab.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -421,7 +456,18 @@ function CatalogTab({ filters, dispatch }) {
   )
 }
 
-function WorkspaceTab({ topology, graph, workspaceReason, onConnect, filters, dispatch }) {
+function WorkspaceTab({
+  topology,
+  graph,
+  diagram,
+  status,
+  error,
+  onRetry,
+  workspaceReason,
+  onConnect,
+  filters,
+  dispatch,
+}) {
   /* The only tab that needs a token. Said here, with the way out attached,
      rather than left to fail as a 403 on the fetch behind it. */
   if (workspaceReason) {
@@ -440,10 +486,30 @@ function WorkspaceTab({ topology, graph, workspaceReason, onConnect, filters, di
   }
 
   if (!graph) {
-    return <Hint>Load the workspace to see its real components.</Hint>
+    if (status === 'error') {
+      return (
+        <div className="space-y-2">
+          <Hint>Could not read the workspace{error ? `: ${error}` : '.'}</Hint>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="rounded-md border border-twilio-gray-20 px-2.5 py-1.5 text-[11px] text-twilio-gray-60 hover:border-twilio-gray-40 hover:text-twilio-navy"
+          >
+            Try again
+          </button>
+        </div>
+      )
+    }
+    return (
+      <div className="flex items-center gap-2 text-[11px] text-twilio-gray-60">
+        <RefreshCw size={12} className="animate-spin" aria-hidden="true" />
+        Reading the workspace’s components… a large workspace can take a minute.
+      </div>
+    )
   }
 
   const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters)
+  const onCanvas = boundSegmentIds(diagram?.nodes)
   const spaces = (graph.nodes ?? []).filter((node) => node.kind === 'space')
 
   return (
@@ -480,7 +546,11 @@ function WorkspaceTab({ topology, graph, workspaceReason, onConnect, filters, di
         {nodes.length} of {graph.nodes?.length ?? 0} components
       </p>
 
-      <WorkspaceSections nodes={nodes} topology={topology} />
+      <Hint>
+        Drag a component onto a card of the same kind to bind it, or onto empty canvas to add it.
+      </Hint>
+
+      <WorkspaceSections nodes={nodes} topology={topology} onCanvas={onCanvas} />
     </div>
   )
 }
@@ -499,7 +569,7 @@ const FOLD_ABOVE = 20
  * Its own component because WorkspaceTab returns early for a missing token, and a hook
  * behind an early return is a hook that is sometimes called.
  */
-function WorkspaceSections({ nodes, topology }) {
+function WorkspaceSections({ nodes, topology, onCanvas }) {
   const sections = useMemo(() => groupSections(nodes, topology), [nodes, topology])
   const [closed, setClosed] = useState(null)
 
@@ -550,6 +620,7 @@ function WorkspaceSections({ nodes, topology }) {
                     kind={node.kind}
                     label={node.name}
                     hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
+                    placed={onCanvas?.has(node.segmentId)}
                     /* Dragging a real workspace component onto the canvas carries its
                        ids and links with it, so it lands already bound. */
                     payload={{ name: node.name, bound: true, data: node }}
@@ -564,43 +635,9 @@ function WorkspaceSections({ nodes, topology }) {
   )
 }
 
-function EventsTab({ onStartSimulation }) {
-  return (
-    <div className="space-y-3">
-      <Hint>
-        Events are not components — they flow through the diagram. Pick one to open
-        the simulator.
-      </Hint>
-      <div className="space-y-1">
-        {Object.entries(EVENT_KINDS).map(([type, spec]) => {
-          const Icon = spec.icon
-          return (
-            <button
-              key={type}
-              type="button"
-              onClick={() => onStartSimulation?.(type)}
-              className="flex w-full items-center gap-2 rounded-md border border-twilio-gray-20 bg-white px-2.5 py-2 text-left transition-colors hover:border-twilio-blue hover:bg-twilio-blue-light"
-            >
-              <Icon size={14} className="shrink-0 text-twilio-gray-60" aria-hidden="true" />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[12px] font-semibold text-twilio-navy">
-                  {spec.label}
-                </span>
-                <span className="block truncate text-[10px] text-twilio-gray-60">
-                  {spec.hint}
-                </span>
-              </span>
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 /* --- pieces --------------------------------------------------------------- */
 
-function DraggableItem({ kind, label, hint, logo, icon, payload, disabled = false }) {
+function DraggableItem({ kind, label, hint, logo, icon, payload, disabled = false, placed = false }) {
   const Icon = icon ?? iconFor(kind)
 
   return (
@@ -628,6 +665,12 @@ function DraggableItem({ kind, label, hint, logo, icon, payload, disabled = fals
           <span className="block truncate text-[10px] text-twilio-gray-60">{hint}</span>
         )}
       </span>
+      {placed && (
+        <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-twilio-success" title="Bound to a component on this canvas">
+          <Check size={11} aria-hidden="true" />
+          On canvas
+        </span>
+      )}
     </div>
   )
 }

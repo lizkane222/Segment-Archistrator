@@ -202,6 +202,18 @@ const NARRATION = {
        teaching exactly that. */
     caveat: 'Not event-driven. It runs against the warehouse on a schedule, so no single event decides membership — and nothing here can read the entity data to guess at it.',
   },
+  linked_event: {
+    what: (data) =>
+      `The event does pass through here, and comes out larger: ${
+        data.entity ? `the ${data.entity} entity is` : 'a warehouse entity is'
+      } looked up from a key the event already carries and joined onto it, so the destination receives the whole row rather than just the id.`,
+    why: 'The event knows a `product_id`; the destination needs the name, the price and the category. Those live in the warehouse, and this is what puts them on the payload without the source having to send them.',
+    /* Three things a reader gets wrong about this, and each of them looks like a bug in the
+       diagram rather than a fact about the feature -- so all three are said rather than the one
+       that is nominally the caveat. */
+    caveat:
+      'Reads from a cache, not from the warehouse live: the entity is pulled on a schedule (15 minutes to a day), so a row written seconds ago may not be joined yet. Cloud-mode actions destinations only, and the source debugger sits ahead of the enrichment — so a test event arrives looking un-enriched even when it worked.',
+  },
   data_graph: {
     what: 'Nothing passes through. It is the model that says which warehouse tables exist and how they join, which is what makes an entity reachable from a profile.',
     why: 'Without it a Linked Audience has nothing to traverse: the Data Graph is where "an account has many orders" is written down.',

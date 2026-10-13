@@ -19,12 +19,12 @@
  *    styles/tokens.css, not here: React Flow puts `grab` on the node element that
  *    wraps this one, and a rule in a component whose element is click-through cannot
  *    override it.
- *  - The resize floor is flat, not computed from the children. It used to be their
- *    extents, so a handle stopped dead at the last component in the way and a zone
- *    laid out once could never be tightened up. The contents come with it instead,
- *    which Canvas does from the `dimensions` change this resizer emits -- not from
- *    here, because the nodes this component can see are the collapsed *view* and the
- *    ones that have to move are the document's.
+ *  - The resize floor on the `NodeResizer` below is flat, and the real one is not here at
+ *    all. A zone stops shrinking at the box its own children occupy, which is a different
+ *    number for every zone and changes as things are dragged -- so it is applied to the
+ *    `dimensions` change in Canvas (`clampZoneResize`) rather than passed as a prop.
+ *    `ResizeControl`'s effect is keyed on `minWidth` and its cleanup destroys the resizer,
+ *    so a floor that changed mid-drag would end the gesture it was meant to limit.
  */
 
 import { memo, useState } from 'react'
@@ -38,6 +38,7 @@ import { useChrome } from '../chrome.js'
 import { hasFormatting } from '../richText.js'
 import { MIN_ZONE_HEIGHT, MIN_ZONE_WIDTH } from '../layout.js'
 import { zoneStyleFor } from '../kinds.js'
+import { fieldShown } from '../../inspector/cardFields.js'
 
 /*
  * The corner treatments a zone can take, as classes rather than radii.
@@ -101,11 +102,13 @@ function ZoneNode({ id, data, selected }) {
   return (
     <>
       <NodeResizer
-        /* All eight handles: a zone grows in whichever direction the architecture
-           it holds grew. None of them on a locked zone -- resizing a zone moves every
-           component in it (`scaleZoneChildren`), which is the most placement a single
-           gesture on this canvas can change, and so the first thing a lock has to stop. */
+        /* All eight handles: a zone grows in whichever direction the architecture it holds
+           grew. None of them on a locked zone -- a top or left handle moves the zone's origin
+           as well as its size, so resizing is a placement change and a lock on placement has
+           to stop it. */
         isVisible={selected && !data.locked}
+        /* The floor a *drag* stops at, and deliberately not the one that matters: the real
+           floor is the zone's own contents and is applied in Canvas. See the module header. */
         minWidth={MIN_ZONE_WIDTH}
         minHeight={MIN_ZONE_HEIGHT}
         color={style.border}
@@ -202,7 +205,12 @@ function ZoneNode({ id, data, selected }) {
           </div>
           {/* On its own line rather than sharing the label row, so wrapping to two or three
               lines does not crowd the lock icon or the "nothing here yet" hint. */}
-          {data.description && (
+          {/* Shown unless the reader has turned it off. `fallback` is doing real work: the shared
+              registry defaults `description` to *off*, which is right for a 200px component card on
+              a diagram holding forty of them and wrong for a region whose description is its
+              subtitle -- taking the card default blanked every zone description in every existing
+              diagram at once. See `fieldShown`. */}
+          {data.description && fieldShown(data, 'description', { fallback: true }) && (
             <div className="mt-0.5 max-w-md whitespace-normal break-words text-[10px] text-twilio-gray-60">
               {data.description}
             </div>

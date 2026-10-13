@@ -253,6 +253,12 @@ const NO_CHROME = {
      later edit has too. */
   updateData: null,
   onWaypoints: null,
+  /* How a connector moves one of its own ends, and how it works out where a release would
+     land -- see `onEndpointMove` and `endpointDropTarget` in canvas/Canvas.jsx. Null for the
+     same reason `onWaypoints` is: an edge rendered outside the canvas draws itself and offers
+     no handles, and `FlowEdge` gates the grips on these being present. */
+  onEndpointMove: null,
+  endpointDropTarget: null,
   walkthroughActive: false,
   flowPreview: null,
   routes: null,

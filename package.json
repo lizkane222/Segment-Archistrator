@@ -1,7 +1,7 @@
 {
-  "name": "segment-archistrator",
+  "name": "archistrator",
   "private": true,
   "scripts": {
-    "segment-archistrator": "bash scripts/segment-builder.sh"
+    "archistrator": "bash scripts/segment-builder.sh"
   }
 }

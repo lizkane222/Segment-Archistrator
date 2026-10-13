@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { outlineFor, styleFor , zoneStyleFor } from './kinds.js'
+import { borderColorFor, outlineFor, styleFor, zoneStyleFor } from './kinds.js'
 
 describe('styleFor', () => {
   it('carries an outline default, so the inspector has something to reset to', () => {
@@ -102,5 +102,68 @@ describe('zoneStyleFor', () => {
     expect(style.bg).toBe('#ffffff')
     /* Unmentioned fields still come from the layers underneath -- an override is additive. */
     expect(style.border).toBe('#336699')
+  })
+})
+
+/*
+ * A component takes the colour of the zone it is in.
+ *
+ * The half of "a component dropped into a zone adopts its styles" that is not parenting. The
+ * parenting half is `reparentTarget`/`withParent` and is covered in rules.test.js; this is what
+ * makes the card *look* like it moved, and it is resolved live at render time from the zone node's
+ * own data rather than copied onto the component -- which is why recolouring a region recolours
+ * everything in it, and why a card dragged between zones changes colour with no write at all.
+ *
+ * Worth its own block despite the "a test that a warehouse is grey is a copy of the table" rule in
+ * the header above, because this is a precedence and not a value: three sources want the same CSS
+ * property, and the order between them is the behaviour.
+ */
+describe('borderColorFor', () => {
+  it('takes the zone’s colour over the kind’s own', () => {
+    /* A source is blue by kind; dropped in Unify it goes purple, because on this canvas colour
+       says which region a thing is in rather than what kind of thing it is. */
+    const inUnify = borderColorFor({ kind: 'source' }, { id: 'unify' })
+    expect(inUnify).toBe(zoneStyleFor({ id: 'unify' }).border)
+    expect(inUnify).not.toBe(borderColorFor({ kind: 'source' }, null))
+  })
+
+  it('follows a zone that has been recoloured', () => {
+    expect(borderColorFor({ kind: 'source' }, { id: 'unify', color: '#336699' })).toBe('#336699')
+  })
+
+  it('falls back to the kind outside every zone, rather than to a neutral grey', () => {
+    /* The working area is a legitimate place to park something, and a column of identically grey
+       cards there would lose the one signal a card still has. */
+    expect(borderColorFor({ kind: 'source' }, null)).toBe(borderColorFor({ kind: 'source' }))
+    expect(borderColorFor({ kind: 'source' })).not.toBe(borderColorFor({ kind: 'audience' }))
+  })
+
+  it('lets a hand-picked colour win over the zone', () => {
+    /* The whole promise of the adopt-on-drop behaviour being automatic: it only ever fills a
+       silence. Someone who coloured a card meant it, and dragging it must not undo that. */
+    expect(borderColorFor({ kind: 'source', style: { border: '#ff0000' } }, { id: 'unify' })).toBe(
+      '#ff0000',
+    )
+  })
+
+  it('resolves a duplicated zone by its product, like everything else', () => {
+    expect(borderColorFor({ kind: 'source' }, { id: 'connections~2' })).toBe(
+      borderColorFor({ kind: 'source' }, { id: 'connections' }),
+    )
+  })
+
+  it('gives a sub-zone’s occupant the product colour, not a doubled tint', () => {
+    /* A sub-zone borrows its parent's border (`subZoneOf`), so a card in Profiles is the same
+       purple as one on the bare Unify backdrop -- which is what stops a region reading as a
+       fourth product. */
+    expect(borderColorFor({ kind: 'profile' }, { id: 'profiles' })).toBe(
+      borderColorFor({ kind: 'profile' }, { id: 'unify' }),
+    )
+  })
+
+  it('gives the new Linked Events region the Connections blue its contents expect', () => {
+    expect(borderColorFor({ kind: 'linked_event' }, { id: 'linked_events' })).toBe(
+      borderColorFor({ kind: 'source' }, { id: 'connections' }),
+    )
   })
 })

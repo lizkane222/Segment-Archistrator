@@ -21,6 +21,7 @@ import {
   newTab,
   nextActiveId,
   nextTabId,
+  restoreTabs,
   visibleTabs,
 } from './tabs.js'
 import { UNTITLED } from './useDiagrams.js'
@@ -30,6 +31,34 @@ const saved = (name = 'Acme CDP', id = 'dg_1') =>
     doc: { id, name, description: 'x', sourceTemplate: 'end-to-end', updatedAt: '2026-09-01' },
     graph: { nodes: [{ id: 'src:1' }], edges: [], zones: [] },
   })
+
+describe('restoreTabs', () => {
+  /* The bug: the id counter restarts at zero on every page load, so the first tab opened after a
+     reload was minted with the same id as a restored one -- and the strip highlighted both as
+     active and could not select either on its own. */
+  it('never mints an id that a restored tab already holds', () => {
+    const restored = restoreTabs([{ id: 'tab:900' }, { id: 'tab:901' }])
+    const fresh = Array.from({ length: 5 }, () => newTab().id)
+    const all = [...restored.map((tab) => tab.id), ...fresh]
+    expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('re-ids a duplicate already in storage rather than dropping it', () => {
+    const restored = restoreTabs([
+      { id: 'tab:950', doc: { id: 'dg_a' } },
+      { id: 'tab:950', doc: { id: 'dg_b' } },
+    ])
+    expect(restored).toHaveLength(2)
+    expect(restored[0].id).toBe('tab:950')
+    expect(restored[1].id).not.toBe('tab:950')
+    expect(restored[1].doc.id).toBe('dg_b')
+  })
+
+  it('keeps unique ids as they were, so whatever is keyed on them still lines up', () => {
+    const tab = { id: 'tab:960', dirty: true }
+    expect(restoreTabs([tab])[0]).toBe(tab)
+  })
+})
 
 describe('newTab', () => {
   it('gives every tab its own id', () => {

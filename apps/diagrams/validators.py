@@ -29,6 +29,7 @@ retroactively makes every already-saved diagram unsaveable from an older tab. A
 kind we do not recognise carries no rules we could be enforcing.
 """
 
+import math
 from apps.segmentapi import topology
 
 MAX_ERRORS = 12
@@ -143,6 +144,18 @@ def placement_advisories(graph: dict) -> list[str]:
     return [note["message"] for note in placement_notes(graph)]
 
 
+def _is_point(value) -> bool:
+    """An `{x, y}` of real numbers -- where a loose connector end stops on the canvas."""
+    if not isinstance(value, dict):
+        return False
+    return all(
+        isinstance(value.get(axis), (int, float))
+        and not isinstance(value.get(axis), bool)
+        and math.isfinite(value.get(axis))
+        for axis in ("x", "y")
+    )
+
+
 def validate_architecture(graph: dict) -> list[str]:
     """
     Return human-readable reasons the graph is not a valid architecture.
@@ -184,9 +197,22 @@ def validate_architecture(graph: dict) -> list[str]:
             continue
         source, target = edge.get("source"), edge.get("target")
         known = kinds.keys() | zone_ids
-        if source not in known or target not in known:
-            missing = source if source not in known else target
-            errors.append(f"Edge {source} -> {target} references a node that is not in the graph: {missing}.")
+        # A loose end -- a connector drawn to a component that does not exist yet -- is a null
+        # end plus the point it stops at. One may be loose; both is a line connecting nothing.
+        loose = {
+            end: edge.get(end) is None and _is_point(edge.get(f"{end}Point"))
+            for end in ("source", "target")
+        }
+        if loose["source"] and loose["target"]:
+            errors.append(f"Edge {edge.get('id')} is not attached to anything at either end.")
+            continue
+        missing = [
+            value
+            for end, value in (("source", source), ("target", target))
+            if not loose[end] and value not in known
+        ]
+        if missing:
+            errors.append(f"Edge {source} -> {target} references a node that is not in the graph: {missing[0]}.")
             continue
 
     if len(errors) > MAX_ERRORS:

@@ -61,6 +61,23 @@ def is_placeholder(node: dict) -> bool:
     return fields.get("bindable", True) is not False
 
 
+def has_bound_nodes(graph: dict) -> bool:
+    """
+    Does this graph hold any component bound to a real workspace resource?
+
+    A bound node is the evidence that a diagram is *about* a particular workspace,
+    which is what stamping `workspace_id` on save keys off. Same flat-or-nested read
+    as `is_placeholder`.
+    """
+    for node in (graph or {}).get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        fields = {**node, **(node.get("data") or {})}
+        if fields.get("bound") and fields.get("segmentId"):
+            return True
+    return False
+
+
 class Template(models.Model):
     """
     A reference architecture. v1 ships builtin templates only, seeded from

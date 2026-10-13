@@ -31,6 +31,8 @@ export function useDiagrams() {
   const [loadingLists, setLoadingLists] = useState(true)
   const [busy, setBusy] = useState(null) // 'open' | 'save' | 'delete' | null
   const [current, setCurrent] = useState(blank)
+  /* See `openDiagram`. Null for anything not opened from the server. */
+  const [openedWorkspace, setOpenedWorkspace] = useState(null)
   /* null means "never persisted", which counts as dirty: a template that has been
      opened but not saved has changes worth keeping, even untouched. */
   const [savedPrint, setSavedPrint] = useState(null)
@@ -92,6 +94,11 @@ export function useDiagrams() {
         sourceTemplate: diagram.source_template ?? '',
         updatedAt: diagram.updated_at ?? null,
       })
+      /* Which workspace its bound components came from, and whether this account can get
+         back there. Held apart from `current` -- it is a fact about the server's copy, not
+         part of the document a tab carries -- and read by the shell to resume the
+         connection. */
+      setOpenedWorkspace(diagram.workspace ?? null)
       return diagram.graph ?? { nodes: [], edges: [] }
     } finally {
       setBusy(null)
@@ -258,6 +265,7 @@ export function useDiagrams() {
     loadingLists,
     busy,
     current,
+    openedWorkspace,
     refresh,
     openTemplate,
     openDiagram,

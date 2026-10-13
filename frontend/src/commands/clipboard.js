@@ -15,6 +15,7 @@
 import { serializeEdge, serializeNode } from '../diagram/serialize.js'
 import { explainMisplacement, isValidPlacement } from '../canvas/rules.js'
 import { isGroupStackId } from '../canvas/grouping.js'
+import { looseEnds } from '../canvas/edges/looseEnds.js'
 
 export const CLIPBOARD_KEY = 'segment-builder:clipboard'
 
@@ -61,8 +62,15 @@ export function copyNodes(nodes, edges, ids) {
   const inside = new Set(picked.map((node) => node.id))
   return {
     nodes: picked.map(serializeNode),
+    /* A connector left loose at one end (see canvas/edges/looseEnds.js) comes too when the end it
+       *is* attached to is copied -- it is part of that component's drawing, not a link to something
+       outside the clip. */
     edges: (edges ?? [])
-      .filter((edge) => inside.has(edge.source) && inside.has(edge.target))
+      .filter((edge) => {
+        const free = looseEnds(edge)
+        if (free.source && free.target) return false
+        return (free.source || inside.has(edge.source)) && (free.target || inside.has(edge.target))
+      })
       .map(serializeEdge),
   }
 }
@@ -197,14 +205,27 @@ export function pasteNodes(clip, { nodes = [], topology, zone, position } = {}) 
 
   const edges = (clip?.edges ?? [])
     .map((edge) => {
-      const source = idMap.get(edge.source)
-      const target = idMap.get(edge.target)
-      if (!source || !target) return null
+      const source = edge.source == null ? null : idMap.get(edge.source)
+      const target = edge.target == null ? null : idMap.get(edge.target)
+      /* One end may be loose, and then it keeps its point -- shifted with everything else, so the
+         pasted connector points the same way from its copy as the original did. */
+      const looseSource = edge.source == null && edge.sourcePoint
+      const looseTarget = edge.target == null && edge.targetPoint
+      if ((!source && !looseSource) || (!target && !looseTarget) || (!source && !target)) return null
+      const shift = (point) => ({
+        x: Math.round((point.x ?? 0) + shiftX),
+        y: Math.round((point.y ?? 0) + shiftY),
+      })
       return {
         ...edge,
-        id: `${source}->${target}`,
+        id: source && target ? `${source}->${target}` : `${source ?? target}->loose:${suffix()}`,
         source,
         target,
+        ...(looseSource ? { sourcePoint: shift(edge.sourcePoint) } : {}),
+        ...(looseTarget ? { targetPoint: shift(edge.targetPoint) } : {}),
+        /* Hand-placed bends are absolute, so they move with the paste too, or the copy's line would
+           run back to the original's bends. */
+        ...(edge.waypoints?.length ? { waypoints: edge.waypoints.map(shift) } : {}),
         /* Never `discovered`. These were facts about the customer's workspace; a copy
            of one is a connection the user drew, and `toFlowEdge` reads this to decide
            whether it may be deleted again. */

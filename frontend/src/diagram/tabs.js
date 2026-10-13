@@ -53,6 +53,34 @@ export function nextTabId() {
 }
 
 /**
+ * Tabs coming back from storage, with ids that cannot collide.
+ *
+ * The counter above starts from zero on every page load, but a restored tab keeps the id it was
+ * stored with -- so without this, the first tab opened after a reload was minted `tab:1` beside a
+ * restored `tab:1`. Two tabs with one id are one tab as far as everything keyed on it is concerned:
+ * the strip highlighted both and could select neither apart, and the unmount capture wrote one
+ * pane's graph into both. And because the session is rewritten from tab state, the duplicate was
+ * stored and came back on the next load too.
+ *
+ * So the counter is moved past every restored id, and a duplicate already in storage gets a fresh
+ * id rather than being dropped -- its doc may differ from its twin's, and dropping it could lose
+ * the only copy of something. Other fields are passed through untouched (`dirty` included), so
+ * the caller can key anything else it seeds from the restored set on the same ids.
+ */
+export function restoreTabs(list) {
+  for (const tab of list ?? []) {
+    const match = /^tab:(\d+)$/.exec(tab?.id ?? '')
+    if (match) counter = Math.max(counter, Number(match[1]))
+  }
+  const seen = new Set()
+  return (list ?? []).map((tab) => {
+    const id = tab?.id && !seen.has(tab.id) ? tab.id : nextTabId()
+    seen.add(id)
+    return id === tab?.id ? tab : { ...tab, id }
+  })
+}
+
+/**
  * A new tab.
  *
  * `graph` may be null, which means "nothing loaded yet" -- a blank tab. That is distinct from an
@@ -167,7 +195,7 @@ export function useTabs(initial, restored = {}) {
   /* Mapped through `newTab` rather than trusted as-is: a restored tab comes from storage, so it
      may be missing a field a later build added, and `newTab` is where a tab's defaults live. */
   const [tabs, setTabs] = useState(() =>
-    initial?.length ? initial.map((tab) => newTab(tab)) : [newTab()],
+    initial?.length ? restoreTabs(initial).map((tab) => newTab(tab)) : [newTab()],
   )
   /* The tab that was on screen, when it is still among them. Falls back to the first rather than
      to nothing, so a stored id that no longer matches cannot leave the strip with no selection. */

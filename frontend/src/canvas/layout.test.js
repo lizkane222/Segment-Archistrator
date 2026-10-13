@@ -12,7 +12,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
   COMPONENT_Z,
-  MIN_CHILD_GAP,
   MIN_ZONE_HEIGHT,
   MIN_ZONE_WIDTH,
   NODE_HEIGHT,
@@ -23,10 +22,10 @@ import {
   componentSize,
   droppedZoneSize,
   growZones,
+  clampZoneResize,
   minZoneSize,
   orderForFlow,
-  scaleFloor,
-  scaleZoneChildren,
+  EDGE_HANDLE_Z,
   SELECTED_EDGE_LIFT,
   edgeZFor,
   toFlowEdge,
@@ -755,7 +754,18 @@ describe('orderForFlow', () => {
   })
 })
 
-describe('scaleZoneChildren', () => {
+/*
+ * A zone resize, and what it must not do.
+ *
+ * Every case here is a variation on one claim: the children do not move. That is a change of
+ * behaviour rather than a detail -- `scaleZoneChildren` used to multiply each child's position
+ * by the resize ratio, so tightening Segment rearranged everything inside it. See
+ * `clampZoneResize`'s header for why that was the wrong trade.
+ *
+ * The other half is the floor. A zone stops at `minZoneSize`, which is what makes the handle
+ * stop where it stopped instead of `growZones` snapping the zone back out a gesture later.
+ */
+describe('clampZoneResize', () => {
   const zone = (id, size, extra = {}) => ({
     id: zoneNodeId(id),
     type: 'zone',
@@ -765,130 +775,196 @@ describe('scaleZoneChildren', () => {
     data: { id },
     ...extra,
   })
-  const child = (id, parent, position) => ({
+  const child = (id, parent, position, box = { width: NODE_WIDTH, height: NODE_HEIGHT }) => ({
     id,
     type: 'segmentNode',
     parentId: zoneNodeId(parent),
     position,
-    data: { id, zone: parent },
+    data: { id, zone: parent, size: box },
   })
 
-  it('scales a child position by the same ratio the zone changed', () => {
+  it('honours a shrink that its contents leave room for', () => {
+    const nodes = [zone('connections', { width: 1000, height: 500 }), child('a', 'connections', { x: 0, y: 0 })]
+    /* The card needs 200 + 20 across and 60 + 20 down, so 600x300 is well clear. */
+    expect(clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, { width: 600, height: 300 })).toEqual({
+      width: 600,
+      height: 300,
+    })
+  })
+
+  it('does not move or resize a single child', () => {
+    /* The whole complaint, in one assertion: the nodes array is not even returned, because
+       there is nothing this function is entitled to change about it. */
     const nodes = [zone('connections', { width: 1000, height: 500 }), child('a', 'connections', { x: 400, y: 200 })]
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 1000, height: 500 }, { width: 500, height: 250 })
-    expect(scaled.find((n) => n.id === 'a').position).toEqual({ x: 200, y: 100 })
+    clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, { width: 500, height: 250 })
+    expect(nodes[1].position).toEqual({ x: 400, y: 200 })
+    expect(nodes[1].data.size).toEqual({ width: NODE_WIDTH, height: NODE_HEIGHT })
   })
 
-  it('leaves component sizes alone', () => {
-    /* A 200x60 card at 60% is unreadable. What is being adjusted is the arrangement,
-       not the type size. */
-    const nodes = [
-      zone('connections', { width: 1000, height: 500 }),
-      { ...child('a', 'connections', { x: 400, y: 200 }), measured: { width: NODE_WIDTH, height: NODE_HEIGHT } },
-    ]
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 1000, height: 500 }, { width: 500, height: 250 })
-    const card = scaled.find((n) => n.id === 'a')
-    expect(card.measured).toEqual({ width: NODE_WIDTH, height: NODE_HEIGHT })
-    expect(card.width).toBeUndefined()
+  it('stops at the box its contents occupy', () => {
+    const nodes = [zone('connections', { width: 1000, height: 500 }), child('a', 'connections', { x: 700, y: 300 })]
+    /* 700 + 200 + CHILD_MARGIN across, 300 + 60 + CHILD_MARGIN down. The requested 300x200 is
+       far inside that, so the floor is what comes back. */
+    expect(clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, { width: 300, height: 200 })).toEqual(
+      minZoneSize(zoneNodeId('connections'), nodes),
+    )
   })
 
-  it('scales a nested zone and its own contents with it', () => {
-    /* A sub-zone that kept its width while its parent halved would hang out of it -- and
-       leaving its components where they were would leave them hanging out of the smaller
-       sub-zone. Both have to move, which is why this recurses. */
+  it('leaves a nested zone at its own size, and is floored by it', () => {
+    /* A sub-zone used to be scaled by its parent's ratio, which is how shrinking Segment
+       shrank all six regions inside it. Now it is an obstacle instead: Unify cannot be
+       dragged smaller than the box Profiles occupies. */
     const nodes = [
       zone('unify', { width: 1000, height: 600 }),
       zone('profiles', { width: 600, height: 400 }, {
         parentId: zoneNodeId('unify'),
         position: { x: 200, y: 100 },
       }),
-      child('t', 'profiles', { x: 300, y: 200 }),
     ]
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('unify'), { width: 1000, height: 600 }, { width: 500, height: 300 })
-
-    const profiles = scaled.find((n) => n.id === zoneNodeId('profiles'))
-    expect(profiles.position).toEqual({ x: 100, y: 50 })
-    expect(zoneSize(profiles)).toEqual({ width: 300, height: 200 })
-    /* x is 80 rather than the 150 the ratio alone gives: Profiles ends up 300 wide and
-       the card stays 200, so 80 is as far right as it can sit and still fit. The clamp
-       is the other half of this -- scaling positions without it leaves the card
-       overhanging a zone it was just scaled into. */
-    expect(scaled.find((n) => n.id === 't').position).toEqual({ x: 80, y: 100 })
+    const clamped = clampZoneResize(nodes, zoneNodeId('unify'), { x: 0, y: 0 }, { width: 300, height: 200 })
+    expect(clamped).toEqual({ width: 200 + 600 + 20, height: 100 + 400 + 20 })
+    expect(zoneSize(nodes[1])).toEqual({ width: 600, height: 400 })
   })
 
-  it('pulls a child that would overhang back inside the smaller zone', () => {
-    const nodes = [
-      zone('connections', { width: 1000, height: 500 }),
-      { ...child('a', 'connections', { x: 700, y: 300 }), measured: { width: NODE_WIDTH, height: NODE_HEIGHT } },
-    ]
-    /* Fits before: 700 + 200 = 900, inside 1000. The scale takes x to 210, and 210 + 200
-       is outside 300 -- the position shrank and the card did not. */
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 1000, height: 500 }, { width: 300, height: 200 })
-    expect(scaled.find((n) => n.id === 'a').position).toEqual({ x: 80, y: 120 })
-  })
-
-  it('leaves growZones nothing to grow, so the shrink sticks', () => {
-    /* The point of the clamp. Without it a shrink is undone by the next drag: growZones
-       finds a child overhanging and snaps the zone back out, which is the "the resize
-       floor is the contents" behaviour scaling exists to remove -- deferred to a later
-       gesture, where it looks like the canvas fighting the user. */
-    const nodes = [
-      zone('connections', { width: 1000, height: 500 }),
-      { ...child('a', 'connections', { x: 700, y: 300 }), measured: { width: NODE_WIDTH, height: NODE_HEIGHT } },
-    ]
-    const to = { width: 400, height: 250 }
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 1000, height: 500 }, to).map(
-      (n) => (n.type === 'zone' ? { ...n, ...to } : n),
-    )
-
-    expect(growZones(scaled)).toBe(scaled)
-  })
-
-  it('still fits a card in a zone dragged down to the minimum', () => {
-    /* The tight case, and it is tight: ZONE_PADDING_X 32 + NODE_WIDTH 200 + CHILD_MARGIN
-       20 is 252, four pixels under MIN_ZONE_WIDTH. A card fits, but only just, so the
-       arithmetic is pinned rather than left to be rediscovered. */
-    const nodes = [
-      zone('connections', { width: 1000, height: 500 }),
-      { ...child('a', 'connections', { x: 700, y: 300 }), measured: { width: NODE_WIDTH, height: NODE_HEIGHT } },
-    ]
-    const to = { width: MIN_ZONE_WIDTH, height: MIN_ZONE_HEIGHT }
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 1000, height: 500 }, to)
-
-    const pinned = scaled.map((n) => (n.type === 'zone' ? { ...n, ...to } : n))
-    expect(scaled.find((n) => n.id === 'a').position).toEqual({ x: 40, y: 70 })
+  it('leaves growZones nothing to grow, so the handle stays where it stopped', () => {
+    /* The reason the floor is the same number `growZones` measures. A zone clamped to
+       anything larger would be pulled back by the next drag; anything smaller and the child
+       would be drawn outside its own backdrop. */
+    const nodes = [zone('connections', { width: 1000, height: 500 }), child('a', 'connections', { x: 700, y: 300 })]
+    const clamped = clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, { width: 100, height: 100 })
+    const pinned = nodes.map((n) => (n.type === 'zone' ? { ...n, ...clamped } : n))
     expect(growZones(pinned)).toBe(pinned)
   })
 
-  it('floors a nested zone at the minimum rather than scaling it to nothing', () => {
-    const nodes = [
-      zone('unify', { width: 1000, height: 600 }),
-      zone('profiles', { width: 400, height: 300 }, { parentId: zoneNodeId('unify'), position: { x: 0, y: 0 } }),
-    ]
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('unify'), { width: 1000, height: 600 }, { width: 100, height: 60 })
-    expect(zoneSize(scaled.find((n) => n.id === zoneNodeId('profiles')))).toEqual({
+  it('floors an empty zone at the minimum a label needs', () => {
+    const nodes = [zone('connections', { width: 1000, height: 500 })]
+    expect(clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, { width: 10, height: 10 })).toEqual({
       width: MIN_ZONE_WIDTH,
       height: MIN_ZONE_HEIGHT,
     })
   })
 
-  it('is a no-op when the size did not change', () => {
-    const nodes = [zone('connections', { width: 800, height: 400 }), child('a', 'connections', { x: 10, y: 10 })]
-    expect(scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 800, height: 400 }, { width: 800, height: 400 })).toBe(nodes)
+  it('passes a growth straight through', () => {
+    const nodes = [zone('connections', { width: 1000, height: 500 }), child('a', 'connections', { x: 0, y: 0 })]
+    expect(clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, { width: 2000, height: 900 })).toEqual({
+      width: 2000,
+      height: 900,
+    })
   })
 
-  it('does not divide by a zero previous size', () => {
-    const nodes = [zone('connections', { width: 0, height: 0 }), child('a', 'connections', { x: 10, y: 10 })]
-    const scaled = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 0, height: 0 }, { width: 400, height: 200 })
-    expect(scaled.find((n) => n.id === 'a').position).toEqual({ x: 10, y: 10 })
+  describe('a near edge, which moves the origin as well as the size', () => {
+    /*
+     * A top or left handle resizes *and* moves: React Flow emits a position change alongside the
+     * dimensions one and shifts the children the opposite way so they hold still in absolute space.
+     * Three things can go wrong here and all three did, so all three are pinned.
+     *
+     * The invariant to read every case against is that the edge *nobody is dragging* does not move.
+     */
+    const nodes = (childAt) => [
+      {
+        id: zoneNodeId('connections'),
+        type: 'zone',
+        position: { x: 100, y: 100 },
+        width: 600,
+        height: 300,
+        data: { id: 'connections' },
+      },
+      child('a', 'connections', childAt),
+    ]
+    const clamp = (list, to) => clampZoneResize(list, zoneNodeId('connections'), { x: 100, y: 100 }, to)
+
+    it('moves the origin exactly as asked when there is room', () => {
+      /* Left edge dragged 60px right. The child is at local 200, so nothing is in the way. */
+      const out = clamp(nodes({ x: 200, y: 20 }), {
+        width: 540,
+        height: 300,
+        position: { x: 160, y: 100 },
+      })
+      expect(out).toEqual({ width: 540, height: 300, position: { x: 160, y: 100 } })
+    })
+
+    it('holds the far edge still when the floor refuses part of the shrink', () => {
+      /* Dragged to 200 wide; the child's far edge floors it at 520. The origin gives back the
+         difference so the right edge stays where it was rather than the zone growing rightward. */
+      const list = nodes({ x: 300, y: 20 })
+      const out = clamp(list, { width: 200, height: 300, position: { x: 500, y: 100 } })
+      expect(out.width).toBe(minZoneSize(zoneNodeId('connections'), list).width)
+      expect(out.position.x + out.width).toBe(700)
+    })
+
+    it('stops before it pushes the nearest child out the near side', () => {
+      /*
+       * The case `minZoneSize` cannot see. It measures far edges (`position + extent`), so a child
+       * at local x=20 is invisible to it -- and React Flow shifts children by the origin's delta,
+       * so dragging the left edge 140px right would leave that child at -120: drawn outside a box
+       * it is still a child of. `growZones` only ever grows down and right, so nothing recovers it.
+       */
+      const out = clamp(nodes({ x: 20, y: 20 }), {
+        width: 460,
+        height: 300,
+        position: { x: 240, y: 100 },
+      })
+      /* The child sits exactly CHILD_MARGIN from the border, so the edge may not move at all. */
+      expect(out.position.x).toBe(100)
+      expect(out.width).toBe(600)
+    })
+
+    it('leaves the other axis alone on a corner handle', () => {
+      /*
+       * A corner moves the origin on one axis only -- a bottom-left drag moves x and leaves y --
+       * so "this change carries a position, therefore both edges moved" is wrong for four of the
+       * eight handles. Giving back on the still axis jumped the zone upward by the whole
+       * shortfall: y went to -30 for a drag that never touched the top edge.
+       */
+      const list = nodes({ x: 300, y: 300 })
+      const out = clampZoneResize(list, zoneNodeId('connections'), { x: 100, y: 100 }, {
+        width: 400,
+        height: 250,
+        position: { x: 300, y: 100 },
+      })
+      expect(out.position.y).toBe(100)
+      expect(out.height).toBe(minZoneSize(zoneNodeId('connections'), list).height)
+    })
+
+    it('passes a growth through on both axes', () => {
+      const out = clamp(nodes({ x: 20, y: 20 }), {
+        width: 900,
+        height: 500,
+        position: { x: -200, y: -100 },
+      })
+      expect(out).toEqual({ width: 900, height: 500, position: { x: -200, y: -100 } })
+    })
   })
 
-  it('does not hang on a parent cycle', () => {
-    const a = zone('a', { width: 500, height: 500 }, { parentId: zoneNodeId('b') })
-    const b = zone('b', { width: 500, height: 500 }, { parentId: zoneNodeId('a') })
-    expect(() =>
-      scaleZoneChildren([a, b], zoneNodeId('a'), { width: 500, height: 500 }, { width: 250, height: 250 }),
-    ).not.toThrow()
+  it('is not what a measurement change should reach', () => {
+    /*
+     * Not a property of this function -- it cannot tell who called it -- but the note belongs beside
+     * it, because the caller getting this wrong is the expensive mistake and it has already happened
+     * once.
+     *
+     * React Flow emits a `dimensions` change for every *measurement*: once per node on mount, and
+     * again whenever the DOM reports a new box. Those report the zone in **screen** pixels, so
+     * feeding one to the clamp writes the zone's size at the current zoom into the document. The
+     * shipped template opened at 2035 wide and was immediately written down to 1914 -- its measured
+     * width at 0.19 zoom -- which looks like a layout bug and is a unit error.
+     *
+     * `handleNodesChange` filters on `change.setAttributes`, which only a resize handle sets. The
+     * assertion here is the arithmetic that makes the filter necessary: handed a smaller box, this
+     * function faithfully returns a smaller zone, which is exactly right for a drag and exactly
+     * wrong for a measurement.
+     */
+    const nodes = [zone('connections', { width: 2035, height: 1313 }), child('a', 'connections', { x: 0, y: 0 })]
+    const measured = { width: 394, height: 254 } // 2035x1313 at 0.19 zoom
+    expect(clampZoneResize(nodes, zoneNodeId('connections'), { x: 0, y: 0 }, measured).width).toBeLessThan(2035)
+  })
+
+  it('tolerates a missing node list and a sizeless request', () => {
+    /* Called from a change handler on every frame of a drag, so it fails soft: the minimum a
+       zone is allowed to be, rather than NaN in a width React Flow then renders. */
+    expect(clampZoneResize(undefined, zoneNodeId('connections'), { x: 0, y: 0 }, {})).toEqual({
+      width: MIN_ZONE_WIDTH,
+      height: MIN_ZONE_HEIGHT,
+    })
   })
 })
 
@@ -1031,143 +1107,6 @@ describe('droppedZoneSize', () => {
 })
 
 /*
- * The floor on how much a shrinking zone may crowd its own contents.
- *
- * Every case here has two children side by side, because that is the whole subject: with
- * one child there are no gaps to protect and the old behaviour -- scale, then clamp inside
- * the smaller box -- is exactly right, which is what the `scaleZoneChildren` cases above
- * pin. What was wrong was that the same arithmetic ran with several children and happily
- * took the gaps between them to nothing, leaving the connectors that had been drawn between
- * them with nowhere to be seen.
- */
-describe('shrinking a zone without squashing its contents', () => {
-  const zone = (id, size, extra = {}) => ({
-    id: zoneNodeId(id),
-    type: 'zone',
-    position: { x: 0, y: 0 },
-    ...size,
-    data: { id },
-    ...extra,
-  })
-  const sized = (id, parent, position, box = { width: NODE_WIDTH, height: NODE_HEIGHT }) => ({
-    id,
-    type: 'segmentNode',
-    parentId: zoneNodeId(parent),
-    position,
-    data: { id, zone: parent, size: box },
-  })
-
-  /* Two 200-wide cards with a 200px gap: a lot of slack, so a modest shrink is honoured in
-     full and a drastic one is not. */
-  const pair = () => [
-    zone('connections', { width: 1000, height: 400 }),
-    sized('a', 'connections', { x: 0, y: 100 }),
-    sized('b', 'connections', { x: 400, y: 100 }),
-  ]
-
-  const gapBetween = (nodes) => {
-    const a = nodes.find((node) => node.id === 'a')
-    const b = nodes.find((node) => node.id === 'b')
-    return b.position.x - (a.position.x + NODE_WIDTH)
-  }
-
-  it('scales the gap while there is slack to give up', () => {
-    const out = scaleZoneChildren(pair(), zoneNodeId('connections'), { width: 1000, height: 400 }, { width: 700, height: 400 })
-    /* 400 * 0.7 = 280, so the gap goes 200 -> 80. Well clear of the floor, so the ratio is
-       honoured exactly. */
-    expect(out.find((node) => node.id === 'b').position.x).toBe(280)
-    expect(gapBetween(out)).toBe(80)
-  })
-
-  it('stops scaling once the two cards are as close as the gap allows', () => {
-    /* Dragged to a fifth of the width: the ratio alone would put b at 80, which is *inside*
-       a. The floor holds the pair at MIN_CHILD_GAP apart instead. */
-    const out = scaleZoneChildren(pair(), zoneNodeId('connections'), { width: 1000, height: 400 }, { width: 200, height: 400 })
-    expect(gapBetween(out)).toBe(MIN_CHILD_GAP)
-  })
-
-  it('never lets the clamp finish the job the floor refused', () => {
-    /* The clamp pulls an overhanging child back inside, and it clamps each child on its own
-       -- so without a floor on the room it works against, both cards get pulled to the same
-       limit and land on top of each other. That would undo the gap by a second route. */
-    const out = scaleZoneChildren(pair(), zoneNodeId('connections'), { width: 1000, height: 400 }, { width: 150, height: 400 })
-    expect(gapBetween(out)).toBeGreaterThanOrEqual(MIN_CHILD_GAP)
-  })
-
-  it('leaves a lone child clamped inside the smaller zone, as before', () => {
-    /* The floor is about gaps between children. One child has none, so the old behaviour is
-       unchanged and the shrink still sticks -- which is what keeps `growZones` from
-       snapping the zone back out on the next drag. */
-    const nodes = [
-      zone('connections', { width: 1000, height: 500 }),
-      sized('a', 'connections', { x: 700, y: 300 }),
-    ]
-    const to = { width: 300, height: 200 }
-    const out = scaleZoneChildren(nodes, zoneNodeId('connections'), { width: 1000, height: 500 }, to)
-    expect(out.find((node) => node.id === 'a').position.x).toBe(80)
-    const pinned = out.map((node) => (node.type === 'zone' ? { ...node, ...to } : node))
-    expect(growZones(pinned)).toBe(pinned)
-  })
-
-  it('does not push apart a pair the user placed closer than the gap', () => {
-    /* A floor on crowding a *resize* introduces, not an opinion about a hand-made layout.
-       Two cards deliberately touching stay touching. */
-    const touching = [
-      zone('connections', { width: 1000, height: 400 }),
-      sized('a', 'connections', { x: 0, y: 100 }),
-      sized('b', 'connections', { x: 200, y: 100 }),
-    ]
-    const out = scaleZoneChildren(touching, zoneNodeId('connections'), { width: 1000, height: 400 }, { width: 500, height: 400 })
-    expect(gapBetween(out)).toBeLessThanOrEqual(0)
-  })
-
-  it('ignores a pair in different rows, which slide past each other freely', () => {
-    /* Counting these as competing for the same span would floor a tall zone's width at the
-       width of its widest row and stop most narrowing dead. */
-    const rows = [
-      zone('connections', { width: 1000, height: 600 }),
-      sized('a', 'connections', { x: 0, y: 0 }),
-      sized('b', 'connections', { x: 400, y: 300 }),
-    ]
-    const out = scaleZoneChildren(rows, zoneNodeId('connections'), { width: 1000, height: 600 }, { width: 400, height: 600 })
-    expect(out.find((node) => node.id === 'b').position.x).toBe(160)
-  })
-
-  it('does not floor a zone being grown', () => {
-    /* Spreading things out cannot make two of them harder to tell apart, and flooring both
-       directions would stop a zone being widened past its tightest pair's ratio. */
-    const out = scaleZoneChildren(pair(), zoneNodeId('connections'), { width: 1000, height: 400 }, { width: 2000, height: 400 })
-    expect(out.find((node) => node.id === 'b').position.x).toBe(800)
-  })
-})
-
-describe('scaleFloor', () => {
-  const sized = (id, position, box = { width: 200, height: 60 }) => ({
-    id,
-    type: 'segmentNode',
-    position,
-    data: { id, size: box },
-  })
-
-  it('is 0 when nothing constrains the axis', () => {
-    expect(scaleFloor([sized('a', { x: 0, y: 0 })], 'x')).toBe(0)
-    expect(scaleFloor([], 'x')).toBe(0)
-  })
-
-  it('is the ratio at which the tightest side-by-side pair reaches the gap', () => {
-    /* Origins 400 apart, first card 200 wide: the gap after scaling by f is 400f - 200, and
-       that reaches MIN_CHILD_GAP at f = (200 + 24) / 400. */
-    const floor = scaleFloor([sized('a', { x: 0, y: 0 }), sized('b', { x: 400, y: 0 })], 'x')
-    expect(floor).toBeCloseTo((200 + MIN_CHILD_GAP) / 400)
-  })
-
-  it('never exceeds 1, so a floor can only ever limit a shrink', () => {
-    const tight = [sized('a', { x: 0, y: 0 }), sized('b', { x: 210, y: 0 })]
-    expect(scaleFloor(tight, 'x')).toBeLessThanOrEqual(1)
-  })
-})
-
-/*
  * Which renderer a node gets.
  *
  * Decided from the `kind`, and that is the point worth a test: React Flow's `type` is not stored
@@ -1234,5 +1173,11 @@ describe('edgeZFor', () => {
 
   it('treats a missing edge as the plain band rather than throwing', () => {
     expect(edgeZFor(null)).toBe(COMPONENT_Z)
+  })
+
+  it('keeps the endpoint grips above a selected connector', () => {
+    /* The grips and the edges' svgs share one stacking context. Lifting the selected edge above its
+       own grips made its hit-stroke swallow every press on an end ring or a bend handle. */
+    expect(EDGE_HANDLE_Z).toBeGreaterThan(edgeZFor({ id: 'e1', selected: true }))
   })
 })

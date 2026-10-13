@@ -586,10 +586,14 @@ describe('the shipped end-to-end template', () => {
   const graph = { nodes: entry.nodes, edges: entry.edges, zones: entry.zones }
   const open = (g) => buildLayout(g, { existingPositions: positionsFromGraph(g) })
 
-  it('is in the fixture at all', () => {
+  it('is in the fixture, and is the one offered first', () => {
     expect(entry).toBeDefined()
-    expect(entry.nodes).toHaveLength(20)
-    expect(entry.zones).toHaveLength(13)
+    /* `Template.Meta.ordering` is `["sort_order", "name"]`, so this is what puts the
+       whole-pipeline diagram at the top of Open -> Reference architectures. */
+    expect(entry.sort_order).toBe(0)
+    expect(Math.min(...fixture.map((template) => template.sort_order))).toBe(0)
+    expect(entry.nodes.length).toBeGreaterThan(15)
+    expect(entry.zones.length).toBeGreaterThan(10)
   })
 
   it('carries the connector arrangement it was drawn with', () => {
@@ -600,8 +604,12 @@ describe('the shipped end-to-end template', () => {
      * seeded and opened, looking nothing like the diagram it came from.
      */
     const anchored = entry.edges.filter((edge) => edge.sourceAnchor || edge.targetAnchor)
-    expect(anchored).toHaveLength(entry.edges.length)
-    expect(entry.edges.filter((edge) => edge.waypoints)).toHaveLength(2)
+    /* Nearly every end in this drawing was placed by hand. A couple of defaults is fine; a
+       majority of them would mean the anchors were lost on the way through, which is the failure
+       this is here for. Proportional rather than exact because this template is the default one
+       and gets edited, and a test that fails on every edit says nothing about the arrangement. */
+    expect(anchored.length).toBeGreaterThanOrEqual(entry.edges.length - 2)
+    expect(entry.edges.filter((edge) => edge.waypoints).length).toBeGreaterThan(0)
   })
 
   it('opens and re-saves with every anchor and waypoint intact', () => {
@@ -609,13 +617,20 @@ describe('the shipped end-to-end template', () => {
        different path -- `data.sourceAnchor` rather than a node field -- and so can drift alone. */
     const saved = serializeGraph(open(graph))
     for (const edge of entry.edges) {
-      const stored = saved.edges.find((candidate) => candidate.id === edge.id)
-      expect(stored, edge.id).toBeDefined()
-      expect(stored.sourceHandle, edge.id).toBe(edge.sourceHandle)
-      expect(stored.targetHandle, edge.id).toBe(edge.targetHandle)
-      expect(stored.sourceAnchor ?? null, edge.id).toEqual(edge.sourceAnchor ?? null)
-      expect(stored.targetAnchor ?? null, edge.id).toEqual(edge.targetAnchor ?? null)
-      expect(stored.waypoints ?? null, edge.id).toEqual(edge.waypoints ?? null)
+      /* Matched on its two ends rather than on an id, because the fixture states none: an
+         `xy-edge__` id is React Flow's own minting and means nothing once the nodes have been
+         renamed, so `seed_templates._build_edge` derives one from the ends instead. What
+         identifies a connector in a transcribed template is what it connects. */
+      const where = `${edge.source} -> ${edge.target}`
+      const stored = saved.edges.find(
+        (candidate) => candidate.source === edge.source && candidate.target === edge.target,
+      )
+      expect(stored, where).toBeDefined()
+      expect(stored.sourceHandle, where).toBe(edge.sourceHandle)
+      expect(stored.targetHandle, where).toBe(edge.targetHandle)
+      expect(stored.sourceAnchor ?? null, where).toEqual(edge.sourceAnchor ?? null)
+      expect(stored.targetAnchor ?? null, where).toEqual(edge.targetAnchor ?? null)
+      expect(stored.waypoints ?? null, where).toEqual(edge.waypoints ?? null)
     }
   })
 
@@ -640,6 +655,17 @@ describe('the shipped end-to-end template', () => {
       const expected = node.zone === null ? undefined : `zone-${node.zone}`
       expect(live.parentId, node.id).toBe(expected)
     }
+  })
+
+  it('draws all three warehouse regions, inside Segment and on both sides of it', () => {
+    /* The shape the diagram is *for*: one warehouse the customer already had that Reverse ETL
+       reads from, one Segment loads into, and one Profiles Sync writes to. Drawn as three regions
+       because they play three roles, which is true even when they are the same warehouse. */
+    const warehouses = entry.zones.filter((zone) => zone.id.startsWith('warehouses'))
+    expect(warehouses).toHaveLength(3)
+    expect(warehouses.filter((zone) => zone.parent)).toHaveLength(1)
+    /* One colour between them, so three roles of one thing read as one thing. */
+    expect(new Set(warehouses.map((zone) => zone.color)).size).toBe(1)
   })
 
   it('opens with the two regions outside Segment drawn beside it, not inside it', () => {

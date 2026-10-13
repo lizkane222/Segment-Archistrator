@@ -54,6 +54,10 @@ DOCS_URL_TEMPLATES = {
     "audience": f"{DOCS_BASE}/engage/audiences",
     "journey": f"{DOCS_BASE}/engage/journeys",
     "linked_audience": f"{DOCS_BASE}/engage/audiences/linked-audiences",
+    # Filed under the Data Graph, which is where the entities a Linked Event joins on are
+    # defined -- even though the enrichment itself is configured on a destination's mapping in
+    # Connections, which is where the node is zoned. Verified live.
+    "linked_event": f"{DOCS_BASE}/unify/data-graph/linked-events",
     "data_graph": f"{DOCS_BASE}/unify/data-graph",
     # No docs page for "a warehouse table as drawn on a diagram" -- it is this tool's own idea, not a
     # Segment feature. The Data Graph page is where a reader who followed the link would want to end
@@ -91,6 +95,10 @@ ZONE_DOCS_URLS = {
     "protocols": f"{DOCS_BASE}/protocols",
     "unify": f"{DOCS_BASE}/unify",
     "engage": f"{DOCS_BASE}/engage",
+    # The second exception to the no-sub-zone-links rule, earning it the same way Protocols
+    # does: Linked Events have a page of their own, and the Connections overview its parent
+    # would otherwise supply says nothing about them.
+    "linked_events": f"{DOCS_BASE}/unify/data-graph/linked-events",
 }
 
 

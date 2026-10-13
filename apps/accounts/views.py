@@ -26,7 +26,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.auth_workspace.authentication import WorkspacePrincipal
-from apps.auth_workspace.models import WorkspaceSession
+from apps.auth_workspace.models import RememberedConnection, WorkspaceSession
 from apps.auth_workspace.permissions import AllowAny, HasSession
 from apps.auth_workspace.views import session_payload, set_session_cookie
 from apps.diagrams.models import Diagram
@@ -179,6 +179,7 @@ class GoogleCallbackView(APIView):
         with transaction.atomic():
             anon_scope = ""
             outgoing = None
+            connection = None
             if login.session_id:
                 outgoing = WorkspaceSession.objects.filter(pk=login.session_id).first()
             if outgoing is not None:
@@ -190,8 +191,31 @@ class GoogleCallbackView(APIView):
                     logger.info("Sign-in switched accounts; not claiming the previous scope")
                 else:
                     anon_scope = outgoing.anon_scope
+                    # The workspace credential too, by the same rule: this browser
+                    # connected it, so signing in must not quietly disconnect it.
+                    if outgoing.has_token:
+                        connection = outgoing
 
-            session = WorkspaceSession.start_for_account(account, anon_scope=anon_scope)
+            if connection is not None:
+                # Deleted before the new row exists rather than after: the credential
+                # moves, and (workspace, token) is unique among rows holding one. The
+                # fields are already read into `connection`, so nothing is lost.
+                outgoing.delete()
+                outgoing = None
+
+            session = WorkspaceSession.start_for_account(
+                account, anon_scope=anon_scope, connection=connection
+            )
+            if connection is not None:
+                # What this browser connected becomes the account's, so it is still
+                # there after this session lapses.
+                RememberedConnection.remember(session)
+            else:
+                # Nothing connected here: pick up where the account last was. This is
+                # what makes a sign-in the next day come back connected.
+                remembered = RememberedConnection.lookup(account)
+                if remembered is not None:
+                    remembered.apply_to(session)
 
             claimed = 0
             if anon_scope:

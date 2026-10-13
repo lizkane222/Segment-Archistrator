@@ -48,6 +48,7 @@ export default function DiagramBar({
   onRename,
   onExport,
   onExportFile,
+  onExportMermaid,
   onImportFile,
   onFocusPlaceholder,
   onApplyPalette,
@@ -164,7 +165,7 @@ export default function DiagramBar({
             onClick={onImportFile}
             disabled={Boolean(busy)}
             icon={Upload}
-            title="Rebuild a diagram from a previously exported file"
+            title="Rebuild a diagram from an exported JSON file, or draw one from a Mermaid flowchart (.mmd)"
           >
             Import
           </Secondary>
@@ -307,6 +308,15 @@ export default function DiagramBar({
               className="border-l border-twilio-gray-20 px-2.5 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:bg-twilio-gray-10 hover:text-twilio-navy disabled:opacity-50"
             >
               JSON
+            </button>
+            <button
+              type="button"
+              onClick={onExportMermaid}
+              disabled={exporting}
+              title="A Mermaid flowchart of this diagram -- copy it into Markdown, or import it back here"
+              className="border-l border-twilio-gray-20 px-2.5 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:bg-twilio-gray-10 hover:text-twilio-navy disabled:opacity-50"
+            >
+              Mermaid
             </button>
           </div>
         </div>

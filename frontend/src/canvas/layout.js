@@ -112,6 +112,36 @@ export const COMPONENT_Z = 10
  */
 export const SELECTED_EDGE_LIFT = 1000
 
+/*
+ * How far a connector's own endpoint grips rise above the component band.
+ *
+ * A separate number from `SELECTED_EDGE_LIFT`, because the two solve the same problem in two
+ * different layers and neither substitutes for the other.
+ *
+ * `SELECTED_EDGE_LIFT` lifts the *edge*, inside `.react-flow__edges`. The grips are not there --
+ * they go through `EdgeLabelRenderer`, which portals into `.react-flow__edgelabel-renderer`, and
+ * React Flow renders that container *before* `.react-flow__nodes` (see `GraphView`). Both are
+ * `z-index: auto`, so DOM order decides and every node paints above every edge label. An endpoint
+ * grip sits on a component's border by construction, directly over that component's own connection
+ * handle -- so the handle took the pointer and a drag on the grip started drawing a new connection
+ * instead of moving the existing end. It was found by `elementFromPoint` at the grip's own centre
+ * returning `react-flow__handle`, which is as direct as this kind of evidence gets.
+ *
+ * Above COMPONENT_Z is all it takes: the label container does not create a stacking context of its
+ * own, so a positioned descendant with a z-index competes in the viewport's context, where a node
+ * wrapper sits at COMPONENT_Z. A wide margin rather than 11, so a later band added between the two
+ * does not silently reopen this.
+ *
+ * And above `SELECTED_EDGE_LIFT` too, because the grips compete in that same context with the edges'
+ * own `<svg>`, and a selected edge's svg is lifted to COMPONENT_Z + SELECTED_EDGE_LIFT. At +100 the
+ * selected connector's invisible hit-stroke (`react-flow__edge-interaction`) painted over both its end
+ * rings and every bend handle -- so the grips appeared on hover and could be dragged, but the moment
+ * the line was clicked (which is how anyone finds them) pressing a ring selected the edge again
+ * instead of moving its end. Found the same way as the handle case above: `elementsFromPoint` at the
+ * ring's centre listing the interaction path first.
+ */
+export const EDGE_HANDLE_Z = COMPONENT_Z + SELECTED_EDGE_LIFT + 100
+
 /**
  * A connector's paint layer: the component band, lifted while it is selected.
  *
@@ -123,12 +153,12 @@ export function edgeZFor(edge) {
   return edge?.selected ? COMPONENT_Z + SELECTED_EDGE_LIFT : COMPONENT_Z
 }
 
-const COLUMN_GAP = 90
-const ROW_GAP = 26
-const ZONE_PADDING_X = 32
-const ZONE_PADDING_TOP = 52 // room for the zone's own label
-const ZONE_PADDING_BOTTOM = 32
-const ZONE_GAP = 48
+export const COLUMN_GAP = 90
+export const ROW_GAP = 26
+export const ZONE_PADDING_X = 32
+export const ZONE_PADDING_TOP = 52 // room for the zone's own label
+export const ZONE_PADDING_BOTTOM = 32
+export const ZONE_GAP = 48
 
 /* The size an "empty" zone gets, wherever the canvas got there from: drawn from the
    palette, arrived from a template, or emptied out. Sized from its contents alone an
@@ -266,26 +296,6 @@ export function droppedZoneSize(zoneId, descriptor) {
 const CHILD_MARGIN = 20
 
 /*
- * The gap a shrinking zone will not pull two of its children closer than.
- *
- * `scaleZoneChildren` scales positions but not sizes, so without a floor the arithmetic
- * runs all the way down: drag a zone's edge far enough and its components end up
- * touching, then overlapping, and the connectors between them have nowhere to be drawn.
- * A diagram whose edges cannot be seen is the thing the zone was being tidied up *for*.
- *
- * 24px is two things at once: enough for an edge and its arrowhead to read as a line
- * between two cards rather than a seam, and comfortably more than the 8px handles that
- * sit on the facing borders of the pair. Below it the two cards' handles would touch
- * before the cards did.
- *
- * So a zone stops shrinking once its contents are this tight -- see `scaleFloor`. That is
- * a floor on the *contents*, not on the zone, which is why it is enforced here and not as
- * a `minWidth` on the resizer: the zone's own minimum depends on what is in it, and the
- * handle is allowed to keep moving while the arrangement still has slack to give up.
- */
-export const MIN_CHILD_GAP = 24
-
-/*
  * A child's footprint, for sizing the zone that has to cover it.
  *
  * A nested zone is a child like any other, but its size is explicit rather than
@@ -312,11 +322,15 @@ function childExtent(child) {
 /**
  * The smallest box that still covers a zone's contents.
  *
- * No longer the resize floor -- a zone can now be dragged smaller than its
- * contents, and `scaleZoneChildren` moves them in with it. What this is for is
- * growth: after a child has been dragged or a sub-zone moved out to sit beside its
- * sibling, the parent has to be big enough to still contain what it contains, or
- * the child renders outside a box it is nonetheless a child of.
+ * Two callers, asking the same question for opposite reasons.
+ *
+ * Growth: after a child has been dragged or a sub-zone moved out to sit beside its
+ * sibling, the parent has to be big enough to still contain what it contains, or the
+ * child renders outside a box it is nonetheless a child of. See `growZones`.
+ *
+ * And the resize floor: this is where a shrinking zone's handle stops. See
+ * `clampZoneResize`, which is what makes that a floor on the *handle* rather than
+ * something reconciled a gesture later.
  *
  * @param zoneId  the React Flow node id (`zone-<zone>`), which is what children
  *   carry as `parentId` -- not the zone's own id. Sub-zones carry it too, so
@@ -637,212 +651,138 @@ export function growZones(nodes) {
 }
 
 /**
- * Move a zone's contents with it as it is resized.
+ * A zone resize, floored at the box its own contents occupy.
  *
- * What the resize handles used to do instead was refuse: the floor was the zone's
- * own contents, so dragging the right edge left stopped dead at the last component.
- * That makes a zone laid out once impossible to tighten up. Scaling the contents
- * instead means the handle always moves and the arrangement inside is preserved
- * proportionally.
+ * ## What this replaces, and why
  *
- * Positions scale; component *sizes* do not. A 200x60 card at 60% is unreadable, and
- * the thing being adjusted is the arrangement, not the type size. Nested zones are
- * the exception -- they are boxes, their size is explicit, and a sub-zone that kept
- * its width while its parent halved would hang out of it. Their own contents scale
- * with them, recursively, so shrinking Segment tightens the whole tree at once
- * rather than leaving Profiles' components hanging out of a smaller Profiles.
+ * `scaleZoneChildren` used to live here. It multiplied every child's position by the resize
+ * ratio and resized nested zones by it too, recursively -- so dragging Segment's edge in to
+ * tighten it moved every component in Connections, Unify and Engage and shrank all six
+ * sub-zones with them. The reasoning was that a handle which stops dead is a zone laid out
+ * once that can never be tightened up, and scaling preserves the arrangement
+ * *proportionally*.
  *
- * Because sizes do not scale, a scaled position alone is not enough: a card whose
- * right edge fitted at the old width can have its top-left scale inward and its right
- * edge still land outside the new one. So each child is also clamped into the new box.
- * Without that clamp the shrink does not stick -- `growZones` runs on the next drag,
- * finds a child overhanging, and snaps the zone back out, which is the "the resize
- * floor is the contents" behaviour this function exists to get rid of, only deferred
- * to a later gesture and therefore harder to understand. Clamping to exactly
- * `size - extent - CHILD_MARGIN` is what makes `minZoneSize` come back with the size
- * the user dragged to, so there is nothing left to grow.
+ * That was wrong about what an arrangement is. On a hand-arranged diagram the positions are
+ * the document -- somebody put that card there, next to that one, with a connector routed
+ * through the gap -- and "preserved proportionally" means every one of them moved. It also
+ * made a zone's own size unadjustable in practice: tidying up the outer box was the one
+ * gesture guaranteed to disturb the inner work.
+ *
+ * So the floor is back, and this time it is honest about being one. A zone shrinks until it
+ * reaches `minZoneSize` -- the box covering its children, plus `CHILD_MARGIN` -- and then the
+ * handle stops. Tightening a nested arrangement is done from the inside out: shrink
+ * Connections, then Segment follows. That is one more gesture and it is the one that cannot
+ * silently rearrange anything.
+ *
+ * ## Why the clamp is here rather than a `minWidth` on the resizer
+ *
+ * `NodeResizer`'s floor is a prop, and the obvious move -- compute `minZoneSize` per zone and
+ * pass it -- breaks the gesture. `ResizeControl`'s effect is keyed on `minWidth`, its cleanup
+ * calls `resizer.destroy()`, and its create branch is guarded by `if (!resizer.current)`: a
+ * floor that changed mid-drag would destroy the resizer and then `update()` a dead one. The
+ * static `MIN_ZONE_WIDTH` stays there, and the real floor is applied to the change instead.
+ *
+ * ## The position half, which is the part that is easy to miss
+ *
+ * A top or left handle resizes *and* moves: React Flow emits a position change alongside the
+ * dimensions one and shifts the children the opposite way, so they hold still in absolute
+ * space. Clamping only the size would therefore leave the moved origin in place and the far
+ * edge drifting outward -- the zone would appear to grow from the side nobody dragged. So
+ * whatever the clamp refuses to take off the size is handed back to the position.
+ *
+ * Per axis, and that is not a detail. A *corner* handle moves the origin on one axis only -- a
+ * bottom-left drag moves `x` and leaves `y` alone -- so "this change carries a position, therefore
+ * both edges moved" is wrong for four of the eight handles, and giving back on the still axis
+ * jumps the zone by the whole shortfall. The origin's own movement is what says which edge is
+ * being dragged, so each axis is compared against `from` rather than inferred from the batch.
+ *
+ * ## Why the near edge is floored too
+ *
+ * A near-edge drag can also push children *out the near side*, which `minZoneSize` cannot see: it
+ * measures far edges only (`position + extent`), so a child at local x=20 is invisible to it. React
+ * Flow shifts children by the origin's delta, so dragging a left edge 140px right leaves that child
+ * at -120 -- drawn outside a box it is still inside. `growZones` only ever grows down and right, so
+ * nothing recovers it. So the give-back is also bounded by how far the near edge may travel before
+ * the closest child reaches the border, which is the same rule as the far edge stated from the other
+ * side.
+ *
+ * Children are not touched at all, which is the whole point of the change.
+ *
+ * @param from  the zone's position before this change. What makes "which edge is being dragged"
+ *   answerable per axis.
+ * @param to    what the resizer asked for: `{width, height}`, plus `position` when this drag moved
+ *   the zone's origin as well. React Flow emits those as two separate changes in one batch, so the
+ *   caller pairs them up -- see `handleNodesChange` in canvas/Canvas.jsx.
+ * @returns `{width, height, position}` -- `position` omitted when the change carried none.
  */
-export function scaleZoneChildren(nodes, zoneId, from, to, seen = new Set()) {
-  const rawX = from?.width ? to.width / from.width : 1
-  const rawY = from?.height ? to.height / from.height : 1
-  if (rawX === 1 && rawY === 1) return nodes ?? []
-  // Cycle guard, as in growZones.
-  if (seen.has(zoneId)) return nodes ?? []
-  seen.add(zoneId)
+export function clampZoneResize(nodes, zoneId, from, to) {
+  const floor = minZoneSize(zoneId, nodes ?? [])
+  let width = Math.max(to?.width ?? 0, floor.width)
+  let height = Math.max(to?.height ?? 0, floor.height)
 
-  let out = nodes ?? []
-  const children = out.filter((node) => node.parentId === zoneId)
+  /* No position change means a bottom or right handle on both axes: the origin is staying put, so
+     there is nothing to give back and the clamped size is the whole answer. */
+  if (!to?.position) return { width, height }
 
-  /* Only a shrink is floored. Growing a zone spreads its contents out, which cannot make
-     two of them harder to tell apart, and flooring the factor either way would stop a
-     zone being widened past whatever ratio its tightest pair happened to have. */
-  const fx = rawX < 1 ? Math.max(rawX, scaleFloor(children, 'x')) : rawX
-  const fy = rawY < 1 ? Math.max(rawY, scaleFloor(children, 'y')) : rawY
+  /* How far the closest child sits from the near border, per axis. That is how far the near edge
+     may be dragged inward before it starts leaving children outside -- the near-side counterpart
+     to `minZoneSize`, and invisible to it. `Infinity` for a zone with no children, which is not a
+     constraint at all. */
+  const slack = { x: Infinity, y: Infinity }
+  for (const child of nodes ?? []) {
+    if (child.parentId !== zoneId) continue
+    /* Floored at 0, which is the difference between "this edge may not move inward" and "this edge
+       must move *outward*". A child already closer to the border than CHILD_MARGIN -- one at local
+       0, which the shipped template has several of -- gives a negative slack, and a negative limit
+       is below the origin's current value, so `Math.min` below took it and dragged the near edge the
+       wrong way: a left-edge drag grew the zone leftward and moved the far edge nobody touched.
+       Zero says the honest thing, which is that there is no room to give. */
+    slack.x = Math.min(slack.x, Math.max(0, (child.position?.x ?? 0) - CHILD_MARGIN))
+    slack.y = Math.min(slack.y, Math.max(0, (child.position?.y ?? 0) - CHILD_MARGIN))
+  }
 
   /*
-   * The box the clamp below is allowed to squeeze children into.
+   * One axis, returning where the origin ends up and how big the zone is along it.
    *
-   * The clamp pulls an overhanging child back inside, which is what makes a shrink stick
-   * (see below). But it clamps each child independently, so two cards side by side can both
-   * be pulled to the same limit and land on top of each other -- which would undo the gap
-   * floor above by a different route, on exactly the pair it just protected.
+   * Three cases, in order:
    *
-   * So the clamp works against whichever is larger: the size the user dragged to, or the
-   * smallest box the children still fit in side by side. When the contents are already as
-   * tight as they go, that makes the clamp a no-op, the children keep their gaps, and
-   * `growZones` grows the zone back out to hold them -- so the handle stops moving. That is
-   * the honest answer to "shrink this below what its contents can readably occupy", and it
-   * is a floor on the *contents*, so a zone holding one card still shrinks to that card.
+   *   1. The origin did not move here -- a far-edge drag on this axis, which is every bottom/right
+   *      handle and half of every corner. The position passes through and only the size was
+   *      clamped.
+   *   2. A near-edge drag with room. The origin goes where the drag put it.
+   *   3. A near-edge drag that ran out of room, either because the far-edge floor refused part of
+   *      the shrink or because the nearest child is about to be left outside. The origin stops at
+   *      whichever limit binds first, and the size absorbs the difference so the far edge -- the
+   *      one nobody is dragging -- does not move.
    */
-  const room = {
-    width: Math.max(to.width, minRoom(children, 'x')),
-    height: Math.max(to.height, minRoom(children, 'y')),
+  const axis = (key, clamped, requested) => {
+    const origin = to.position[key] ?? 0
+    const was = from?.[key] ?? origin
+    if (origin === was) return { at: origin, size: clamped }
+
+    /*
+     * How far inward the origin may travel, as two independent limits, whichever binds first.
+     *
+     * `byFloor`: the far-edge floor already refused to let the zone be smaller than `clamped`, and
+     * the far edge is not moving, so the origin cannot pass the point that size implies.
+     * `byChild`: the nearest child is `slack` from the near border, and past that the drag would
+     * leave it outside -- the near-side constraint `minZoneSize` cannot see.
+     *
+     * Both are expressed as a maximum x (or y), because a near-edge drag inward *increases* it.
+     */
+    const far = origin + requested
+    const byFloor = far - clamped
+    const byChild = slack[key] === Infinity ? Infinity : was + slack[key]
+    const at = Math.min(origin, byFloor, byChild)
+
+    /* The far edge holds still. By the drag's own reckoning it is at `origin + requested`, so the
+       size is whatever reaches it from wherever the origin ended up -- never below the clamp. */
+    return { at, size: Math.max(clamped, far - at) }
   }
 
-  out = out.map((node) => {
-    if (node.parentId !== zoneId) return node
-
-    let sized = node
-    if (node.type === 'zone') {
-      const { width, height } = zoneSize(node)
-      sized = {
-        ...node,
-        width: Math.max(MIN_ZONE_WIDTH, Math.round(width * fx)),
-        height: Math.max(MIN_ZONE_HEIGHT, Math.round(height * fy)),
-      }
-    }
-
-    /* Read off `sized`, so a nested zone is clamped by the size it just became rather
-       than the one it is leaving. */
-    const extent = childExtent(sized)
-
-    /* Floored at 0 rather than at the zone's padding: 0 is the zone's own box, which
-       is what `minZoneSize` measures and therefore all this has to satisfy. Only
-       reachable at all when the child is wider than the room its parent has, which
-       after a scale means a sub-zone already at MIN -- a component has 40px of slack
-       even in the narrowest zone React Flow's resizer allows. */
-    const fit = (value, size, childSize) =>
-      Math.max(0, Math.min(value, size - childSize - CHILD_MARGIN))
-
-    return {
-      ...sized,
-      position: {
-        x: fit(Math.round((node.position?.x ?? 0) * fx), room.width, extent.width),
-        y: fit(Math.round((node.position?.y ?? 0) * fy), room.height, extent.height),
-      },
-    }
-  })
-
-  for (const child of children) {
-    if (child.type !== 'zone') continue
-    const before = zoneSize(child)
-    const after = zoneSize(out.find((node) => node.id === child.id))
-    out = scaleZoneChildren(out, child.id, before, after, seen)
-  }
-  return out
-}
-
-/*
- * A zone's children projected onto one axis, with the other axis kept so rows can be told
- * apart. Shared by the two floors below, which ask different questions of the same shape.
- */
-function axisBoxes(children, axis) {
-  const horizontal = axis === 'x'
-  return (children ?? []).map((child) => {
-    const extent = childExtent(child)
-    return {
-      start: horizontal ? (child.position?.x ?? 0) : (child.position?.y ?? 0),
-      size: horizontal ? extent.width : extent.height,
-      crossStart: horizontal ? (child.position?.y ?? 0) : (child.position?.x ?? 0),
-      crossSize: horizontal ? extent.height : extent.width,
-    }
-  })
-}
-
-/** Do two projected boxes overlap on the axis that is *not* being measured? */
-function sameRow(a, b) {
-  return (
-    b.crossStart < a.crossStart + a.crossSize && a.crossStart < b.crossStart + b.crossSize
-  )
-}
-
-/**
- * The smallest extent along one axis that still holds a zone's children side by side.
- *
- * Measured per row -- the set of children that overlap each other on the *other* axis, and
- * so genuinely have to be laid out along this one. Cards in different rows are free to
- * occupy the same span, and counting them as competing for it would floor a tall zone's
- * width at the sum of every card in it.
- *
- * The gap demanded between two of them is `MIN_CHILD_GAP` or their current gap, whichever is
- * smaller. Two cards the user placed touching stay touching: this is a limit on how much
- * crowding a *resize* introduces, not an opinion about a layout somebody arranged by hand.
- *
- * Rows are not transitive here -- A may share a row with B and B with C without A and C
- * overlapping -- so this is a lower bound rather than an exact packing. That is the right
- * shape for a floor: too small merely allows a tighter shrink than ideal, whereas too large
- * would stop a zone shrinking at all.
- */
-function minRoom(children, axis) {
-  const boxes = axisBoxes(children, axis)
-  let room = 0
-
-  for (const anchor of boxes) {
-    const row = boxes.filter((box) => sameRow(anchor, box)).sort((a, b) => a.start - b.start)
-    let needed = 0
-    let previous = null
-    for (const box of row) {
-      if (previous) {
-        const gap = Math.max(0, box.start - (previous.start + previous.size))
-        needed += Math.min(MIN_CHILD_GAP, gap)
-      }
-      needed += box.size
-      previous = box
-    }
-    room = Math.max(room, needed + CHILD_MARGIN)
-  }
-
-  return room
-}
-
-/**
- * The smallest factor a zone's contents may be scaled by on one axis, or 0 when nothing
- * constrains it.
- *
- * Only pairs that are genuinely *beside* each other on this axis are counted. Two cards in
- * different rows slide past one another as a zone narrows without either becoming harder to
- * read, and treating them as a constraining pair would floor the width of a tall zone at
- * the width of its widest row -- which would stop most vertical shrinking dead.
- *
- * A pair already closer than the gap is skipped rather than pushed apart. This is a floor
- * on how much crowding a *resize* may introduce, not an opinion about a layout the user
- * arranged by hand; enforcing the gap on the way in would move cards someone deliberately
- * placed touching.
- *
- * @param axis  'x' or 'y' -- the axis being scaled
- */
-export function scaleFloor(children, axis) {
-  const boxes = axisBoxes(children, axis)
-
-  let floor = 0
-  for (const first of boxes) {
-    for (const second of boxes) {
-      if (second.start <= first.start) continue
-      // Not side by side on this axis, so narrowing cannot bring them into contact.
-      if (!sameRow(first, second)) continue
-      // Already tighter than the gap: not this resize's doing, and not its to fix.
-      if (second.start - (first.start + first.size) < MIN_CHILD_GAP) continue
-      /* Positions scale and sizes do not, so the gap after scaling by f is
-         `separation * f - first.size`. Solving that for MIN_CHILD_GAP gives the factor
-         below which this pair would be closer than the gap. */
-      floor = Math.max(floor, (first.size + MIN_CHILD_GAP) / (second.start - first.start))
-    }
-  }
-
-  /* Capped at 1. A floor above it would mean the tightest pair is *already* closer than
-     the gap, which the skip above has excluded -- but a rounding error here would turn a
-     shrink into a grow, which is worth being unable to express. */
-  return Math.min(1, floor)
+  const x = axis('x', width, to.width ?? 0)
+  const y = axis('y', height, to.height ?? 0)
+  return { width: x.size, height: y.size, position: { x: x.at, y: y.at } }
 }
 
 /**
@@ -1050,6 +990,10 @@ export function toFlowEdge(edge) {
          point are two separate facts rather than one. */
       ...(edge.sourceAnchor ? { sourceAnchor: edge.sourceAnchor } : {}),
       ...(edge.targetAnchor ? { targetAnchor: edge.targetAnchor } : {}),
+      /* Where a loose end sits, for an end attached to no component yet -- see edges/looseEnds.js.
+         Only for an end that is actually null, so a stray point on an attached end is ignored. */
+      ...(edge.source == null && edge.sourcePoint ? { sourcePoint: edge.sourcePoint } : {}),
+      ...(edge.target == null && edge.targetPoint ? { targetPoint: edge.targetPoint } : {}),
       /* Same omit-when-absent reasoning for the styling fields: an unstyled connector has to
          serialize byte-identically to one that was never touched, or every diagram reads as
          dirty on open. FlowEdge supplies the actual defaults (source colour, solid, arrowEnd
@@ -1058,6 +1002,7 @@ export function toFlowEdge(edge) {
       ...(edge.strokeStyle ? { strokeStyle: edge.strokeStyle } : {}),
       ...(edge.arrowStart ? { arrowStart: edge.arrowStart } : {}),
       ...(edge.arrowEnd === false ? { arrowEnd: false } : {}),
+      ...(edge.label ? { label: edge.label } : {}),
     },
   }
 }

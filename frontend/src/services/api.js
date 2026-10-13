@@ -187,6 +187,14 @@ export const session = {
   /* A scope to save into with no token yet. Idempotent server-side, which is
      what makes it safe to call from an effect that may run twice. */
   startAnonymous: () => request('/api/session/anonymous', { method: 'POST' }),
+  /* Reconnect to a workspace this account connected before -- the one a saved diagram's
+     bound components came from -- without the token coming back up. Signed-in only; the
+     server picks from the account's own remembered connections. */
+  resume: (workspaceId) =>
+    request('/api/session/resume', {
+      method: 'POST',
+      body: workspaceId ? { workspace_id: workspaceId } : {},
+    }),
   /* Forget the *workspace credential*. Not the same as signing out of an account --
      see `auth.logOut`. */
   end: () => request('/api/session', { method: 'DELETE' }),

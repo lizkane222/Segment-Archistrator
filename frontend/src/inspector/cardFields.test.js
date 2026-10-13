@@ -210,3 +210,34 @@ describe('what a card prints', () => {
     expect(visibleCardFields({})).toEqual([])
   })
 })
+
+/*
+ * `fieldShown`'s `fallback`, which exists because one registry serves two very different surfaces.
+ *
+ * The table's defaults are about a component *card*: a 200px box on a diagram that may hold forty,
+ * which is why `description` starts off. A zone shares the registry -- so one eye toggle and one
+ * stored shape serve both -- and is not that thing: its description is a subtitle printed once under
+ * a title hundreds of pixels wide, and it was visible in every diagram drawn before the zone
+ * renderer consulted this at all. Resolving a zone against the card default blanked all of them
+ * silently, which is the failure this pins.
+ */
+describe('fieldShown with a caller-stated default', () => {
+  it('takes the caller’s default over the table’s when nothing is stored', () => {
+    expect(fieldShown({}, 'description')).toBe(false)
+    expect(fieldShown({}, 'description', { fallback: true })).toBe(true)
+  })
+
+  it('still lets a stored override win, in both directions', () => {
+    /* The whole point of the eye: a reader who turned a zone's description off gets it off, and one
+       who turned a component's on gets it on. A fallback only ever fills a silence. */
+    expect(fieldShown({ showFields: { description: false } }, 'description', { fallback: true })).toBe(false)
+    expect(fieldShown({ showFields: { description: true } }, 'description', { fallback: false })).toBe(true)
+  })
+
+  it('is unchanged for every caller that states nothing', () => {
+    /* The fallback is opt-in, so no existing call site moved. */
+    for (const field of CARD_FIELDS) {
+      expect(fieldShown({}, field.id)).toBe(field.defaultOn ?? false)
+    }
+  })
+})

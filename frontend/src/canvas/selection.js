@@ -13,10 +13,11 @@
  *     browser found, and NODE_WIDTH is the fallback -- so the box a card actually occupies
  *     is not on the node under any single key. See `componentSize` in layout.js.
  *
- * Zones are excluded from matching size and style: matching a zone's size would scale its
- * contents (`scaleZoneChildren`), so a "make these the same size" aimed at two components
- * would silently rearrange a third that merely happened to be selected with them. Align and
- * distribute are different -- a zone's box is exactly as usable as a component's for "line
+ * Zones are excluded from matching size and style. A zone's size is a fact about the region
+ * it draws around an arrangement rather than about the zone itself -- it can be no smaller
+ * than its contents (`clampZoneResize`) -- so "make these the same size" has no answer for
+ * two zones holding different things, and would leave one of them the wrong size anyway.
+ * Align and distribute are different -- a zone's box is exactly as usable as a component's for "line
  * these up" or "space these evenly", and there is no version of that request a user could
  * mean by selecting components instead when what they have selected is two zones. Those two
  * take `selectedAny`; everything else here still takes `selectedComponents`.

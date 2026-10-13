@@ -39,18 +39,23 @@ import { useChrome } from '../chrome.js'
 import { flowsAlong } from '../direction.js'
 import { parseFreeHandle, pointOnBorder } from '../handles.js'
 import { borderColorFor } from '../kinds.js'
-import { zoneNodeId } from '../layout.js'
+import { COMPONENT_Z, EDGE_HANDLE_Z, zoneNodeId } from '../layout.js'
+import { looseEnds, loosePoint, looseSide } from './looseEnds.js'
 import {
   cleanWaypoints,
   cornerHandles,
   dragCorner,
   dragSegment,
+  dragSplit,
+  handlesVisible,
   insertWaypoint,
+  reachingForHandles,
   lineStyleOf,
   moveWaypoint,
   removeWaypoint,
   routeEdge,
   segmentHandles,
+  splitHandles,
 } from './routing.js'
 
 /*
@@ -136,11 +141,28 @@ function centre(node) {
   return { x: at.x + width / 2, y: at.y + height / 2 }
 }
 
+/**
+ * How thick the line is drawn.
+ *
+ * Thicker with what it stands for when it is a merged line, capped -- a merged line has to look
+ * heavier than a single connection at a glance, and unbounded growth would make one edge into a band
+ * across the diagram. And a step thicker when selected, which with the halo is what makes a clicked
+ * connector visibly the one that was clicked.
+ */
+export function edgeStrokeWidth({ merged, selected, base }) {
+  const width = merged ? Math.min(1 + Math.log2(merged), 4) : (base ?? 1)
+  return selected ? Math.max(width, 1) + 1 : merged ? width : base
+}
+
 function resolveDrag(gesture, point) {
   if (gesture.mode === 'slide') return dragSegment(gesture.points, gesture.index, point)
   if (gesture.mode === 'corner') return dragCorner(gesture.points, gesture.index, point)
+  if (gesture.mode === 'split') return dragSplit(gesture.points, gesture.index, gesture.at, point)
   return moveWaypoint(gesture.list, gesture.index, point)
 }
+
+/* Just above the components and below the endpoint grips, so a grip on a label never loses its drag. */
+const EDGE_LABEL_Z = COMPONENT_Z + 1
 
 /* The three patterns the Edge Style tab offers. `undefined` for solid, matching how
    every other "unstyled" property in this app resolves -- an absent dash array is
@@ -166,8 +188,16 @@ export default function FlowEdge({
   selected,
 }) {
   const { screenToFlowPosition } = useReactFlow()
-  const { onWaypoints, adjustingEdgeId, walkthroughActive, flowPreview, routes, fanAnchors } =
-    useChrome()
+  const {
+    onWaypoints,
+    onEndpointMove,
+    endpointDropTarget,
+    adjustingEdgeId,
+    walkthroughActive,
+    flowPreview,
+    routes,
+    fanAnchors,
+  } = useChrome()
   /* Double-clicking the line puts it in adjust mode -- see Canvas's `onEdgeDoubleClick`. Held there
      rather than here so only one connector is ever in it: two edges showing handles at once means two
      sets of dots competing for the same few pixels wherever the lines cross. */
@@ -187,7 +217,16 @@ export default function FlowEdge({
    * it into a different zone changes every line leaving it without anything writing to
    * the edges themselves.
    */
-  const sourceData = useNodesData(source)?.data
+  /* Which ends are attached to nothing yet -- see edges/looseEnds.js. A loose end has a hidden pin
+     node standing in for it so React Flow will draw the edge at all, but nothing about that pin is
+     real: its position is read here straight from the stored point, and it has no colour to lend. */
+  const free = looseEnds(data ? { source, target, data } : null)
+
+  /* A connector coming *from* nothing yet takes the colour of the component it arrives at, which is
+     the only component it has -- the default grey would make it look unrelated to the one card it
+     is drawn against. */
+  const colourFrom = free.source ? target : source
+  const sourceData = useNodesData(colourFrom)?.data
   const sourceZoneData = useNodesData(sourceData?.zone ? zoneNodeId(sourceData.zone) : null)?.data
   const color = data?.color ?? borderColorFor(sourceData, sourceZoneData)
   const dashArray = dashArrayFor(data?.strokeStyle)
@@ -227,8 +266,47 @@ export default function FlowEdge({
 
   /* `?? 0` on the coordinates, not just on the anchor -- a floor that keeps `NaN` out of the path
      string on the frame before a node is measured, which would make the whole edge vanish. */
-  const start = fromAnchor ?? { x: sourceX ?? 0, y: sourceY ?? 0, position: sourcePosition }
-  const end = toAnchor ?? { x: targetX ?? 0, y: targetY ?? 0, position: targetPosition }
+  const attachedStart = fromAnchor ?? { x: sourceX ?? 0, y: sourceY ?? 0, position: sourcePosition }
+  const attachedEnd = toAnchor ?? { x: targetX ?? 0, y: targetY ?? 0, position: targetPosition }
+
+  /*
+   * One end of this connector being dragged.
+   *
+   * `{end, point}` -- which end, and where the pointer is now. Local so the grip follows the pointer
+   * at frame rate without a store write per mousemove, which would put one undo entry on the stack
+   * per pixel. Declared up here because it decides where the ends are drawn, below.
+   */
+  const [movingEnd, setMovingEnd] = useState(null)
+
+  /*
+   * Where each end is drawn, and which way it faces.
+   *
+   * An attached end is where its component's border says. A *loose* end -- attached to nothing, see
+   * edges/looseEnds.js -- is at its stored point; and an end being dragged is under the pointer. The
+   * last two have no side of their own, so they face whatever they are approached from (the nearest
+   * bend, else the other end): a line arriving from the left comes in travelling right, and the
+   * arrowhead points the way the line was going.
+   *
+   * The dragged end is routed live with the same router the committed line uses, so the connector
+   * follows the pointer and what is drawn mid-drag is what a drop on empty canvas would leave.
+   */
+  const floating = (which) =>
+    movingEnd?.end === which ? movingEnd.point : loosePoint({ [which]: which === 'source' ? source : target, data }, which)
+  const sourceFloat = floating('source')
+  const targetFloat = floating('target')
+  const start = sourceFloat
+    ? {
+        ...sourceFloat,
+        position: looseSide(sourceFloat, waypoints[0] ?? targetFloat ?? attachedEnd),
+      }
+    : attachedStart
+  const end = targetFloat
+    ? {
+        ...targetFloat,
+        position: looseSide(targetFloat, waypoints[waypoints.length - 1] ?? sourceFloat ?? attachedStart),
+      }
+    : attachedEnd
+  const floatingEnds = { source: Boolean(sourceFloat), target: Boolean(targetFloat) }
 
   const { path, labelX, labelY, points } = routeEdge({
     source: { x: start.x, y: start.y },
@@ -237,6 +315,7 @@ export default function FlowEdge({
     targetPosition: end.position,
     waypoints,
     line,
+    free: floatingEnds,
   })
 
   const paths = data?.paths ?? null
@@ -286,6 +365,7 @@ export default function FlowEdge({
       targetPosition: end.position,
       waypoints: shown,
       line,
+      free: floatingEnds,
     })
   const drawnPath = live ? live.path : path
   const drawnPoints = live ? live.points : points
@@ -381,6 +461,47 @@ export default function FlowEdge({
     [screenToFlowPosition, onWaypoints, id],
   )
 
+  /*
+   * Grab an end and move it.
+   *
+   * The same gesture shape as `startDrag` below, and the listeners are on `window` for the same
+   * load-bearing reason: the grip is unmounted the moment the drag begins (the others are hidden
+   * by `!movingEnd`, and this one is replaced by the ghost that follows the pointer), so
+   * `setPointerCapture` on it would be dropped and orphan the listeners meant to finish the
+   * gesture.
+   *
+   * Released over a component, the end attaches there. Released over empty canvas, the end is let go
+   * of and stays where it was dropped -- a loose end, pointing at a component that does not exist yet.
+   * A drop the rules refuse leaves the end where it was, and Canvas says why.
+   */
+  const startEndpointDrag = useCallback(
+    (event, end) => {
+      /* Or React Flow takes it as a click on the edge and then a pan of the pane. */
+      event.stopPropagation()
+      event.preventDefault()
+
+      const at = (moveEvent) => screenToFlowPosition({ x: moveEvent.clientX, y: moveEvent.clientY })
+      setMovingEnd({ end, point: at(event) })
+
+      const onMove = (moveEvent) => setMovingEnd({ end, point: at(moveEvent) })
+      const onUp = (upEvent) => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+        setMovingEnd(null)
+        /* Committed once, on release, like every other gesture here. The point goes too: released
+           over nothing, the end is let go of *there* and the connector becomes loose -- see
+           `onEndpointMove` in Canvas. */
+        const point = at(upEvent)
+        onEndpointMove?.(id, end, endpointDropTarget?.(point) ?? null, point)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+    },
+    [screenToFlowPosition, onEndpointMove, endpointDropTarget, id],
+  )
+
   /* Selected *or* in adjust mode. Selection is how you get here by accident and find the handles;
      the double-click is the deliberate way in, and is what the request asked for. */
   /*
@@ -393,7 +514,46 @@ export default function FlowEdge({
    * and reasonably concluded it was not. Revealing them under the pointer costs nothing and answers
    * the question before it is asked.
    */
-  const editable = (hovered || selected || adjusting) && Boolean(onWaypoints)
+  /*
+   * `dragging || movingEnd` is the load-bearing part, and its absence was a real bug.
+   *
+   * The pointer leaves the line the instant a drag begins -- that is what dragging *is* -- so
+   * `hovered` goes false, the whole block unmounts, and the element the gesture started on is gone.
+   * The listeners survive (they are on `window`, deliberately), but there is nothing left following
+   * the pointer and nothing to release onto: the drag silently did nothing. It only appeared to work
+   * when the connector happened to also be *selected*, which is how it was first tested and why this
+   * went unnoticed.
+   *
+   * So a live gesture keeps the handles mounted regardless of where the pointer has gone, which is
+   * the same reasoning that keeps a node's own connection dots up while a drag from it is in flight
+   * (see `visible` in nodes/ConnectionHandles.jsx).
+   */
+  const reaching = reachingForHandles({ hovered, selected, adjusting, dragging, movingEnd })
+  const editable = handlesVisible({ hovered, selected, adjusting, dragging, movingEnd, onWaypoints })
+
+  /*
+   * The two endpoint grips, and where each one is drawn.
+   *
+   * At `start` and `end` -- the points this component actually strokes between, resolved above
+   * through a stored anchor, then a fanned-out share of the side, then React Flow's own
+   * coordinates. That is the whole fix for a grip that could not be hit: it is on the line by
+   * construction rather than at a midpoint the line may have been moved away from.
+   *
+   * The end being dragged is at the pointer, because `start`/`end` already are -- the line is
+   * re-routed to it live, see `floating` above.
+   *
+   * A loose end's grip is always drawn, not only on hover: it is the one thing on the canvas that
+   * says "this connector is not finished", and the only handle by which it can be finished.
+   */
+  /* Gated on `onEndpointMove` rather than on `editable`: these commit an *attachment*, and the route
+     handles' `onWaypoints` has nothing to do with whether an end can be moved. */
+  const grips =
+    (reaching || free.source || free.target) && onEndpointMove
+      ? [
+          { end: 'source', at: start, loose: free.source },
+          { end: 'target', at: end, loose: free.target },
+        ]
+      : []
 
   return (
     <>
@@ -435,6 +595,27 @@ export default function FlowEdge({
         * the edge, and no interference with it.
         */}
       <g onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}>
+      {/*
+        * The selection halo: a wide, soft band of the line's own colour underneath it.
+        *
+        * The line's stroke is set inline (it is per-connector), which beats React Flow's own
+        * `.selected` rule -- so a clicked connector used to look exactly like an unclicked one, and
+        * the only sign anything had happened was the handles appearing. Drawn under the line and with
+        * no pointer events, so it neither hides the stroke nor steals the click from the hit area.
+        */}
+      {selected && (
+        <path
+          d={drawnPath}
+          fill="none"
+          stroke={color}
+          strokeWidth={9}
+          strokeOpacity={0.22}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ pointerEvents: 'none' }}
+          data-testid="edge-selection-halo"
+        />
+      )}
       <BaseEdge
         id={id}
         path={drawnPath}
@@ -452,10 +633,7 @@ export default function FlowEdge({
              walkthrough running and no path on it, it recedes with the rest of the diagram the event
              never touched; otherwise it is left alone. */
           opacity: paths ? 0.2 : walkthroughActive ? 0.3 : style?.opacity,
-          /* Thicker with what it stands for, capped: a merged line has to look heavier than a
-             single connection at a glance, and unbounded growth would make one edge into a band
-             across the diagram. */
-          strokeWidth: merged ? Math.min(1 + Math.log2(merged), 4) : style?.strokeWidth,
+          strokeWidth: edgeStrokeWidth({ merged, selected, base: style?.strokeWidth }),
         }}
       />
       </g>
@@ -547,16 +725,82 @@ export default function FlowEdge({
         </g>
       ))}
 
-      {editable && (
+      {(editable || grips.some((grip) => reaching || grip.loose)) && (
         <EdgeLabelRenderer>
-          {/* Existing bends: drag to move, double-click to straighten out. */}
-          {shown.map((point, index) => (
+          {/*
+            * The handles count as "on the connector" too, or none of them can be grabbed by hover.
+            *
+            * They are portalled out of the SVG, so they are not inside the `g` whose enter/leave
+            * drives `hovered`. Moving off the line onto a handle left that `g`, `hovered` went false
+            * and the handles unmounted from under the pointer -- which put it back over the line,
+            * remounted them, and so on: they flickered on every move and a press landed on the
+            * line's hit area instead. React dispatches the line's leave and this wrapper's enter in
+            * the same event, so the state never drops in between. `contents`, so the wrapper adds no
+            * box of its own and each handle keeps positioning against the renderer.
+            */}
+          <div
+            className="contents"
+            onPointerEnter={() => setHovered(true)}
+            onPointerLeave={() => setHovered(false)}
+          >
+          {/*
+            * The two ends, grabbable.
+            *
+            * A ring rather than a filled dot, so three draggable things on one line stay
+            * tellable apart at a glance: a bend is a solid dot, a corner is a diamond, an end is
+            * a ring. Larger than either, because it is the coarsest of the three gestures and
+            * the one a reader reaches for without knowing it exists.
+            *
+            * Drawn before the route handles so that where an end and a bend coincide -- a
+            * connector whose first waypoint sits on the border it leaves -- the bend is on top
+            * and still removable. The end has the whole rest of the border to be grabbed on; a
+            * bend has only its own point.
+            */}
+          {grips.filter((grip) => reaching || grip.loose).map((grip) => (
+            <div
+              key={`end-${grip.end}`}
+              data-testid={`edge-grip-${grip.end}`}
+              className={`nodrag nopan absolute rounded-full border-2 shadow transition-opacity ${
+                /* A loose end is larger and dashed: it is attached to nothing, and it is the handle a
+                   reader has to find to finish the connector. */
+                grip.loose ? 'h-4 w-4 border-dashed bg-white/90' : 'h-3.5 w-3.5 bg-white'
+              } ${
+                movingEnd?.end === grip.end ? 'cursor-grabbing opacity-100' : 'cursor-grab opacity-80 hover:opacity-100'
+              }`}
+              style={{
+                transform: `translate(-50%, -50%) translate(${grip.at.x}px, ${grip.at.y}px)`,
+                borderColor: color,
+                pointerEvents: 'all',
+                /* Above the component band. A grip sits on a card's border by construction, right
+                   over that card's own connection handle -- and React Flow renders the node layer
+                   after this one, so without this the handle takes the pointer and a drag on the
+                   grip starts drawing a new connection. See EDGE_HANDLE_Z. */
+                zIndex: EDGE_HANDLE_Z,
+              }}
+              title={
+                grip.loose
+                  ? 'Not connected yet. Drag onto a component to connect it, or anywhere to move it.'
+                  : grip.end === 'source'
+                    ? 'Drag to move where this connector leaves from. Drop on empty canvas to leave it unconnected.'
+                    : 'Drag to move where this connector arrives. Drop on empty canvas to leave it unconnected.'
+              }
+              onPointerDown={(event) => startEndpointDrag(event, grip.end)}
+            />
+          ))}
+
+          {/* Existing bends: drag to move, double-click to straighten out. Hidden while an end
+              is being moved -- they are drawn from a route that is about to be recomputed
+              against a different endpoint, so they would be handles onto a stale line. */}
+          {editable && !movingEnd && shown.map((point, index) => (
             <div
               key={`bend-${index}`}
               className="nodrag nopan absolute h-2.5 w-2.5 cursor-move rounded-full border-2 border-white bg-twilio-blue shadow"
               style={{
                 transform: `translate(-50%, -50%) translate(${point.x}px, ${point.y}px)`,
                 pointerEvents: 'all',
+                /* Same reason as the grips above: a bend dragged over a card would otherwise be
+                   unreachable, which is the bug this whole layer had. */
+                zIndex: EDGE_HANDLE_Z,
               }}
               title="Drag to move this bend. Double-click to remove it."
               onPointerDown={(event) => startDrag(event, { index, list: committed.current })}
@@ -570,7 +814,9 @@ export default function FlowEdge({
           {/* One dot per real bend. Dragging it moves *both* segments that meet there, so the
               angle stays square -- see `dragCorner`. Drawn as a diamond so it is not mistaken for a
               waypoint dot, which moves freely and would break the angle. */}
-          {!dragging &&
+          {editable &&
+            !dragging &&
+            !movingEnd &&
             line === 'orthogonal' &&
             cornerHandles(drawnPoints).map((handle) => (
               <div
@@ -579,6 +825,7 @@ export default function FlowEdge({
                 style={{
                   transform: `translate(-50%, -50%) translate(${handle.x}px, ${handle.y}px) rotate(45deg)`,
                   pointerEvents: 'all',
+                  zIndex: EDGE_HANDLE_Z,
                 }}
                 title="Drag to move this corner. Both sides of the angle follow it."
                 onPointerDown={(event) =>
@@ -587,9 +834,42 @@ export default function FlowEdge({
               />
             ))}
 
+          {/* Step handles: a small square a quarter of the way in from each end of a long straight
+              run. Dragging one splits the run there and moves the far part to the pointer, which adds
+              two new right angles -- the way to get the middle of a line round a card sitting in its
+              way without moving the whole segment. See `dragSplit`. */}
+          {editable &&
+            !dragging &&
+            !movingEnd &&
+            line === 'orthogonal' &&
+            splitHandles(drawnPoints).map((handle) => (
+              <div
+                key={`split-${handle.index}-${handle.x}-${handle.y}`}
+                data-testid="edge-step-handle"
+                className="nodrag nopan absolute h-2 w-2 rounded-[1px] border border-twilio-blue bg-white opacity-50 shadow transition-opacity hover:opacity-100"
+                style={{
+                  transform: `translate(-50%, -50%) translate(${handle.x}px, ${handle.y}px)`,
+                  pointerEvents: 'all',
+                  zIndex: EDGE_HANDLE_Z,
+                  cursor: handle.axis === 'x' ? 'ns-resize' : 'ew-resize',
+                }}
+                title="Drag to add a step here — the line gets two new corners so it can go round something."
+                onPointerDown={(event) =>
+                  startDrag(event, {
+                    mode: 'split',
+                    index: handle.index,
+                    at: { x: handle.x, y: handle.y },
+                    points: drawnPoints,
+                  })
+                }
+              />
+            ))}
+
           {/* One handle per segment. Suppressed while a drag is live -- the segments are being
               recomputed every frame, so the handles would jump around under the pointer. */}
-          {!dragging &&
+          {editable &&
+            !dragging &&
+            !movingEnd &&
             segmentHandles(drawnPoints).map((handle) => {
               /*
                * A right-angle segment slides; anything else bends.
@@ -617,6 +897,7 @@ export default function FlowEdge({
                   style={{
                     transform: `translate(-50%, -50%) translate(${handle.x}px, ${handle.y}px)`,
                     pointerEvents: 'all',
+                    zIndex: EDGE_HANDLE_Z,
                   }}
                   title={
                     slide
@@ -649,6 +930,30 @@ export default function FlowEdge({
                 />
               )
             })}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+
+      {/* A connector's own words, at the route's midpoint. Pointer events off, so the label never
+          steals the click that selects or bends the line underneath it -- which is also what makes it
+          safe to lift above the components: without a z-index every node, zone backdrops included,
+          paints over the edge-label layer (see EDGE_HANDLE_Z), and a label on a line crossing a zone
+          vanished under it. Kept on one line per line of text, because the label box is otherwise
+          only as wide as the empty space React Flow gives it and wraps a word per row. */}
+      {data?.label && (
+        <EdgeLabelRenderer>
+          <div
+            className="pointer-events-none absolute whitespace-pre rounded border border-twilio-gray-20 bg-white/95 px-1.5 py-px text-center text-[10px] leading-snug text-twilio-gray-90 shadow-sm"
+            style={{
+              zIndex: EDGE_LABEL_Z,
+              transform: `translate(-50%, -50%) translate(${live ? live.labelX : labelX}px, ${
+                (live ? live.labelY : labelY) + (merged ? 14 : 0)
+              }px)`,
+            }}
+            data-testid="edge-label"
+          >
+            {data.label}
+          </div>
         </EdgeLabelRenderer>
       )}
 

@@ -274,7 +274,10 @@ export function collapseGraph(nodes, edges, collapsed) {
       continue
     }
 
-    const pair = `${source}->${target}`
+    /* A loose end (an end attached to nothing -- see edges/looseEnds.js) is a different place for
+       every connector that has one, so two of them leaving the same stack are two lines, not one
+       merged line with a count. Keyed by the edge's own id to keep them apart. */
+    const pair = source && target ? `${source}->${target}` : `${source ?? edge.id}->${target ?? edge.id}`
     const existing = merged.get(pair)
     if (existing) {
       existing.data.count += 1

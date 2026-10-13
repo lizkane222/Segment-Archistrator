@@ -25,7 +25,7 @@ from apps.segmentapi.exceptions import SegmentAuthError, SegmentError
 from apps.segmentapi.graphql import SegmentGraphQLClient
 
 from .authentication import WorkspacePrincipal
-from .models import OperatorWorkspaceBookmark, WorkspaceSession
+from .models import OperatorWorkspaceBookmark, RememberedConnection, WorkspaceSession
 from .permissions import AllowAny, HasSession
 from .serializers import StartSessionSerializer, WorkspaceSerializer
 
@@ -199,6 +199,9 @@ class SessionView(APIView):
                 WorkspaceSession.objects.filter(anon_scope=anonymous_scope).exclude(
                     pk=session.pk
                 ).delete()
+            # Kept for the account, so the connection outlives this session -- see
+            # `RememberedConnection`. A no-op for someone who has not signed in.
+            RememberedConnection.remember(session)
 
         logger.info(
             "Started %s session for workspace %s (%s), claimed %d diagram(s)",
@@ -394,6 +397,13 @@ class SessionView(APIView):
     def delete(self, request):
         session = request.user.session
         workspace_slug = session.workspace_slug
+        # Forget the remembered copy too. Disconnect is the one control that says "stop
+        # holding this credential", and leaving it on the account would hand it straight
+        # back on the next sign-in.
+        if session.account_id and session.workspace_id:
+            RememberedConnection.objects.filter(
+                account_id=session.account_id, workspace_id=session.workspace_id
+            ).delete()
         # Delete the row, not just the cookie: that removes the encrypted token
         # from the database rather than leaving it orphaned.
         session.delete()
@@ -402,6 +412,47 @@ class SessionView(APIView):
         response = Response(status=status.HTTP_204_NO_CONTENT)
         response.delete_cookie(settings.WORKSPACE_SESSION_COOKIE, path="/")
         return response
+
+
+@method_decorator(csrf_protect, name="post")
+class ResumeConnectionView(APIView):
+    """
+    Reconnect to a workspace this account connected before, without pasting the token.
+
+    `POST /api/session/resume {"workspace_id": "..."}` -- the id a saved diagram records
+    for its bound components. Omitted, it means "the one I used last". Answers with the
+    ordinary session payload, so the SPA has one shape to read.
+
+    Only ever from the caller's own account's remembered connections: the workspace id
+    in the body chooses *which* of them, it never grants one. The session id is not
+    rotated -- no identity changes, only which credential this session holds.
+    """
+
+    permission_classes = [HasSession]
+
+    def post(self, request):
+        session = request.user.session
+        if not session.account_id:
+            return Response(
+                {"error": {"code": "needs_account", "message": "Sign in to reconnect a workspace."}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        workspace_id = str(request.data.get("workspace_id") or "").strip()
+        remembered = RememberedConnection.lookup(session.account, workspace_id)
+        if remembered is None:
+            return Response(
+                {
+                    "error": {
+                        "code": "not_remembered",
+                        "message": "That workspace has not been connected from this account.",
+                    }
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        with transaction.atomic():
+            remembered.apply_to(session)
+        logger.info("Resumed remembered connection to workspace %s", session.workspace_slug)
+        return Response(session_payload(session))
 
 
 @method_decorator(csrf_protect, name="post")

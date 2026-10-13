@@ -11,6 +11,7 @@
 import { RotateCcw } from 'lucide-react'
 
 import { EditableText, EmptyNote, Row, Section } from './primitives.jsx'
+import { cardField, fieldShown, toggleField } from './cardFields.js'
 import { ZONE_STYLES, ZONE_SWATCHES, zoneStyleFor } from '../canvas/kinds.js'
 import { zoneProductOf } from '../canvas/frames.js'
 import { zoneSize } from '../canvas/layout.js'
@@ -24,6 +25,22 @@ export default function ZoneTab({ node, onUpdate }) {
      "Default" instead of the Segment default it actually falls back to -- `zoneStyleFor` in
      canvas/kinds.js has resolved by product all along. */
   const isProduct = Boolean(ZONE_STYLES[zoneProductOf(data.id)])
+
+  /* Same eye as OverviewTab.jsx: is this field printed on the canvas, and how to flip it. Zones
+     share the `cardFields.js` registry with components so that one toggle and one stored shape
+     serve both -- but not its *default*: a zone's description is its subtitle and starts visible,
+     where a component's is prose for the sidebar and starts hidden. The panel has to agree with
+     `ZoneNode` about that or the eye would show closed on a description plainly on screen. */
+  const eye = (id) =>
+    cardField(id)
+      ? {
+          shown: fieldShown(data, id, { fallback: true }),
+          /* The same `fallback` to both, or the toggle prunes an override the reader meant and the
+             field springs back -- see `toggleField`. */
+          onToggle: (shown) =>
+            onUpdate({ showFields: toggleField(data, id, shown, { fallback: true }) }),
+        }
+      : null
 
   return (
     <>
@@ -44,6 +61,7 @@ export default function ZoneTab({ node, onUpdate }) {
           value={data.description ?? ''}
           placeholder="What lives in this region"
           multiline
+          field={eye('description')}
           onCommit={(description) => onUpdate({ description })}
         />
         <Row label="Kind" value={data.custom ? 'Custom region' : 'Segment pipeline zone'} />

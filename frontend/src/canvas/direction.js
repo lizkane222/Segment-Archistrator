@@ -95,13 +95,18 @@ export function reverseEdge(edge) {
   const waypoints = edge.data?.waypoints
   const sourceAnchor = edge.data?.sourceAnchor
   const targetAnchor = edge.data?.targetAnchor
+  /* A loose end's point travels with it, so a connector "from A to nothing yet" reversed is one from
+     nothing yet to A -- still ending where it was drawn. See canvas/edges/looseEnds.js. */
+  const sourcePoint = edge.data?.sourcePoint
+  const targetPoint = edge.data?.targetPoint
+  const points = sourcePoint || targetPoint
   return {
     ...edge,
     source: edge.target,
     target: edge.source,
     sourceHandle: edge.targetHandle ?? null,
     targetHandle: edge.sourceHandle ?? null,
-    ...((waypoints?.length || sourceAnchor || targetAnchor)
+    ...((waypoints?.length || sourceAnchor || targetAnchor || points)
       ? {
           data: {
             ...edge.data,
@@ -109,6 +114,7 @@ export function reverseEdge(edge) {
             ...(sourceAnchor || targetAnchor
               ? { sourceAnchor: targetAnchor ?? null, targetAnchor: sourceAnchor ?? null }
               : {}),
+            ...(points ? { sourcePoint: targetPoint, targetPoint: sourcePoint } : {}),
           },
         }
       : {}),

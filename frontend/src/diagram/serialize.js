@@ -21,6 +21,7 @@
 
 import { zoneSize } from '../canvas/layout.js'
 import { zoneOfParent } from '../canvas/rules.js'
+import { looseEnds, loosePoint } from '../canvas/edges/looseEnds.js'
 
 /* Fields React Flow adds or manages. Persisting them is either meaningless or
    wrong on the next load, so they are dropped on the way out. */
@@ -147,11 +148,18 @@ export function serializeZone(node) {
   })
 }
 
+/* A loose end's point, rounded like every stored coordinate, or null for an attached end. */
+function looseStored(edge, end) {
+  const point = loosePoint(edge, end)
+  return point ? { x: Math.round(point.x), y: Math.round(point.y) } : null
+}
+
 export function serializeEdge(edge) {
   return {
     id: edge.id,
-    source: edge.source,
-    target: edge.target,
+    /* Null for a loose end -- a pin id from the canvas is never a component, so it is never stored. */
+    source: loosePoint(edge, 'source') ? null : edge.source,
+    target: loosePoint(edge, 'target') ? null : edge.target,
     /*
      * Which side of each node the connector meets, when the user has chosen one.
      *
@@ -171,6 +179,12 @@ export function serializeEdge(edge) {
        midpoint -- see `fixedHandleForSide` in canvas/handles.js. */
     ...(edge.data?.sourceAnchor ? { sourceAnchor: edge.data.sourceAnchor } : {}),
     ...(edge.data?.targetAnchor ? { targetAnchor: edge.data.targetAnchor } : {}),
+    /* Where a loose end sits -- an end attached to no component yet, stored as a null `source` or
+       `target` plus this point. See canvas/edges/looseEnds.js. Only ever written for an end that is
+       actually loose, so a point left behind on an end that has since been attached cannot ride
+       along. */
+    ...(looseStored(edge, 'source') ? { sourcePoint: looseStored(edge, 'source') } : {}),
+    ...(looseStored(edge, 'target') ? { targetPoint: looseStored(edge, 'target') } : {}),
     /*
      * How the line is drawn, and the bends the user dragged into it.
      *
@@ -218,6 +232,9 @@ export function serializeEdge(edge) {
     ...(edge.data?.strokeStyle ? { strokeStyle: edge.data.strokeStyle } : {}),
     ...(edge.data?.arrowStart ? { arrowStart: edge.data.arrowStart } : {}),
     ...(edge.data?.arrowEnd === false ? { arrowEnd: false } : {}),
+    /* Words on the line itself -- "track calls", "nightly", a Mermaid link's `|label|`. Omitted when
+       empty, for the byte-identical reason above. */
+    ...(edge.data?.label ? { label: edge.data.label } : {}),
     phase: edge.data?.phase ?? null,
     discovered: edge.data?.discovered ?? false,
   }
@@ -244,6 +261,19 @@ export function serializeEdge(edge) {
  * the aggregate edges, and without the members they replaced. Serialization reads the
  * document; collapsing is what the canvas is handed.
  */
+/*
+ * Whether an edge is still drawable against the nodes being saved.
+ *
+ * Both ends a component that is being kept -- or one of them loose (see canvas/edges/looseEnds.js),
+ * which is an end deliberately attached to nothing, and the other a kept component. A connector loose
+ * at both ends connects nothing and is dropped like any other orphan.
+ */
+function keepsEnds(edge, kept) {
+  const free = looseEnds(edge)
+  if (free.source && free.target) return false
+  return (free.source || kept.has(edge.source)) && (free.target || kept.has(edge.target))
+}
+
 export function serializeGraph({
   nodes = [],
   edges = [],
@@ -262,7 +292,7 @@ export function serializeGraph({
     /* An edge whose endpoint is gone would fail the server's validation and, more
        to the point, cannot be drawn. React Flow normally deletes these with the
        node; this guards the case where it did not. */
-    edges: edges.filter((e) => kept.has(e.source) && kept.has(e.target)).map(serializeEdge),
+    edges: edges.filter((e) => keepsEnds(e, kept)).map(serializeEdge),
     /* Always present, even when empty. A saved document with no `zones` key means
        "written before zones were part of the document" and `buildLayout` falls back
        to the topology; an empty array has to mean "the user deleted them all". */

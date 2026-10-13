@@ -137,3 +137,5 @@ export function preference(key, fallback, storage = safeStorage()) {
  * store per key, shared by every reader, is what makes the two panes agree.
  */
 export const NOTES_LANE_OPEN = preference('notes-lane-open', true)
+export const PALETTE_OPEN = preference('palette-open', true)
+export const INSPECTOR_OPEN = preference('inspector-open', true)

@@ -220,7 +220,9 @@ class WorkspaceSession(models.Model):
         )
 
     @classmethod
-    def start_for_account(cls, account, *, anon_scope: str = "") -> "WorkspaceSession":
+    def start_for_account(
+        cls, account, *, anon_scope: str = "", connection: "WorkspaceSession | None" = None
+    ) -> "WorkspaceSession":
         """
         A fresh session belonging to an account.
 
@@ -228,16 +230,35 @@ class WorkspaceSession(models.Model):
         rotating the id means a session cookie that was floating around before anyone
         signed in cannot be used afterwards. The caller carries `anon_scope` across
         because it is the only proof of which unsaved work belonged to that browser.
+
+        `connection` is the outgoing session when its workspace credential should come
+        along too. Without it, signing in silently disconnected the workspace the browser
+        had just connected -- and with it every diagram shared with that workspace. The
+        caller must delete `connection` first: the uniqueness constraint is on
+        (workspace, token), so the credential can move but cannot be in two rows at once.
         """
+        credential = {
+            "workspace_id": "",
+            "workspace_name": "",
+            "workspace_slug": "",
+            "token_fingerprint": "",
+            "encrypted_token": None,
+            "credential_kind": "",
+        }
+        if connection is not None and connection.has_token:
+            credential = {
+                "workspace_id": connection.workspace_id,
+                "workspace_name": connection.workspace_name,
+                "workspace_slug": connection.workspace_slug,
+                "region": connection.region,
+                "token_fingerprint": connection.token_fingerprint,
+                "encrypted_token": connection.encrypted_token,
+                "credential_kind": connection.credential_kind,
+            }
         return cls.objects.create(
             account=account,
             anon_scope=anon_scope or cls.new_anon_scope(),
-            workspace_id="",
-            workspace_name="",
-            workspace_slug="",
-            token_fingerprint="",
-            encrypted_token=None,
-            credential_kind="",
+            **credential,
         )
 
     @property
@@ -318,6 +339,112 @@ class OperatorWorkspaceBookmark(models.Model):
 
     def __str__(self):
         return f"{self.slug} ({self.account_id})"
+
+
+class RememberedConnection(models.Model):
+    """
+    A workspace credential an account has connected, kept beyond the session that held it.
+
+    A session row is the only thing that holds a credential, and it dies after
+    `WORKSPACE_SESSION_IDLE_HOURS` idle, on log out, and on every sign-in rotation. So
+    a signed-in person came back the next day disconnected, and every diagram shared
+    with that workspace dropped out of reach with it.
+
+    One row per (account, workspace), which is the lookup that matters: a saved diagram
+    records the `workspace_id` its bound components came from, so "reconnect to what
+    this diagram is about" is a single indexed read. `last_used_at` answers the other
+    question -- which workspace to reconnect on sign-in when nothing names one.
+
+    Signed-in accounts only. An anonymous session has no identity to remember it for,
+    and keeping a credential against a cookie would just be a longer-lived session.
+    Disconnect deletes the row: forgetting a credential has to actually forget it.
+    The token is encrypted under the same keys as sessions, and `reencrypt_tokens`
+    rotates both.
+    """
+
+    account = models.ForeignKey(
+        "accounts.Account",
+        on_delete=models.CASCADE,
+        related_name="remembered_connections",
+    )
+    workspace_id = models.CharField(max_length=64)
+    workspace_name = models.CharField(max_length=255, blank=True)
+    workspace_slug = models.CharField(max_length=255, blank=True)
+    region = models.CharField(max_length=8, default="us")
+    credential_kind = models.CharField(
+        max_length=16,
+        choices=WorkspaceSession.CREDENTIAL_CHOICES,
+        default=WorkspaceSession.CREDENTIAL_PUBLIC_API,
+    )
+    encrypted_token = models.BinaryField()
+    token_fingerprint = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["account", "workspace_id"], name="uniq_account_remembered_workspace"
+            )
+        ]
+        indexes = [models.Index(fields=["account", "-last_used_at"])]
+
+    def __str__(self):
+        return f"{self.workspace_slug} ({self.account_id})"
+
+    @classmethod
+    def remember(cls, session: WorkspaceSession) -> "RememberedConnection | None":
+        """Keep `session`'s credential for its account. A no-op without both."""
+        if not (session.account_id and session.has_token and session.workspace_id):
+            return None
+        obj, _ = cls.objects.update_or_create(
+            account_id=session.account_id,
+            workspace_id=session.workspace_id,
+            defaults={
+                "workspace_name": session.workspace_name,
+                "workspace_slug": session.workspace_slug,
+                "region": session.region,
+                "credential_kind": session.credential_kind,
+                "encrypted_token": session.encrypted_token,
+                "token_fingerprint": session.token_fingerprint,
+                "last_used_at": timezone.now(),
+            },
+        )
+        return obj
+
+    @classmethod
+    def lookup(cls, account, workspace_id: str = "") -> "RememberedConnection | None":
+        """The connection for `workspace_id`, or the most recently used when not named."""
+        if account is None:
+            return None
+        rows = cls.objects.filter(account=account)
+        if workspace_id:
+            rows = rows.filter(workspace_id=workspace_id)
+        return rows.order_by("-last_used_at").first()
+
+    def apply_to(self, session: WorkspaceSession) -> WorkspaceSession:
+        """
+        Put this credential on `session`, in place, and mark it used.
+
+        Any *other* row already holding the same credential is deleted first: the
+        uniqueness constraint is on (workspace, token) among rows that hold one, and
+        a lapsed session of the same person's is exactly where a duplicate would be.
+        """
+        WorkspaceSession.objects.filter(
+            workspace_id=self.workspace_id,
+            token_fingerprint=self.token_fingerprint,
+            encrypted_token__isnull=False,
+        ).exclude(pk=session.pk).delete()
+        session.workspace_id = self.workspace_id
+        session.workspace_name = self.workspace_name
+        session.workspace_slug = self.workspace_slug
+        session.region = self.region
+        session.credential_kind = self.credential_kind
+        session.encrypted_token = self.encrypted_token
+        session.token_fingerprint = self.token_fingerprint
+        session.save()
+        RememberedConnection.objects.filter(pk=self.pk).update(last_used_at=timezone.now())
+        return session
 
 
 class WriteKeyRevealAudit(models.Model):

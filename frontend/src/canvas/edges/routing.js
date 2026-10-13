@@ -131,54 +131,100 @@ function straightPath(points) {
  * the points it passes through and is C1 continuous across them, which is the property being
  * bought here.
  *
- * The endpoint tangents are the handle directions rather than the neighbouring point, so a line
- * still leaves a component's right-hand side going right. Without that a curve to a component
- * up and to the left would leave the right-hand handle heading left, crossing back over the card
- * it just left.
+ * ## The two ends are square-on, exactly
+ *
+ * The interior tangents are Catmull-Rom's; the tangents at the two *endpoints* are not. The first
+ * control point sits straight out along the source side's normal and the last straight out along the
+ * target's, so the curve leaves and arrives perpendicular to the side it touches and the arrowhead
+ * -- which SVG orients along the final tangent -- points squarely into the component.
+ *
+ * This used to be approximated with phantom points either end fed through the spline, which blends
+ * the handle direction with the neighbouring waypoint. On a curve bent back over its own card that
+ * blend could leave a right-hand side heading left, and it always put the arrowhead at an angle to
+ * the border. A tangent that is merely *influenced* by the side is not one that meets it.
  */
 function curvedPath(points, fromDirection, toDirection) {
-  if (points.length === 2) {
-    /* Two points: a plain cubic leaning out of both ends. Identical in spirit to React Flow's
-       `getBezierPath`, written here so the lean distance matches the multi-point case. */
-    const [from, to] = points
-    const lean = Math.max(LEAN, Math.hypot(to.x - from.x, to.y - from.y) * 0.35)
-    const c1 = { x: from.x + fromDirection.x * lean, y: from.y + fromDirection.y * lean }
-    const c2 = { x: to.x + toDirection.x * lean, y: to.y + toDirection.y * lean }
-    return (
-      `M ${round(from.x)},${round(from.y)} ` +
-      `C ${round(c1.x)},${round(c1.y)} ${round(c2.x)},${round(c2.y)} ${round(to.x)},${round(to.y)}`
-    )
-  }
+  const count = points.length
+  const leanFor = (a, b) => Math.max(LEAN, Math.hypot(b.x - a.x, b.y - a.y) * 0.35)
 
-  /*
-   * Phantom points either end, placed along the handle directions, so the spline's first and
-   * last tangents come from the handles instead of from the second and second-to-last points.
-   * Catmull-Rom needs a neighbour on both sides of every point it interpolates, and the two
-   * endpoints have only one -- the usual fix is to duplicate them, which makes the line leave
-   * flat and ignore which side of the component it is attached to.
-   */
-  const first = points[0]
-  const last = points[points.length - 1]
-  const padded = [
-    { x: first.x + fromDirection.x * LEAN, y: first.y + fromDirection.y * LEAN },
-    ...points,
-    { x: last.x + toDirection.x * LEAN, y: last.y + toDirection.y * LEAN },
-  ]
+  /* The tangent at each interior point, per Catmull-Rom, scaled for the 1/6 conversion below. */
+  const tangentAt = (index) => ({
+    x: (points[index + 1].x - points[index - 1].x) / 6,
+    y: (points[index + 1].y - points[index - 1].y) / 6,
+  })
 
-  let path = `M ${round(first.x)},${round(first.y)}`
-  for (let index = 1; index < padded.length - 2; index += 1) {
-    const p0 = padded[index - 1]
-    const p1 = padded[index]
-    const p2 = padded[index + 1]
-    const p3 = padded[index + 2]
-    /* The standard Catmull-Rom to cubic-bezier conversion, at tension 1/6. Lower tension
-       overshoots at sharp bends and the line bulges past the component it was routed around,
-       which defeats the point of the waypoint. */
-    const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 }
-    const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 }
-    path += ` C ${round(c1.x)},${round(c1.y)} ${round(c2.x)},${round(c2.y)} ${round(p2.x)},${round(p2.y)}`
+  let path = `M ${round(points[0].x)},${round(points[0].y)}`
+  for (let index = 0; index < count - 1; index += 1) {
+    const from = points[index]
+    const to = points[index + 1]
+    let c1
+    if (index === 0) {
+      const lean = leanFor(from, to)
+      c1 = { x: from.x + fromDirection.x * lean, y: from.y + fromDirection.y * lean }
+    } else {
+      /* Tension 1/6. Lower tension overshoots at sharp bends and the line bulges past the
+         component it was routed around, which defeats the point of the waypoint. */
+      const tangent = tangentAt(index)
+      c1 = { x: from.x + tangent.x, y: from.y + tangent.y }
+    }
+    let c2
+    if (index + 1 === count - 1) {
+      const lean = leanFor(from, to)
+      c2 = { x: to.x + toDirection.x * lean, y: to.y + toDirection.y * lean }
+    } else {
+      const tangent = tangentAt(index + 1)
+      c2 = { x: to.x - tangent.x, y: to.y - tangent.y }
+    }
+    path += ` C ${round(c1.x)},${round(c1.y)} ${round(c2.x)},${round(c2.y)} ${round(to.x)},${round(to.y)}`
   }
   return path
+}
+
+/**
+ * The points of a straight route, with a short square-on lead at every end that meets a component.
+ *
+ * "Straight" used to be literally point to point, so a connector between two cards on a diagonal met
+ * both borders at an angle and its arrowhead lay across the edge of the card rather than pointing into
+ * it. Every connector has to meet its component perpendicular to the side it touches -- that is what
+ * makes it legible which side it is attached to -- so a straight line now leaves along the side's
+ * normal for `STEP_OFFSET`, runs direct, and arrives the same way.
+ *
+ * A free end (one attached to nothing yet) gets no lead: there is no side for it to be square to, and
+ * the arrow there should point the way the line is travelling.
+ *
+ * A lead is dropped when it would be collinear with the line anyway -- two cards level with each other
+ * -- so the plain case is still exactly two points.
+ */
+function straightThrough(points, fromDirection, toDirection, free) {
+  const first = points[0]
+  const last = points[points.length - 1]
+  const middle = points.slice(1, -1)
+  const sourceLead = free.source
+    ? null
+    : { x: first.x + fromDirection.x * STEP_OFFSET, y: first.y + fromDirection.y * STEP_OFFSET }
+  const targetLead = free.target
+    ? null
+    : { x: last.x + toDirection.x * STEP_OFFSET, y: last.y + toDirection.y * STEP_OFFSET }
+
+  /* Each lead is dropped when the point after it (before it, at the target) is straight out along the
+     same normal anyway -- judged against the other lead where there is one, not against the far
+     endpoint, or a line level with its source but arriving at a top side would skip the source lead
+     and leave the card at an angle. */
+  let out = [first, ...(sourceLead ? [sourceLead] : []), ...middle, ...(targetLead ? [targetLead] : []), last]
+  if (sourceLead && alreadyAlong(first, out[2], fromDirection)) out = [first, ...out.slice(2)]
+  if (targetLead && alreadyAlong(last, out[out.length - 3], toDirection)) {
+    out = [...out.slice(0, -2), last]
+  }
+  return out
+}
+
+/* Is `other` straight out from `point` along `direction` -- so a lead would add nothing? */
+function alreadyAlong(point, other, direction) {
+  const dx = other.x - point.x
+  const dy = other.y - point.y
+  const cross = dx * direction.y - dy * direction.x
+  const dot = dx * direction.x + dy * direction.y
+  return Math.abs(cross) < 0.5 && dot > 0
 }
 
 /**
@@ -317,32 +363,72 @@ function orthogonalThrough(points, fromDirection, toDirection) {
     : null
 
   const through = [source, fromGap, ...middle, ...(toGap ? [toGap] : []), target]
-  let horizontal = Math.abs(fromDirection.x) >= Math.abs(fromDirection.y)
+
+  /*
+   * The direction of travel so far, as a unit vector along one axis. Starts along the source side's
+   * normal, because that is the way the stub leaves.
+   *
+   * A direction and not merely an axis. "Carry on along the axis you were on" -- which is what this
+   * walk used to do -- is right when the next point is ahead and wrong when it is behind: the line runs
+   * back along the segment it just drew, which on screen is a spur doubling over itself and, out of a
+   * stub, a line running back over the card it just left. With the sign known, the walk carries on only
+   * when that moves forward, and turns first otherwise.
+   */
+  let heading = { x: Math.sign(fromDirection.x), y: Math.sign(fromDirection.y) }
+  const intoStub = toGap ? through.length - 2 : -1
 
   const corners = [through[0]]
   for (let index = 1; index < through.length; index += 1) {
     const from = corners[corners.length - 1]
     const to = through[index]
-    if (Math.abs(to.x - from.x) < 0.5 && Math.abs(to.y - from.y) < 0.5) {
+    const dx = to.x - from.x
+    const dy = to.y - from.y
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
       /* A stub that collapsed, because a waypoint already sits where the gap would go. Dropped
          rather than emitted, for the same reason the dogleg below is: a zero-length segment is a
          handle `segmentHandles` cannot aim and `dragSegment` cannot slide. */
       continue
     }
-    if (Math.abs(to.x - from.x) < 0.5 || Math.abs(to.y - from.y) < 0.5) {
-      /* Already aligned on one axis: one straight segment, no corner, and the axis of travel is
-         whichever one actually changed. Emitting a zero-length dogleg here is what produces the
-         stray 1px nubs on an otherwise clean orthogonal route. */
-      horizontal = Math.abs(to.x - from.x) >= Math.abs(to.y - from.y)
+    if (Math.abs(dx) < 0.5 || Math.abs(dy) < 0.5) {
+      /* Already aligned on one axis: one straight segment, no corner. Emitting a zero-length dogleg
+         here is what produces the stray 1px nubs on an otherwise clean orthogonal route. */
+      heading = Math.abs(dx) >= Math.abs(dy) ? { x: Math.sign(dx), y: 0 } : { x: 0, y: Math.sign(dy) }
       corners.push(to)
       continue
     }
-    corners.push(horizontal ? { x: to.x, y: from.y } : { x: from.x, y: to.y })
+
+    /* Carry on if that moves forward, turn first if it would reverse. */
+    const onX = heading.x !== 0
+    const forward = onX ? Math.sign(dx) === heading.x : Math.sign(dy) === heading.y
+    let horizontalFirst = onX ? forward : !forward
+
+    /*
+     * Never fold back at the arrowhead.
+     *
+     * The leg into the target's stub must not arrive travelling *away* from the component -- run left
+     * into a stub that then turns right into the card -- or the line doubles over itself right where
+     * the arrow is. That happens exactly when `from` is behind the stub, and then the last leg has to
+     * come in across the normal rather than along it. This outranks the rule above: a spur in the
+     * middle of a line is untidy, one at the arrowhead makes it unreadable which way the line points.
+     */
+    if (index === intoStub && !ahead(to, from, toDirection)) {
+      const normalIsX = Math.abs(toDirection.x) >= Math.abs(toDirection.y)
+      /* The last leg is the second of the two, so it runs across the normal when the first runs
+         along it. */
+      horizontalFirst = normalIsX
+    }
+
+    const corner = horizontalFirst ? { x: to.x, y: from.y } : { x: from.x, y: to.y }
+    corners.push(corner)
     corners.push(to)
-    /* The next segment starts on the other axis, because this one ended on it. */
-    horizontal = !horizontal
+    heading = horizontalFirst ? { x: 0, y: Math.sign(dy) } : { x: Math.sign(dx), y: 0 }
   }
   return corners
+}
+
+/* Is `point` in front of `origin`, along `direction` -- on the side the normal points to? */
+function ahead(origin, point, direction) {
+  return (point.x - origin.x) * direction.x + (point.y - origin.y) * direction.y > 0
 }
 
 /**
@@ -390,6 +476,8 @@ function roundedPolyline(points) {
 
 /* --- the one entry point ---------------------------------------------------- */
 
+const NO_FREE_ENDS = Object.freeze({ source: false, target: false })
+
 /**
  * The path for one connector, and where to hang its label.
  *
@@ -398,6 +486,8 @@ function roundedPolyline(points) {
  * @param targetPosition      which side it arrives at
  * @param waypoints           points the user dragged it through, absolute, in order
  * @param line                one of LINE_STYLES
+ * @param free                `{source, target}` -- which ends are attached to nothing yet. Only a
+ *   straight line cares: it gives an attached end a square-on lead and a free end none.
  * @returns `{path, labelX, labelY, points}` -- `points` is the full list including endpoints,
  *   which is what the waypoint handles are drawn from, so the handles and the line cannot
  *   disagree about where the route goes.
@@ -409,6 +499,7 @@ export function routeEdge({
   targetPosition,
   waypoints,
   line = DEFAULT_LINE_STYLE,
+  free = NO_FREE_ENDS,
 }) {
   const middle = cleanWaypoints(waypoints)
   const through = [source, ...middle, target]
@@ -424,7 +515,8 @@ export function routeEdge({
    */
   let points = through
   if (line === 'straight') {
-    path = straightPath(through)
+    points = straightThrough(through, fromDirection, toDirection, free ?? NO_FREE_ENDS)
+    path = straightPath(points)
   } else if (line === 'curved') {
     path = curvedPath(through, fromDirection, toDirection)
   } else if (middle.length === 0) {
@@ -590,6 +682,122 @@ export function segmentHandles(points) {
 export function dragSegment(points, index, to) {
   return interiorOf(slide(Array.isArray(points) ? points : [], index, to))
 }
+
+/**
+ * Put a new step into the middle of a right-angle segment, and return the waypoints that produce it.
+ *
+ * The gesture for getting a line round something in its way. Sliding a segment moves the *whole*
+ * segment, which is no help when only the middle of a long run passes through a card: what that needs
+ * is new angles, and there was no way to make them. This makes two: the segment is split where it was
+ * grabbed, and the part after the split slides to the pointer -- so the line runs along, steps across,
+ * and carries on at the new height. Do it twice, the second time sliding the far part back, and the
+ * line has jogged round the obstacle.
+ *
+ * The split point is projected onto the segment, so a grab a pixel off the line still splits it on
+ * the line. A diagonal segment is refused for the same reason `slide` refuses one.
+ *
+ * @param at  where along the segment the step starts, in flow coordinates
+ * @param to  where the pointer is now
+ */
+export function dragSplit(points, index, at, to) {
+  const list = Array.isArray(points) ? points : []
+  if (index < 0 || index + 1 >= list.length) return interiorOf(list)
+  const from = list[index]
+  const next = list[index + 1]
+  const horizontal = Math.abs(next.y - from.y) < 0.5
+  const vertical = Math.abs(next.x - from.x) < 0.5
+  if (!horizontal && !vertical) return interiorOf(list)
+
+  const clamp = (value, a, b) => Math.min(Math.max(value, Math.min(a, b)), Math.max(a, b))
+  const split = horizontal
+    ? { x: Math.round(clamp(at.x, from.x, next.x)), y: from.y }
+    : { x: from.x, y: Math.round(clamp(at.y, from.y, next.y)) }
+
+  /*
+   * The straight run the split is on, as one segment.
+   *
+   * A drawn route carries corners that are not corners -- the router's derived crossbar on a level
+   * connector is a zero-height Z, three collinear points. Sliding only from the split to the next of
+   * those would move part of the run and leave the rest behind, joined by a diagonal. So the collinear
+   * points are merged first and the whole remainder of the run steps together.
+   *
+   * The two stubs are kept even when collinear. They are where the line leaves and arrives square-on,
+   * and a run slid all the way to an endpoint would otherwise take the last leg with it and meet the
+   * component side-on.
+   */
+  const merged = mergeCollinear(list)
+  const run = merged.findIndex((point, at) => {
+    const after = merged[at + 1]
+    if (!after) return false
+    return horizontal
+      ? Math.abs(point.y - split.y) < 0.5 &&
+          Math.abs(after.y - split.y) < 0.5 &&
+          split.x >= Math.min(point.x, after.x) - 0.5 &&
+          split.x <= Math.max(point.x, after.x) + 0.5
+      : Math.abs(point.x - split.x) < 0.5 &&
+          Math.abs(after.x - split.x) < 0.5 &&
+          split.y >= Math.min(point.y, after.y) - 0.5 &&
+          split.y <= Math.max(point.y, after.y) + 0.5
+  })
+  if (run < 0) return interiorOf(list)
+
+  /* The split point twice: the first copy stays on the old line, the second is the start of the part
+     that slides. Sliding segment `run + 2` -- from the second copy to the end of the run -- keeps every
+     angle square, and keeps an endpoint put if the run ended at one. */
+  const expanded = [...merged.slice(0, run + 1), split, { ...split }, ...merged.slice(run + 1)]
+  return interiorOf(slide(expanded, run + 2, to))
+}
+
+/* The route with every point that sits in the middle of a straight run removed -- except the two
+   stubs next to the endpoints, see `dragSplit`. */
+function mergeCollinear(points) {
+  const out = []
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index]
+    const protectedPoint = index <= 1 || index >= points.length - 2
+    const previous = out[out.length - 1]
+    const next = points[index + 1]
+    if (!protectedPoint && previous && next) {
+      const straight =
+        (Math.abs(previous.x - point.x) < 0.5 && Math.abs(point.x - next.x) < 0.5) ||
+        (Math.abs(previous.y - point.y) < 0.5 && Math.abs(point.y - next.y) < 0.5)
+      if (straight) continue
+    }
+    out.push(point)
+  }
+  return out
+}
+
+/**
+ * Where the step handles sit on a right-angle route: a quarter and three quarters of the way along
+ * every axis-aligned segment long enough to hold them alongside its own slide bar.
+ *
+ * @returns `[{x, y, index, axis}]` -- `index` is the segment, as `dragSplit` takes it
+ */
+export function splitHandles(points) {
+  const out = []
+  for (let index = 1; index < (points?.length ?? 0); index += 1) {
+    const from = points[index - 1]
+    const to = points[index]
+    const horizontal = Math.abs(to.y - from.y) < 0.5
+    const vertical = Math.abs(to.x - from.x) < 0.5
+    if (!horizontal && !vertical) continue
+    if (Math.hypot(to.x - from.x, to.y - from.y) < SPLIT_MIN_LENGTH) continue
+    for (const along of [0.25, 0.75]) {
+      out.push({
+        x: from.x + (to.x - from.x) * along,
+        y: from.y + (to.y - from.y) * along,
+        index: index - 1,
+        axis: horizontal ? 'x' : 'y',
+      })
+    }
+  }
+  return out
+}
+
+/* Below this a segment has room for its slide bar and nothing else: three handles on a 60px run
+   cannot be told apart, let alone aimed at. */
+const SPLIT_MIN_LENGTH = 96
 
 /**
  * Drag one *corner* of an orthogonal route, moving both of the segments that meet there.
@@ -856,4 +1064,43 @@ export function avoidingWaypoints({
   /* Nothing worked. The straight-through route is kept: a line crossing a card is an obvious
      problem with an obvious fix, and a desperate detour is neither. */
   return []
+}
+
+/**
+ * Whether a connector's drag handles -- its two endpoint grips, its bends and its corners -- are
+ * drawn and grabbable.
+ *
+ * Pure, and exported for a test, because the last two terms are load-bearing and their absence was
+ * a bug nothing could have caught by reading the component.
+ *
+ * The first three are discovery. `hovered` is what advertises that a line is adjustable at all;
+ * `selected` is how someone finds the handles by accident; `adjusting` is the deliberate
+ * double-click, which survives clicking elsewhere.
+ *
+ * `dragging` and `movingEnd` are *survival*, and they are the fix. The pointer leaves the line the
+ * instant a drag begins -- that is what dragging is -- so `hovered` goes false, the block unmounts,
+ * and the element the gesture started on stops existing. The `window` listeners keep firing (they
+ * are on `window` precisely so they outlive the handle), but there is nothing following the pointer
+ * and nothing to release onto: the drag silently does nothing. It appeared to work only when the
+ * connector happened to also be selected, which is how it was first tried and why this went
+ * unnoticed until it was driven by hover alone in a browser.
+ *
+ * `Boolean(onWaypoints)` is last: an edge rendered outside the canvas -- the export path, a test --
+ * has no way to commit anything, so it draws itself and offers no handles.
+ */
+export function handlesVisible({ hovered, selected, adjusting, dragging, movingEnd, onWaypoints }) {
+  return reachingForHandles({ hovered, selected, adjusting, dragging, movingEnd }) && Boolean(onWaypoints)
+}
+
+/**
+ * Is something reaching for this connector's handles, whatever kind of handle that is?
+ *
+ * The first half of `handlesVisible`, split out because the *capability* half differs per handle and
+ * the reaching half does not. A bend needs `onWaypoints` to commit a route; an endpoint grip needs
+ * `onEndpointMove` to commit an attachment. Gating the grips on `handlesVisible` made them require
+ * both, so a canvas wired for one and not the other would silently hide the handles it could
+ * actually service.
+ */
+export function reachingForHandles({ hovered, selected, adjusting, dragging, movingEnd }) {
+  return Boolean(hovered || selected || adjusting || dragging || movingEnd)
 }

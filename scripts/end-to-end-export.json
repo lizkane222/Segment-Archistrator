@@ -1,0 +1,1073 @@
+{
+  "format": "segment-builder-diagram",
+  "version": 1,
+  "exportedAt": "2026-09-22T23:34:14.340Z",
+  "name": "End-to-end Connections & Unify",
+  "description": "The whole pipeline in one diagram: collection upstream of Segment, Connections, Unify and Engage, and a warehouse on each end -- one that Reverse ETL reads from, one that Profiles Sync writes to. Hand-arranged rather than laid out by column, and it uses the optional sub-zones, so it is the one to start from when the point is to show somebody the shape of the whole thing.",
+  "sourceTemplate": "end-to-end-full-pipeline",
+  "graph": {
+    "nodes": [
+      {
+        "id": "ph:profiles-sync",
+        "kind": "profile_sync",
+        "name": "Profiles Sync",
+        "zone": "segment",
+        "bound": false,
+        "style": {
+          "bg": "#ffffff",
+          "text": "#121c2d",
+          "shape": "rounded",
+          "border": "#f75a3b",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/profiles-sync/overview",
+        "bindable": false,
+        "position": {
+          "x": 1671,
+          "y": 483
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. On the Segment backdrop in no single product, because it genuinely belongs to two.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:source-web",
+        "kind": "source",
+        "name": "Source",
+        "zone": "sources",
+        "binds": {
+          "kind": "source"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/sources/catalog",
+        "bindable": true,
+        "position": {
+          "x": 33,
+          "y": 49
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Where events come in. The Sources box around it is a drawing choice -- a source on the bare Connections backdrop is filed just as correctly.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:mapping",
+        "kind": "destination_mapping",
+        "name": "Mapping",
+        "zone": "destinations",
+        "binds": {
+          "kind": "destination_mapping"
+        },
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/destinations/actions",
+        "bindable": true,
+        "position": {
+          "x": 310,
+          "y": 61
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "The trigger and the field mapping -- the last thing that touches the payload before it becomes this destination's own API call.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:destination",
+        "kind": "destination",
+        "name": "Destination",
+        "zone": "destinations",
+        "binds": {
+          "kind": "destination"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/destinations/catalog",
+        "bindable": true,
+        "position": {
+          "x": 29,
+          "y": 61
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Where events go out. An actions destination does nothing until a mapping says what to send it.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:identity-rule",
+        "kind": "identity_setting",
+        "name": "Identity Resolution Rule",
+        "size": {
+          "width": 390,
+          "height": 139
+        },
+        "zone": "unify",
+        "bound": false,
+        "rules": [
+          {
+            "limit": 1,
+            "frequency": "Ever",
+            "externalId": "user_id"
+          },
+          {
+            "limit": 5,
+            "frequency": "Ever",
+            "externalId": "email"
+          },
+          {
+            "limit": 5,
+            "frequency": "Ever",
+            "externalId": "anonymous_id"
+          }
+        ],
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/identity-resolution/identity-resolution-settings",
+        "bindable": false,
+        "position": {
+          "x": 413,
+          "y": 74
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "One identity resolution rule -- which identifiers may collapse two events into one profile. Maintained by hand; Segment publishes no API for these.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false,
+        "style": null
+      },
+      {
+        "id": "ph:profile-source",
+        "kind": "source",
+        "name": "Source",
+        "zone": "profile_sources",
+        "binds": {
+          "kind": "source"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/sources/catalog",
+        "bindable": true,
+        "position": {
+          "x": 37,
+          "y": 203
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "The same source again, as a feeder of profiles. Whether a source is connected to the space is a separate switch from the source existing, and it is the commonest reason Unify sees nothing.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:segment-profiles",
+        "kind": "destination",
+        "name": "Segment Profiles",
+        "zone": "profile_sources",
+        "binds": {
+          "kind": "destination"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/destinations/catalog",
+        "bindable": true,
+        "position": {
+          "x": 37,
+          "y": 347
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "The Segment Profiles destination: how a source's events reach the space. Drawn in Unify rather than Connections because what it does belongs to Unify, which is exactly the placement the canvas advises on rather than refuses.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:profile",
+        "kind": "profile",
+        "name": "Profile",
+        "zone": "profiles",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/identity-resolution/externalids",
+        "bindable": false,
+        "position": {
+          "x": 55,
+          "y": 119
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "A shape, not a person: identifiers, traits and events per profile. Never a real one, so exporting this diagram cannot put customer data in a slide deck.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:audience",
+        "kind": "audience",
+        "name": "Audience",
+        "zone": "engage",
+        "binds": {
+          "kind": "audience"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/engage/audiences",
+        "bindable": true,
+        "position": {
+          "x": 43,
+          "y": 259
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Computed from profiles, and what most journeys are keyed on.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:journey",
+        "kind": "journey",
+        "name": "Journey",
+        "zone": "engage",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/engage/journeys",
+        "bindable": false,
+        "position": {
+          "x": 43,
+          "y": 439
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Hand-authored. There is no Journeys API, so this one never binds to anything and is not counted as a placeholder.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:computed-trait",
+        "kind": "computed_trait",
+        "name": "Computed Trait",
+        "zone": "engage",
+        "binds": {
+          "kind": "computed_trait"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/traits/computed-traits",
+        "bindable": true,
+        "position": {
+          "x": 43,
+          "y": 349
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Configured in Unify, drawn in Engage -- this is where the recomputation is actually felt. Another placement the canvas advises on rather than refuses.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:debugger-source",
+        "kind": "source",
+        "name": "Debugger Source",
+        "zone": "debugger",
+        "binds": {
+          "kind": "source"
+        },
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/sources/catalog",
+        "bindable": true,
+        "position": {
+          "x": 34,
+          "y": 81
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "The source whose events the debugger is showing. Populated by playing a walkthrough, not by binding.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "manual:linked_audience:7a4178d7",
+        "kind": "linked_audience",
+        "name": "Linked Audience",
+        "zone": "linked_audiences",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/engage/audiences/linked-audiences",
+        "bindable": false,
+        "position": {
+          "x": 26,
+          "y": 82
+        },
+        "synthetic": false,
+        "description": "",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "manual:destination:9fd17656",
+        "kind": "destination",
+        "zone": "destinations~2",
+        "name": "Destination",
+        "description": "",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "collapsed": false,
+        "position": {
+          "x": 38,
+          "y": 79
+        }
+      },
+      {
+        "id": "manual:reverse_etl_model:842013e2",
+        "kind": "reverse_etl_model",
+        "zone": "warehouses~2",
+        "name": "Reverse ETL Model",
+        "description": "",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "collapsed": false,
+        "position": {
+          "x": 16,
+          "y": 65
+        }
+      },
+      {
+        "id": "manual:warehouse:62748910",
+        "kind": "warehouse",
+        "zone": "warehouses",
+        "name": "Warehouse",
+        "description": "",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "collapsed": false,
+        "position": {
+          "x": 37,
+          "y": 84
+        }
+      },
+      {
+        "id": "manual:warehouse:89e8083c",
+        "kind": "warehouse",
+        "zone": "warehouses~3",
+        "name": "Warehouse",
+        "description": "",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "collapsed": false,
+        "position": {
+          "x": 33,
+          "y": 68
+        }
+      },
+      {
+        "id": "manual:destination:10d140e1",
+        "kind": "destination",
+        "name": "Destination",
+        "zone": "custom:zone:a31670c9",
+        "bound": false,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/destinations/catalog",
+        "bindable": false,
+        "position": {
+          "x": 36,
+          "y": 71
+        },
+        "synthetic": false,
+        "description": "",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:custom-app",
+        "kind": "custom",
+        "name": "Web App",
+        "zone": "custom:upstream",
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": null,
+        "bindable": false,
+        "position": {
+          "x": 27,
+          "y": 125
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Whatever the customer runs that Segment does not -- their own service, a job, a queue. Deliberately rule-free: it has no zone of its own and no adjacency table, because Segment's rules have nothing to say about it.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "manual:custom:925c8cad",
+        "kind": "custom",
+        "zone": "linked_audiences~2",
+        "name": "Linked Event",
+        "description": "",
+        "bound": true,
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "bindable": false,
+        "details": [],
+        "collapsed": false,
+        "showFields": {
+          "type": false
+        },
+        "segmentName": "Custom component",
+        "position": {
+          "x": 17,
+          "y": 99
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "xy-edge__ph:journeye-ph:debugger-sourcew",
+        "source": "ph:journey",
+        "target": "ph:debugger-source",
+        "sourceHandle": "n",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.60",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:computed-traite-ph:debugger-sourcew",
+        "source": "ph:computed-trait",
+        "target": "ph:debugger-source",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.60",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:audiencee-ph:debugger-sourcew",
+        "source": "ph:audience",
+        "target": "ph:debugger-source",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.61",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:profilee-ph:journeyw",
+        "source": "ph:profile",
+        "target": "ph:journey",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.55",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:profilee-ph:computed-traitw",
+        "source": "ph:profile",
+        "target": "ph:computed-trait",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "sourceAnchor": "free:right:0.53",
+        "targetAnchor": "free:left:0.41",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:profilee-ph:audiencew",
+        "source": "ph:profile",
+        "target": "ph:audience",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "sourceAnchor": "free:right:0.42",
+        "targetAnchor": "free:left:0.50",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:profile-sourcee-ph:profilew",
+        "source": "ph:profile-source",
+        "target": "ph:profile",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.50",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:custom-appe-ph:source-webw",
+        "source": "ph:custom-app",
+        "target": "ph:source-web",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.51",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:source-webe-ph:destinationw",
+        "source": "ph:source-web",
+        "target": "ph:destination",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.48",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:destinatione-ph:mappingw",
+        "source": "ph:destination",
+        "target": "ph:mapping",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.51",
+        "phase": "post",
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:segment-profilese-ph:profilew",
+        "source": "ph:segment-profiles",
+        "target": "ph:profile",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.48",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:debugger-sourcee-ph:profiles-syncw",
+        "source": "ph:debugger-source",
+        "target": "ph:profiles-sync",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "sourceAnchor": "free:right:0.53",
+        "targetAnchor": "free:left:0.52",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:source-webs-ph:profile-sourcen",
+        "source": "ph:source-web",
+        "target": "ph:profile-source",
+        "sourceHandle": "s",
+        "targetHandle": "n",
+        "targetAnchor": "free:top:0.48",
+        "waypoints": [
+          {
+            "x": 211,
+            "y": 244
+          },
+          {
+            "x": 268,
+            "y": 244
+          },
+          {
+            "x": 268,
+            "y": 666
+          },
+          {
+            "x": 204,
+            "y": 666
+          }
+        ],
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__manual:linked_audience:7a4178d7e-ph:debugger-sourcew",
+        "source": "manual:linked_audience:7a4178d7",
+        "target": "ph:debugger-source",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.49",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:mappinge-manual:destination:10d140e1w",
+        "source": "ph:mapping",
+        "target": "manual:destination:10d140e1",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.54",
+        "phase": "post",
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:profiles-synce-manual:warehouse:89e8083cw",
+        "source": "ph:profiles-sync",
+        "target": "manual:warehouse:89e8083c",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.44",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__manual:reverse_etl_model:842013e2s-ph:segment-profilesw",
+        "source": "manual:reverse_etl_model:842013e2",
+        "target": "ph:segment-profiles",
+        "sourceHandle": "s",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.54",
+        "waypoints": [
+          {
+            "x": 165,
+            "y": 871
+          },
+          {
+            "x": 113,
+            "y": 871
+          }
+        ],
+        "routed": "auto",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__manual:warehouse:62748910e-manual:reverse_etl_model:842013e2w",
+        "source": "manual:warehouse:62748910",
+        "target": "manual:reverse_etl_model:842013e2",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.59",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__manual:warehouse:89e8083cn-manual:warehouse:62748910n",
+        "source": "manual:warehouse:89e8083c",
+        "target": "manual:warehouse:62748910",
+        "sourceHandle": "n",
+        "targetHandle": "n",
+        "sourceAnchor": "free:top:0.92",
+        "targetAnchor": "free:top:0.51",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__zone-debuggerw-zone-profiless",
+        "source": "zone-debugger",
+        "target": "zone-profiles",
+        "sourceHandle": "w",
+        "targetHandle": "s",
+        "targetAnchor": "free:bottom:0.51",
+        "waypoints": [
+          {
+            "x": 1154,
+            "y": 889
+          },
+          {
+            "x": 1154,
+            "y": 1214
+          }
+        ],
+        "routed": "auto",
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:debugger-sourcee-manual:destination:9fd17656w",
+        "source": "ph:debugger-source",
+        "target": "manual:destination:9fd17656",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.46",
+        "phase": null,
+        "discovered": false
+      }
+    ],
+    "zones": [
+      {
+        "id": "segment",
+        "color": "#0e7c3a",
+        "label": "Segment",
+        "order": 0,
+        "docsUrl": "https://www.twilio.com/docs/segment/connections",
+        "description": "Everything inside is Segment. Upstream of it is collection; downstream is delivery.",
+        "position": {
+          "x": 23,
+          "y": 9
+        },
+        "width": 2035,
+        "height": 1313
+      },
+      {
+        "id": "connections",
+        "label": "Connections",
+        "order": 0,
+        "docsUrl": "https://www.twilio.com/docs/segment/connections",
+        "description": "Sources, functions, filters, destinations, and warehouses.",
+        "parent": "segment",
+        "position": {
+          "x": 14,
+          "y": 53
+        },
+        "width": 1971,
+        "height": 357
+      },
+      {
+        "id": "sources",
+        "label": "Sources",
+        "order": 1,
+        "docsUrl": null,
+        "description": "Where data comes in, when the diagram wants them boxed off.",
+        "color": "#0263e0",
+        "parent": "connections",
+        "position": {
+          "x": 27,
+          "y": 62
+        },
+        "width": 788,
+        "height": 246
+      },
+      {
+        "id": "destinations",
+        "label": "Destinations",
+        "order": 2,
+        "docsUrl": null,
+        "description": "Where data goes out, when the diagram wants them boxed off.",
+        "color": "#0263e0",
+        "parent": "connections",
+        "position": {
+          "x": 1278,
+          "y": 54
+        },
+        "width": 658,
+        "height": 265
+      },
+      {
+        "order": 2,
+        "id": "linked_audiences~2",
+        "label": "Linked Events",
+        "description": "Audiences built by traversing warehouse entities, not event history.",
+        "docsUrl": null,
+        "color": "#e67e22",
+        "parent": "connections",
+        "position": {
+          "x": 843,
+          "y": 66
+        },
+        "width": 292,
+        "height": 230
+      },
+      {
+        "id": "unify",
+        "label": "Unify",
+        "order": 1,
+        "docsUrl": "https://www.twilio.com/docs/segment/unify",
+        "description": "Spaces, identity resolution, computed traits, Profile API.",
+        "parent": "segment",
+        "position": {
+          "x": 19,
+          "y": 599
+        },
+        "width": 844,
+        "height": 670
+      },
+      {
+        "id": "profile_sources",
+        "label": "Profile Sources",
+        "order": 0,
+        "docsUrl": null,
+        "description": "The sources feeding profiles, and how identities are resolved.",
+        "color": "#6f42c1",
+        "parent": "unify",
+        "position": {
+          "x": 33,
+          "y": 74
+        },
+        "width": 342,
+        "height": 541
+      },
+      {
+        "id": "profiles",
+        "label": "Profiles",
+        "order": 1,
+        "docsUrl": null,
+        "description": "Identifiers, traits, and events per profile.",
+        "color": "#6f42c1",
+        "parent": "unify",
+        "position": {
+          "x": 403,
+          "y": 287
+        },
+        "width": 409,
+        "height": 321
+      },
+      {
+        "id": "engage",
+        "label": "Engage",
+        "order": 2,
+        "docsUrl": "https://www.twilio.com/docs/segment/engage",
+        "description": "Audiences and journeys.",
+        "parent": "segment",
+        "position": {
+          "x": 876,
+          "y": 603
+        },
+        "width": 1088,
+        "height": 666
+      },
+      {
+        "id": "debugger",
+        "label": "Debugger",
+        "order": 1,
+        "docsUrl": null,
+        "description": "Events as they arrive. Populated by a walkthrough.",
+        "color": "#db131a",
+        "parent": "engage",
+        "position": {
+          "x": 315,
+          "y": 61
+        },
+        "width": 280,
+        "height": 436
+      },
+      {
+        "id": "linked_audiences",
+        "label": "Linked Audiences",
+        "order": 2,
+        "docsUrl": null,
+        "description": "Audiences built by traversing warehouse entities, not event history.",
+        "color": "#e67e22",
+        "parent": "engage",
+        "position": {
+          "x": 24,
+          "y": 53
+        },
+        "width": 280,
+        "height": 174
+      },
+      {
+        "order": 2,
+        "id": "destinations~2",
+        "label": "Destinations (2)",
+        "description": "Where data goes out, when the diagram wants them boxed off.",
+        "docsUrl": null,
+        "color": "#db131a",
+        "parent": "engage",
+        "position": {
+          "x": 607,
+          "y": 60
+        },
+        "width": 280,
+        "height": 558
+      },
+      {
+        "order": 3,
+        "id": "warehouses~2",
+        "label": "Warehouse",
+        "description": "The warehouses Segment loads into, and the models read back out.",
+        "docsUrl": null,
+        "color": "#e67e22",
+        "parent": "segment",
+        "position": {
+          "x": 26,
+          "y": 432
+        },
+        "width": 1969,
+        "height": 157
+      },
+      {
+        "order": 3,
+        "id": "warehouses",
+        "label": "Warehouse",
+        "description": "The warehouses Segment loads into, and the models read back out.",
+        "docsUrl": null,
+        "color": "#e67e22",
+        "position": {
+          "x": -278,
+          "y": 434
+        },
+        "width": 284,
+        "height": 176
+      },
+      {
+        "order": 3,
+        "id": "warehouses~3",
+        "label": "Warehouse (3)",
+        "description": "The warehouses Segment loads into, and the models read back out.",
+        "docsUrl": null,
+        "color": "#e67e22",
+        "position": {
+          "x": 2080,
+          "y": 434
+        },
+        "width": 292,
+        "height": 160
+      },
+      {
+        "id": "custom:zone:a31670c9",
+        "label": "Destinations",
+        "order": 14,
+        "custom": true,
+        "docsUrl": null,
+        "description": "Outside Segment",
+        "position": {
+          "x": 2080,
+          "y": 63
+        },
+        "width": 284,
+        "height": 351
+      },
+      {
+        "id": "custom:upstream",
+        "label": "App / Mobile / Server / Warehouse",
+        "order": 15,
+        "custom": true,
+        "docsUrl": null,
+        "description": "Outside Segment",
+        "position": {
+          "x": -278,
+          "y": 63
+        },
+        "width": 280,
+        "height": 350
+      }
+    ],
+    "scenarios": [
+      {
+        "id": "path:end-to-end",
+        "name": "Order Completed",
+        "color": "#0263e0",
+        "event": {
+          "type": "track",
+          "event": "Order Completed",
+          "userId": "user_1234",
+          "context": {
+            "ip": "198.51.100.24",
+            "page": {
+              "url": "https://example.com/pricing",
+              "path": "/pricing",
+              "title": "Pricing",
+              "referrer": "https://www.google.com"
+            },
+            "locale": "en-US",
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+          },
+          "timestamp": "2026-01-15T10:30:00.000Z",
+          "properties": {
+            "revenue": 42.5,
+            "currency": "USD",
+            "order_id": "ord_9876",
+            "quantity": 2
+          },
+          "anonymousId": "anon_abcdef123456"
+        },
+        "revisit": [],
+        "branches": {},
+        "disabled": [],
+        "excluded": [],
+        "fallback": {},
+        "sourceId": "ph:source-web",
+        "functionBehaviour": {}
+      }
+    ],
+    "viewport": {
+      "x": 203,
+      "y": 50,
+      "zoom": 0.677
+    }
+  }
+}

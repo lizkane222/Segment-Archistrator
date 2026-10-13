@@ -147,6 +147,46 @@ describe('isValidPlacement', () => {
     expect(isValidPlacement(TOPOLOGY, 'custom', zone('unify'))).toBe(true)
   })
 
+  it('accepts a kind in the second home the topology gives it', () => {
+    /* `ALSO_VALID_ZONES` in topology.py, read off the payload rather than restated here. A
+       computed trait is configured in Unify and is *for* the audiences keyed on it, so a diagram
+       drawing it in Engage is drawing the half that matters -- and used to be told it was wrong on
+       every save. */
+    const withSecondHome = {
+      ...TOPOLOGY,
+      kinds: {
+        ...TOPOLOGY.kinds,
+        computed_trait: { ...TOPOLOGY.kinds.computed_trait, alsoValidZones: ['engage'] },
+      },
+    }
+    expect(isValidPlacement(withSecondHome, 'computed_trait', zone('engage'))).toBe(true)
+    /* And nothing else moved: the product it has no business in still says so, which is what
+       keeps the second home from being a way to quieten a real misfiling. */
+    expect(isValidPlacement(withSecondHome, 'computed_trait', zone('connections'))).toBe(false)
+    expect(isValidPlacement(withSecondHome, 'computed_trait', zone('protocols'))).toBe(false)
+  })
+
+  it('admits the boxes inside a second home, as it does for the primary one', () => {
+    /* Containment, downward: a region of Unify *is* Unify, and the same has to hold of a second
+       home or it would be narrower than a first one for no stated reason. Asserted on `profiles`
+       via a kind homed elsewhere, since a computed trait is already in Unify by its primary home
+       and would pass this vacuously. */
+    const audienceInUnify = {
+      ...TOPOLOGY,
+      kinds: { ...TOPOLOGY.kinds, audience: { ...TOPOLOGY.kinds.audience, alsoValidZones: ['unify'] } },
+    }
+    expect(isValidPlacement(audienceInUnify, 'audience', zone('unify'))).toBe(true)
+    expect(isValidPlacement(audienceInUnify, 'audience', zone('profiles'))).toBe(true)
+    expect(isValidPlacement(audienceInUnify, 'audience', zone('connections'))).toBe(false)
+  })
+
+  it('gives no second home to a kind the payload says nothing about', () => {
+    /* The field is absent on almost every kind, so the default has to be "one home" rather than
+       an optional chain that quietly reads as permissive. */
+    expect(TOPOLOGY.kinds.source.alsoValidZones).toBeUndefined()
+    expect(isValidPlacement(TOPOLOGY, 'source', zone('engage'))).toBe(false)
+  })
+
   it('refuses when there is no zone at all', () => {
     expect(isValidPlacement(TOPOLOGY, 'source', null)).toBe(false)
     expect(isValidPlacement(TOPOLOGY, 'source', undefined)).toBe(false)

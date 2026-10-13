@@ -23,6 +23,7 @@ import {
   directionOf,
   dragCorner,
   dragSegment,
+  handlesVisible,
   insertWaypoint,
   lineStyleOf,
   midpointOf,
@@ -107,9 +108,27 @@ describe('a route with no waypoints', () => {
     }
   })
 
-  it('draws a straight line as exactly two points', () => {
+  it('draws a straight line between two level cards as exactly two points', () => {
+    /* The square-on leads are dropped when they would be collinear with the line anyway, so the
+       plain case is still the plain case. */
+    const { path } = routeEdge({
+      source: { x: 0, y: 0 },
+      target: { x: 400, y: 0 },
+      sourcePosition: 'right',
+      targetPosition: 'left',
+      line: 'straight',
+    })
+    expect(coordinates(path)).toEqual([
+      { x: 0, y: 0 },
+      { x: 400, y: 0 },
+    ])
+  })
+
+  it('gives a diagonal straight line a square-on lead at each component', () => {
+    /* Point to point, a diagonal met both borders at an angle and its arrowhead lay across the card's
+       edge. The lead is what makes the arrow point into the side it touches. */
     const { path } = route({ line: 'straight' })
-    expect(coordinates(path)).toEqual([from, to])
+    expect(coordinates(path)).toEqual([from, { x: 20, y: 0 }, { x: 380, y: 200 }, to])
   })
 
   it('draws a curve that leans out along the handle directions', () => {
@@ -139,16 +158,23 @@ describe('a route through waypoints', () => {
     }
   })
 
-  it('visits them in order', () => {
+  it('visits them in order, between the two square-on leads', () => {
     const { path } = route({ line: 'straight', waypoints })
-    expect(coordinates(path)).toEqual([from, ...waypoints, to])
+    expect(coordinates(path)).toEqual([from, { x: 20, y: 0 }, ...waypoints, { x: 380, y: 200 }, to])
   })
 
   it('reports the points it routed through, endpoints included', () => {
     /* The handles are drawn from this list, so it has to be the same list the path was built
        from -- otherwise a handle can sit somewhere the line does not go. */
-    const { points } = route({ line: 'straight', waypoints })
-    expect(points).toEqual([from, ...waypoints, to])
+    const { points, path } = route({ line: 'straight', waypoints })
+    expect(points).toEqual(coordinates(path))
+    expect(points[0]).toEqual(from)
+    expect(points.at(-1)).toEqual(to)
+  })
+
+  it('gives a loose end no lead, because there is no side to be square to', () => {
+    const { points } = route({ line: 'straight', waypoints, free: { source: false, target: true } })
+    expect(points).toEqual([from, { x: 20, y: 0 }, ...waypoints, to])
   })
 
   it('reports the derived corners too, on a right-angle route', () => {
@@ -991,5 +1017,53 @@ describe('meeting a component head-on', () => {
     const points = bent('left', undefined)
     expect(horizontal(first(points))).toBe(true)
     expect(horizontal(last(points))).toBe(true)
+  })
+})
+
+/*
+ * Whether a connector's drag handles are on screen.
+ *
+ * A boolean predicate would not normally earn a test block, and this one does because two of its
+ * terms are there for a reason no reader of the expression could infer -- and because leaving them
+ * out produced a bug that *no* test caught and that only appeared when the thing was driven by hand
+ * in a browser: the handles were visible, the grip was hittable, the gesture began, and nothing
+ * happened.
+ */
+describe('handlesVisible', () => {
+  const on = { onWaypoints: () => {} }
+
+  it('is off for a connector nobody is touching', () => {
+    expect(handlesVisible({ ...on })).toBe(false)
+  })
+
+  it('is on for each of the three ways a reader finds them', () => {
+    /* Hover is what advertises that a line is adjustable at all; selection is how you find them by
+       accident; the double-click is the deliberate way in and survives clicking elsewhere. */
+    expect(handlesVisible({ ...on, hovered: true })).toBe(true)
+    expect(handlesVisible({ ...on, selected: true })).toBe(true)
+    expect(handlesVisible({ ...on, adjusting: true })).toBe(true)
+  })
+
+  it('stays on through a drag that has left the line, which is every drag', () => {
+    /*
+     * The regression. The pointer leaves the connector the instant a drag starts -- that is what
+     * dragging is -- so `hovered` goes false and the handles unmount, taking the element the
+     * gesture began on with them. The `window` listeners survive (they are on `window` for exactly
+     * this reason) but there is nothing following the pointer and nothing to release onto, so the
+     * drag silently does nothing.
+     *
+     * It appeared to work when the connector was also selected, which is how it was first tried.
+     * That is why both are asserted with `hovered: false`: the claim is that a live gesture is
+     * sufficient on its own.
+     */
+    expect(handlesVisible({ ...on, hovered: false, movingEnd: { end: 'target' } })).toBe(true)
+    expect(handlesVisible({ ...on, hovered: false, dragging: { index: 0 } })).toBe(true)
+  })
+
+  it('is off without a way to commit, whatever else is true', () => {
+    /* An edge rendered outside the canvas -- the export path, a test -- can draw itself and nothing
+       more, so offering handles would be offering a gesture that goes nowhere. */
+    expect(handlesVisible({ hovered: true, selected: true, onWaypoints: null })).toBe(false)
+    expect(handlesVisible({ movingEnd: { end: 'source' }, onWaypoints: undefined })).toBe(false)
   })
 })

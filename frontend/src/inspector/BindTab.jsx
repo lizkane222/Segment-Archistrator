@@ -134,8 +134,8 @@ export default function BindTab({
           </EmptyNote>
         ) : !graph ? (
           <EmptyNote>
-            The workspace has not been loaded yet. Use “Load workspace” in the header — binding
-            needs the real component list to choose from.
+            The workspace’s components are still being read. They appear here, and under the
+            Workspace tab, as soon as they arrive.
           </EmptyNote>
         ) : !candidates.length ? (
           <EmptyNote>

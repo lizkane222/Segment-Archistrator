@@ -69,6 +69,15 @@ export default function Inspector({
   styleTargetCount,
   onUpdateKind,
   onUpdateEdge,
+  /* A connector's two non-`data` operations: which side each end meets (a top-level handle plus
+     an anchor -- see `endpointSidePatch`) and reversing it. Passed through rather than folded
+     into `onUpdateEdge`, which merges into `data` and would put a handle where nothing reads it. */
+  onUpdateEdgeEnds,
+  onReverseEdge,
+  /* For the connector's Actions section: the right-click menu's context and runner. */
+  commandContext,
+  onRunCommand,
+  onPreview,
   onClose,
   onNotify,
 }) {
@@ -116,18 +125,23 @@ export default function Inspector({
      carrying a copy of either label. */
   const sourceNode = isEdge ? nodes?.find((candidate) => candidate.id === node.source) : null
   const targetNode = isEdge ? nodes?.find((candidate) => candidate.id === node.target) : null
-  const endpointLabel = (endpoint) => endpoint?.data?.name || endpoint?.data?.label || 'Unknown'
+  /* A null end is a loose one -- attached to nothing yet, see canvas/edges/looseEnds.js -- which is
+     not the same as a component that could not be found. */
+  const endpointLabel = (endpoint, id) =>
+    endpoint?.data?.name || endpoint?.data?.label || (id == null && isEdge ? 'Not connected' : 'Unknown')
   /* The same colour FlowEdge resolves for the line itself: an override first, then the
      source component's own border, live off whichever zone it currently sits in. */
+  /* From the target when the source is loose, which is the only component such a line has. */
+  const colourNode = isEdge && node.source == null ? targetNode : sourceNode
   const sourceZoneNode = isEdge
-    ? nodes?.find((candidate) => candidate.id === sourceNode?.parentId)
+    ? nodes?.find((candidate) => candidate.id === colourNode?.parentId)
     : null
-  const edgeColor = isEdge ? (data?.color ?? borderColorFor(sourceNode?.data, sourceZoneNode?.data)) : null
+  const edgeColor = isEdge ? (data?.color ?? borderColorFor(colourNode?.data, sourceZoneNode?.data)) : null
 
   const title = isZone
     ? data.label || 'Untitled zone'
     : isEdge
-      ? `${endpointLabel(sourceNode)} → ${endpointLabel(targetNode)}`
+      ? `${endpointLabel(sourceNode, node.source)} → ${endpointLabel(targetNode, node.target)}`
       : data.name
   const subtitle = isZone
     ? data.custom
@@ -261,6 +275,13 @@ export default function Inspector({
             edge={node}
             nodes={nodes}
             onUpdate={(patch) => onUpdateEdge(node.id, patch)}
+            onUpdateEnds={(patch) => onUpdateEdgeEnds?.(node.id, patch)}
+            onReverse={() => onReverseEdge?.([node.id])}
+            commandContext={commandContext}
+            onRunCommand={onRunCommand}
+            onPreview={onPreview}
+            sourceName={endpointLabel(sourceNode, node.source)}
+            targetName={endpointLabel(targetNode, node.target)}
           />
         )}
       </div>

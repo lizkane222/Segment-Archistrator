@@ -151,11 +151,23 @@ export function cardField(id) {
  * whether the component *has* the field -- `visibleCardFields` handles that, because "off" and
  * "absent" need to look different in the inspector (a greyed eye) and identical on the card
  * (nothing drawn).
+ *
+ * ## `fallback`, for a caller whose default is not the table's
+ *
+ * The table's defaults are about a *component card*: a 200px box on a diagram that may hold forty
+ * of them, which is the whole reason `description` starts off. A **zone** shares this registry (so
+ * one eye toggle and one stored shape serve both) and is not that thing at all -- it is a region
+ * hundreds of pixels across whose description is its explanatory subtitle, printed once under the
+ * title, and every diagram drawn before the zone renderer consulted this had it visible. Resolving a
+ * zone against the card default silently blanked all of them.
+ *
+ * So the caller may state the default it means. An explicit override still wins either way, which is
+ * what keeps the eye toggle honest: a reader who turned a zone's description off gets it off.
  */
-export function fieldShown(data, id) {
+export function fieldShown(data, id, { fallback } = {}) {
   const stored = data?.showFields?.[id]
   if (typeof stored === 'boolean') return stored
-  return cardField(id)?.defaultOn ?? false
+  return fallback ?? cardField(id)?.defaultOn ?? false
 }
 
 /**
@@ -165,12 +177,19 @@ export function fieldShown(data, id) {
  * once it is empty. So switching a field off and on again leaves the document byte-identical to how
  * it started -- otherwise every diagram anyone had ever poked at would differ from its saved copy by
  * a `showFields: {}` nobody could account for.
+ *
+ * `fallback` has to be the *same* value the caller passes `fieldShown`, and passing it to one and
+ * not the other makes the control a silent no-op. A zone's description falls back to shown; the
+ * table's default for `description` is hidden; so "hide" arrived here as `shown === false ===
+ * field.defaultOn`, was pruned as redundant, and `fieldShown` read the fallback and printed it
+ * again. The eye moved and nothing happened.
  */
-export function toggleField(data, id, shown) {
+export function toggleField(data, id, shown, { fallback } = {}) {
   const field = cardField(id)
   if (!field) return data?.showFields
   const next = { ...(data?.showFields ?? {}) }
-  if (shown === field.defaultOn) delete next[id]
+  /* Pruned against whatever "no override" actually resolves to for this caller. */
+  if (shown === (fallback ?? field.defaultOn)) delete next[id]
   else next[id] = shown
   return Object.keys(next).length ? next : undefined
 }

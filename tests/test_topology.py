@@ -189,6 +189,137 @@ def test_the_ascent_stops_at_the_product_and_does_not_go_sideways():
     assert not t.is_valid_placement("identity_setting", t.ZONE_ENGAGE)
 
 
+def test_linked_events_are_placed_where_the_enrichment_happens():
+    """
+    Connections, not Unify, and the split is worth pinning because the docs say otherwise.
+
+    Segment's own navigation files Linked Events under Unify > Data graph, which is where the
+    *entities* are defined. What the kind stands for on a diagram is the enrichment -- applied on
+    an actions destination's mapping, with the event passing through it on its way out -- so it
+    lands under Connections. A later reader reconciling this file against the docs would otherwise
+    reasonably "fix" it and earn an advisory on every diagram that draws one.
+
+    Homed in its own sub-zone rather than directly in Connections, matching `linked_audience` in
+    Engage: the region is what says this is not an ordinary stage of the pipeline. Because that
+    sub-zone is a `subdivision`, the bare Connections backdrop stays legal too -- so the box is a
+    drawing choice, which is the point of the flag.
+    """
+    assert t.expected_zone("linked_event") == t.ZONE_LINKED_EVENTS
+    assert t.ZONE_PARENT[t.ZONE_LINKED_EVENTS] == t.ZONE_CONNECTIONS
+    assert t.is_valid_placement("linked_event", t.ZONE_LINKED_EVENTS)
+    assert t.is_valid_placement("linked_event", t.ZONE_CONNECTIONS)
+    # Under Connections and nowhere else: the entities come from a warehouse, but the enrichment
+    # is not a Unify component and a diagram saying so would be teaching the wrong thing.
+    assert not t.is_valid_placement("linked_event", t.ZONE_UNIFY)
+
+
+def test_a_linked_event_reaches_the_mapping_it_enriches():
+    # The entities come from the Data Graph or a table; the enrichment lands on a mapping.
+    assert t.is_valid_edge("data_graph", "linked_event")
+    assert t.is_valid_edge("sql_table", "linked_event")
+    assert t.is_valid_edge("linked_event", "destination_mapping")
+    # Not a general pipeline stage: it does not load a warehouse or feed a space.
+    assert not t.is_valid_edge("linked_event", "warehouse")
+    assert not t.is_valid_edge("linked_event", "space")
+
+
+# --- A component with two homes ---------------------------------------------
+
+
+def test_profiles_sync_is_valid_in_the_warehouse_it_writes_to():
+    """
+    The case ALSO_VALID_ZONES exists for.
+
+    Profiles Sync is homed in Unify because that is where it is configured, and it *lands* in a
+    warehouse -- so a diagram drawing the second half puts it in the Warehouse region. Neither of
+    the other two rules can allow that: Unify is not a subdivision, so the upward rule stops
+    there, and `warehouses` never appears in Unify's chain. Without the third rule this was an
+    advisory on every save, telling the reader a correct diagram was wrong.
+    """
+    assert t.expected_zone("profile_sync") == t.ZONE_UNIFY
+    assert t.is_valid_placement("profile_sync", t.ZONE_UNIFY)
+    assert t.is_valid_placement("profile_sync", t.ZONE_WAREHOUSES)
+
+
+def test_a_second_home_is_that_zone_and_not_the_region_around_it():
+    """
+    Named zones, and nothing inherited upward from them.
+
+    The rule is containment *downward* -- a second home admits its own subdivisions, so a
+    Warehouse box drawn inside a second Connections still counts -- and deliberately not upward.
+    Profiles Sync lands in a warehouse; "somewhere in Connections" is not a warehouse, and reading
+    the second home as a licence to sit anywhere under its parent would make the table a way to
+    excuse a misfiling rather than a statement about one component's two jobs.
+    """
+    assert not t.is_valid_placement("profile_sync", t.ZONE_CONNECTIONS)
+    assert not t.is_valid_placement("profile_sync", t.ZONE_SOURCES)
+    assert not t.is_valid_placement("profile_sync", t.ZONE_ENGAGE)
+    # Still true for a copied zone on a divided canvas, like every other rule here.
+    assert t.is_valid_placement("profile_sync", "warehouses~2")
+
+
+def test_a_second_home_admits_that_homes_own_subdivisions():
+    """
+    Downward containment, exactly as for a primary home.
+
+    Granting a computed trait a second home in Engage grants it Engage's regions too, because a
+    region of Engage *is* Engage -- the same reading that makes a computed trait in Unify's
+    Profiles box correctly placed. Worth stating rather than discovering: it means a second home is
+    chosen at the coarsest level that is true, and naming a product admits every box inside it.
+    """
+    assert t.is_valid_placement("computed_trait", t.ZONE_ENGAGE)
+    assert t.is_valid_placement("computed_trait", t.ZONE_COMPUTATIONS)
+    assert t.is_valid_placement("computed_trait", t.ZONE_DEBUGGER)
+    # And still not in the product it has nothing to do with.
+    assert not t.is_valid_placement("computed_trait", t.ZONE_CONNECTIONS)
+
+
+def test_the_misfilings_a_second_home_must_not_quieten():
+    """
+    The cost of widening ALSO_VALID_ZONES is that it can make a real mistake silent, so the
+    mistakes are pinned alongside the permissions. Each of these is a component in a product it
+    has no business being in, and each still says so.
+    """
+    for kind, zone in [
+        ("source", t.ZONE_ENGAGE),
+        ("source", t.ZONE_PROFILES),
+        ("destination", t.ZONE_PROFILES),
+        ("destination", t.ZONE_ENGAGE),
+        ("computed_trait", t.ZONE_CONNECTIONS),
+        ("profile_sync", t.ZONE_SOURCES),
+        ("audience", t.ZONE_CONNECTIONS),
+        ("warehouse", t.ZONE_UNIFY),
+    ]:
+        assert not t.is_valid_placement(kind, zone), f"{kind} in {zone} should still be remarked on"
+
+
+def test_a_second_home_is_granted_to_nobody_else():
+    """
+    The table is for a component whose work spans two products, not a way to make a misfiling
+    quiet -- so the membership is pinned, and the comment beside each entry in topology.py is the
+    decision written down. A kind joining this list without one is the failure mode to catch.
+    """
+    assert set(t.ALSO_VALID_ZONES) == {
+        "profile_sync",
+        "source",
+        "destination",
+        "computed_trait",
+    }
+    for kind, zones in t.ALSO_VALID_ZONES.items():
+        assert kind in t.KINDS, kind
+        for zone in zones:
+            assert zone in {entry["id"] for entry in t.ZONES}, zone
+            assert zone != t.expected_zone(kind), f"{kind}: {zone} is already its home"
+
+
+def test_a_second_home_reaches_the_canvas():
+    # The client mirrors this rule and reads the list off the payload rather than restating it,
+    # so a table the payload does not carry is a rule only half the app enforces.
+    payload = t.as_payload()
+    assert payload["kinds"]["profile_sync"]["alsoValidZones"] == [t.ZONE_WAREHOUSES]
+    assert "alsoValidZones" not in payload["kinds"]["audience"]
+
+
 def test_identity_resolution_settings_live_in_unify():
     """
     Where the product puts them, and where the frontend was already drawing them.

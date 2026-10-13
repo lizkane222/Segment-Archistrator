@@ -1,0 +1,20 @@
+version: 0.2
+
+# Mirrors the Render buildCommand in render.yaml: EB's Python platform has no
+# Node.js and cannot build the frontend or collect static files itself, so
+# CodeBuild does it here and hands EB the already-built artifact.
+phases:
+  install:
+    runtime-versions:
+      python: 3.13
+      nodejs: 24
+  build:
+    commands:
+      - pip install -r requirements.txt
+      - cd frontend && npm ci && npm run build && cd ..
+      - python manage.py collectstatic --noinput
+artifacts:
+  files:
+    - '**/*'
+  exclude-paths:
+    - frontend/node_modules/**/*

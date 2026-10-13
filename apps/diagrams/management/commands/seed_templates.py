@@ -197,6 +197,10 @@ class Command(BaseCommand):
         renaming Unify's description does not leave five templates disagreeing with the
         palette. A custom zone has no such source and states its own.
 
+        A *copy* of a product zone (`destinations~2`) is resolved by product, so it inherits the
+        same three from the zone it is a copy of -- but keeps a label the fixture states, since a
+        copy is numbered on its face precisely so two of them can be told apart.
+
         `order` is paint order among siblings, so a custom zone that does not state one
         is put after every product zone: it is a region the customer drew, and drawing
         it behind Segment would hide it.
@@ -207,7 +211,15 @@ class Command(BaseCommand):
 
         custom = bool(raw.get("custom")) or zone_id.startswith(CUSTOM_ZONE_PREFIX)
         known = {zone["id"]: zone for zone in topology.ZONES}
-        if not custom and zone_id not in known:
+        # By product, so a *second* copy of a zone on one canvas is recognised. One diagram may
+        # legitimately hold two Destinations boxes -- one in Connections, one in Engage -- and the
+        # copy is `destinations~2` (see `zone_product`, and `nextZoneInstance` in
+        # frontend/src/canvas/frames.js, which is what mints it). Everything else in the project
+        # already resolves these by product: the colour table, the placement rules, the palette.
+        # This was the last place that did not, which made a hand-arranged diagram using the
+        # feature unshippable as the template it came from.
+        product = topology.zone_product(zone_id)
+        if not custom and product not in known:
             raise CommandError(
                 f"{key}: zone {zone_id!r} is not a zone this topology defines. Either "
                 f"use one from apps/segmentapi/topology.py or mark it `custom` and give "
@@ -225,7 +237,7 @@ class Command(BaseCommand):
                     f"hand-arranged one, so its geometry is the point of declaring it."
                 )
 
-        defined = known.get(zone_id, {})
+        defined = known.get(product, {})
         after_product_zones = max(zone["order"] for zone in topology.ZONES) + 1
         return {
             **{k: v for k, v in raw.items() if k != "custom"},
@@ -235,7 +247,10 @@ class Command(BaseCommand):
             "order": defined.get("order", raw.get("order", after_product_zones + index)),
             **({"parent": raw["parent"]} if raw.get("parent") else {}),
             **({"custom": True} if custom else {}),
-            "docsUrl": deeplinks.zone_docs_url(zone_id),
+            # By product, like the label and description above: a copy of Connections links to
+            # Connections' docs. Resolved from the raw id this returned None for every copy, so a
+            # second Connections or Unify shipped with no docs link while the original had one.
+            "docsUrl": deeplinks.zone_docs_url(product),
         }
 
     def _build_node(self, key: str, raw: dict, zone_ids: set[str] | None = None) -> dict:

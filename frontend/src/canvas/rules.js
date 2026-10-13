@@ -160,6 +160,12 @@ export function placementZones(topology, kind) {
  * Checked as two rules rather than one combined chain, which would make a profile
  * legal in Profile Sources -- the sideways move between sibling subdivisions, and the
  * one misfiling among them that is real.
+ *
+ * And a third: a kind with a second home, for the few whose work spans two products. Profiles
+ * Sync is configured in Unify and lands in a warehouse, so a diagram drawing the second half
+ * puts it in the Warehouse region -- which neither rule above can allow. The list comes from
+ * the topology payload (`ALSO_VALID_ZONES` in topology.py) rather than being restated here,
+ * per this file's header.
  */
 export function isValidPlacement(topology, kind, zone) {
   if (zone?.custom) return true
@@ -172,9 +178,15 @@ export function isValidPlacement(topology, kind, zone) {
   if (RULE_FREE_KINDS.has(kind)) return true
   const expected = expectedZone(topology, kind)
   if (expected === null) return false
+  const chain = zoneChain(topology, zone)
+  const alsoValid = topology?.kinds?.[kind]?.alsoValidZones ?? []
   return (
-    zoneChain(topology, zone).includes(expected) ||
-    placementZones(topology, kind).includes(zoneProduct(zone))
+    chain.includes(expected) ||
+    placementZones(topology, kind).includes(zoneProduct(zone)) ||
+    /* Containment, like the first rule: a second home admits that home's subdivisions too, so
+       Profiles Sync is as correctly placed in a Warehouse box inside Connections as on the
+       bare Connections backdrop. */
+    alsoValid.some((entry) => chain.includes(entry))
   )
 }
 

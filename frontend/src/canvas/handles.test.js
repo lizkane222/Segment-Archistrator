@@ -23,10 +23,14 @@ import {
   fanOutAnchors,
   distanceToBox,
   encodeFreeHandle,
+  endpointSidePatch,
+  facingSide,
   fixedHandleForSide,
+  internalBox,
   nearestBorder,
   parseFreeHandle,
   pointOnBorder,
+  resolveReleasedHandles,
 } from './handles.js'
 import { serializeEdge } from '../diagram/serialize.js'
 import { toFlowEdge } from './layout.js'
@@ -498,6 +502,33 @@ describe('fanOutAnchors', () => {
     for (const t of spread.values()) expect(Number.isFinite(t)).toBe(true)
     expect(fanOutAnchors(undefined).size).toBe(0)
   })
+
+  it('keeps each side its own group, so ends elsewhere do not push one off its midpoint', () => {
+    /* The regression. The Canvas caller passed the whole `sideOf` record instead of its `.side`, so
+       every key came out `"a|[object Object]"` and all four of these shared one bucket -- the lone
+       end on the left was spread to 1/4 as though three siblings were on it. A side with one
+       connector must get no entry however busy the rest of the card is. */
+    const spread = fanOutAnchors([
+      at('e1:target', 'a', 'left', 0),
+      at('e2:source', 'a', 'right', 1),
+      at('e3:source', 'a', 'right', 2),
+      at('e4:source', 'a', 'top', 3),
+    ])
+    expect(spread.has('e1:target')).toBe(false)
+    expect(spread.has('e4:source')).toBe(false)
+    expect(spread.get('e2:source')).toBeCloseTo(1 / 3)
+    expect(spread.get('e3:source')).toBeCloseTo(2 / 3)
+  })
+
+  it('ignores an end whose side could not be resolved', () => {
+    /* `sideOf` is null for an id that is neither end of the edge. Grouping such an end under
+       `undefined` would make it a phantom sibling of every other unresolved one. */
+    const spread = fanOutAnchors([
+      at('e1:source', 'a', undefined, 0),
+      at('e2:source', 'a', 'right', 1),
+    ])
+    expect(spread.size).toBe(0)
+  })
 })
 
 /*
@@ -603,5 +634,156 @@ describe('facingSide', () => {
        naming something unregistered is an edge React Flow declines to draw. */
     expect(fixedHandleForSide(facingSide(box(0, 0), box(400, 0)))).toBe('e')
     expect(fixedHandleForSide(facingSide(box(400, 0), box(0, 0)))).toBe('w')
+  })
+})
+
+/*
+ * Picking a side from the panel, as opposed to dragging an end to one.
+ *
+ * The thing to pin is *how* the choice is stored, because that is what makes it survive: an
+ * anchor is already the app's word for "a reader placed this end deliberately", so the five
+ * places that would otherwise move an end -- `onNodeDragStop`'s re-facing, `fanOutAnchors`,
+ * `facingSide`, `serializeEdge`, `reverseEdge` -- all honour it with nothing added. A separate
+ * "chosen" flag would have needed teaching to every one of them.
+ */
+describe('endpointSidePatch', () => {
+  it('writes the fixed handle and a midpoint anchor together', () => {
+    const patch = endpointSidePatch('source', 'top')
+    expect(patch.handle).toEqual({ sourceHandle: 'n' })
+    expect(patch.anchor).toEqual({ sourceAnchor: 'free:top:0.50' })
+  })
+
+  it('writes the target end into the target fields', () => {
+    const patch = endpointSidePatch('target', 'left')
+    expect(patch.handle).toEqual({ targetHandle: 'w' })
+    expect(patch.anchor).toEqual({ targetAnchor: 'free:left:0.50' })
+  })
+
+  it('puts the anchor at the midpoint, not at an end of the side', () => {
+    /* Picking "top" says which side and nothing about where along it, so the side's own natural
+       point is the only answer that does not invent a preference. */
+    expect(parseFreeHandle(endpointSidePatch('source', 'right').anchor.sourceAnchor).t).toBe(0.5)
+  })
+
+  it('never puts a free id in the handle field', () => {
+    /* The hazard this file exists for, in its most expensive form: React Flow declines to draw an
+       edge whose handle id it cannot find in the node's registered bounds, and a `free:` anchor is
+       only ever mounted for the instant it is dragged. Such an edge is not misplaced, it is
+       invisible forever. */
+    for (const side of SIDES) {
+      const patch = endpointSidePatch('source', side.position)
+      expect(parseFreeHandle(patch.handle.sourceHandle)).toBe(null)
+      expect(SIDES.map((entry) => entry.id)).toContain(patch.handle.sourceHandle)
+    }
+  })
+
+  it('releases the end with an undefined anchor, so it serializes away', () => {
+    /* `undefined` and not `null`: the caller spreads this into `edge.data`, and `serializeEdge`
+       omits a falsy anchor -- so an end handed back to Auto has to look like one that was never
+       placed, or every such diagram reads as dirty on open. */
+    const patch = endpointSidePatch('target', null)
+    expect(patch.handle).toEqual({ targetHandle: null })
+    expect(patch.anchor).toEqual({ targetAnchor: undefined })
+    expect('targetAnchor' in patch.anchor).toBe(true)
+  })
+
+  it('round-trips through serialize as the side it was given', () => {
+    /* The end-to-end claim: a side picked in the panel is the side the reopened diagram draws. */
+    const patch = endpointSidePatch('source', 'bottom')
+    const edge = {
+      id: 'e1',
+      source: 'a',
+      target: 'b',
+      ...patch.handle,
+      data: { discovered: false, ...patch.anchor },
+    }
+    const saved = serializeEdge(edge)
+    expect(saved.sourceHandle).toBe('s')
+    expect(saved.sourceAnchor).toBe('free:bottom:0.50')
+    expect(toFlowEdge(saved).data.sourceAnchor).toBe('free:bottom:0.50')
+  })
+})
+
+describe('internalBox', () => {
+  const measured = {
+    internals: { positionAbsolute: { x: 40, y: 60 } },
+    measured: { width: 200, height: 100 },
+  }
+
+  it('reads the absolute position and the measured size', () => {
+    expect(internalBox(measured)).toEqual({ x: 40, y: 60, width: 200, height: 100 })
+  })
+
+  it('is null for a node that has not been measured yet', () => {
+    /* The frame after mount. A side computed from a zero-sized box is not imprecise, it is the
+       wrong side about half the time -- so callers get "no opinion" instead. */
+    expect(internalBox({ internals: { positionAbsolute: { x: 0, y: 0 } } })).toBe(null)
+    expect(internalBox({ measured: { width: 200, height: 100 } })).toBe(null)
+    expect(internalBox(undefined)).toBe(null)
+  })
+
+  it('is null for a measured size of zero rather than returning a degenerate box', () => {
+    expect(internalBox({ ...measured, measured: { width: 0, height: 100 } })).toBe(null)
+  })
+})
+
+describe('resolveReleasedHandles', () => {
+  /* B is 500px to the right of A and level with it, so the facing sides are A-right / B-left. */
+  const boxes = {
+    a: { x: 0, y: 0, width: 200, height: 100 },
+    b: { x: 500, y: 0, width: 200, height: 100 },
+  }
+  const boxOf = (id) => boxes[id] ?? null
+  const edge = { id: 'e1', source: 'a', target: 'b' }
+
+  it('resolves a released source to the side facing the target', () => {
+    const { handle } = endpointSidePatch('source', null)
+    expect(resolveReleasedHandles(edge, handle, boxOf)).toEqual({ sourceHandle: 'e' })
+  })
+
+  it('resolves a released target to the side facing the source', () => {
+    const { handle } = endpointSidePatch('target', null)
+    expect(resolveReleasedHandles(edge, handle, boxOf)).toEqual({ targetHandle: 'w' })
+  })
+
+  it('never stores the null, which is the bug it exists for', () => {
+    /* React Flow resolves a null handle to the node's *first registered* one -- whichever of the
+       four mounted first, which has nothing to do with where the other component is. Observed as an
+       end jumping to the right-hand edge of a component whose partner was off-screen to the left. */
+    const { handle } = endpointSidePatch('target', null)
+    const out = resolveReleasedHandles(edge, handle, boxOf)
+    expect(out.targetHandle).not.toBe(null)
+    expect(SIDES.map((side) => side.id)).toContain(out.targetHandle)
+  })
+
+  it('agrees with the re-facing that runs on the next node drag', () => {
+    /* The invariant worth having: an end put back on Auto sits where it would have sat had nobody
+       ever touched it. Both paths are `facingSide`, and this is what pins them together. */
+    const { handle } = endpointSidePatch('source', null)
+    expect(resolveReleasedHandles(edge, handle, boxOf).sourceHandle).toBe(
+      fixedHandleForSide(facingSide(boxes.a, boxes.b)),
+    )
+  })
+
+  it('passes a chosen side straight through', () => {
+    /* Only a *released* end is resolved. A side the reader picked is already the answer. */
+    const { handle } = endpointSidePatch('source', 'top')
+    expect(resolveReleasedHandles(edge, handle, boxOf)).toEqual({ sourceHandle: 'n' })
+  })
+
+  it('keeps the null when the components are not measured yet', () => {
+    /* No worse than before -- and the next node drag re-faces it, which is exactly what an
+       unmeasured pair gets from `facingFor` too. */
+    const { handle } = endpointSidePatch('source', null)
+    expect(resolveReleasedHandles(edge, handle, () => null)).toEqual({ sourceHandle: null })
+  })
+
+  it('follows the components rather than the ids when they move', () => {
+    /* B dragged above A: releasing now has to give the top, not the right it gave before. */
+    const above = { a: boxes.a, b: { x: 0, y: -400, width: 200, height: 100 } }
+    const { handle } = endpointSidePatch('source', null)
+    expect(resolveReleasedHandles(edge, handle, (id) => above[id] ?? null)).toEqual({
+      sourceHandle: 'n',
+    })
   })
 })

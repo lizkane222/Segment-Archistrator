@@ -29,7 +29,7 @@ services:
       # Best-effort: the catalog is a nicety, and a Segment outage during a
       # deploy should not fail the deploy. Requires SEGMENT_CATALOG_TOKEN.
       python manage.py sync_catalog || echo "sync_catalog skipped"
-    startCommand: gunicorn config.wsgi:application --workers 2 --timeout 60
+    startCommand: gunicorn config.wsgi:application --workers 2 --timeout 180
     envVars:
       - key: PYTHON_VERSION
         value: "3.13"

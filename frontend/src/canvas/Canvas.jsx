@@ -11,8 +11,8 @@
  *     nothing clamps a node to its zone any more, so without this a component dragged
  *     into another product would render over it while remaining the old zone's child.
  *   - `onNodesChange` is intercepted for two things: to *remark on* a placement the
- *     topology finds unusual (it used to refuse one), and to take a zone's contents with
- *     it when the zone is resized.
+ *     topology finds unusual (it used to refuse one), and to stop a zone's resize at the
+ *     box its own contents occupy -- see `clampZoneResize`.
  *   - `onBeforeDelete` filters a deletion that would take a populated zone's
  *     children with it.
  *
@@ -62,17 +62,19 @@ import { ChromeContext, dragAnchor, edgeRoutes, handleReveal, textEditing } from
 import { orientConnection, sideOf } from './direction.js'
 import { FlashContext } from './flash.js'
 import { codeSeed } from '../functions/defaults.js'
+import { applyBinding, boundSegmentIds, replacementPatch } from '../binding/bindMatch.js'
+import { DROPPED_STYLE } from './dropDefaults.js'
 import { EDGE_MENU, NODE_MENU, PANE_MENU } from '../commands/registry.js'
 import { isGroupStackId, translateGroupDrag } from './grouping.js'
 import {
   NODE_HEIGHT,
   NODE_WIDTH,
+  clampZoneResize,
   componentSize,
   droppedZoneSize,
   edgeZFor,
   growZones,
   orderForFlow,
-  scaleZoneChildren,
   toFlowNode,
   toZoneNode,
   zoneNodeId,
@@ -93,16 +95,33 @@ import {
   zoneOfParent,
 } from './rules.js'
 import { avoidingWaypoints } from './edges/routing.js'
+import {
+  PIN_TYPE,
+  cleanPoint,
+  detachEnd,
+  endBox,
+  isLoose,
+  isPinId,
+  loosePoint,
+  looseEnds,
+  pinNodesFor,
+  pinnedEdges,
+  pointKey,
+  withoutPoint,
+} from './edges/looseEnds.js'
 import { instanceLabel, nextZoneInstance, shiftSections } from './frames.js'
 import { columnCount, rowCount, scaleTable, tableSize } from './tables.js'
 import {
   SIDES,
   alongBorder,
   anchorStringFor,
+  distanceToBox,
   encodeFreeHandle,
   facingSide,
   fanOutAnchors,
   fixedHandleForSide,
+  internalBox,
+  nearestBorder,
   parseFreeHandle,
 } from './handles.js'
 import { styleFor } from './kinds.js'
@@ -129,6 +148,9 @@ const NODE_TYPES = {
   /* A divider is stored as a zone and drawn differently -- see nodes/ZoneOrFrame.jsx. */
   zone: ZoneOrFrame,
   groupStack: GroupStackNode,
+  /* A loose connector end's stand-in. Always hidden, so never drawn -- registered only because React
+     Flow resolves the type before it checks `hidden`, and warns about one it does not know. */
+  [PIN_TYPE]: () => null,
 }
 const EDGE_TYPES = { flow: FlowEdge }
 
@@ -147,6 +169,17 @@ export const DRAG_MIME = 'application/segment-arch-kind'
 const BORDER_REVEAL = 32
 
 /*
+ * How far outside a component an endpoint drag may be released and still land on it.
+ *
+ * 45, the same number as `connectionRadius` on the flow below, because it answers the same
+ * question for the same gesture: aim at the card, get the nearest side. Divided by the zoom
+ * where it is used, like `BORDER_REACH` and `DRAG_REACH` in ConnectionHandles, so the slop
+ * stays the same distance *to the pointer* at every zoom rather than shrinking to nothing
+ * zoomed out.
+ */
+const ENDPOINT_REACH = 45
+
+/*
  * The style every *component* gets when it is dragged onto the canvas.
  *
  * A constant rather than three literals at the drop site, so the palette, the catalog and anything
@@ -158,7 +191,7 @@ const BORDER_REVEAL = 32
  * radius the shapes palette already supplies. A `table` is furniture too. Both would be actively worse
  * for being made to match a card.
  */
-export const DROPPED_STYLE = { borderStyle: 'solid', borderWidth: 1, shape: 'rounded' }
+export { DROPPED_STYLE }
 
 /* Drawings, not components: they keep their own defaults -- see `DROPPED_STYLE`. */
 const DRAWING_KINDS = new Set(['shape', 'table'])
@@ -208,25 +241,38 @@ export default function Canvas({
   /*
    * Whether the "Unbound" badge is drawn.
    *
-   * On by default, which it did not used to be.
-   *
-   * The old reasoning was that forty badges is a wall of orange and the dashed border already said
-   * "placeholder" quietly enough. The first half is still true and the second is not: a dragged
-   * component now gets an explicit solid 1px outline (see `DROPPED_STYLE`), so dashed no longer means
-   * unbound and nothing else would say so. Given the choice between a wall of orange and silently
-   * losing the distinction between a placeholder and a real workspace component, the badge wins -- and
-   * it is one click to turn off, where the lost signal was one nobody could get back.
+   * Off by default. With no workspace connected, `connected` hides the toggle outright (see
+   * below), so this only starts to matter the moment a workspace is bound -- and at that moment
+   * it should still be the user's call whether to see the badges, not a wall of orange sprung on
+   * them the instant they connect.
    *
    * What `connected` gates is whether the control appears at all: with no workspace the distinction
    * the badge draws does not exist yet.
    */
-  const [showFlags, setShowFlags] = useState(true)
+  const [showFlags, setShowFlags] = useState(false)
 
   /* The one place React Flow is handed the list, so the one place its ordering rule has
      to be satisfied -- see orderForFlow. Everything else here reads the props, because
      order is React Flow's constraint and not a fact about the document. */
+  /*
+   * A hidden pin per loose connector end -- see edges/looseEnds.js for why React Flow needs a node
+   * there at all.
+   *
+   * Keyed on a signature of just the loose ends rather than on `edges`, because `edges` changes on
+   * every selection click and every style tweak, and a new node array each time would have React
+   * Flow re-adopt every node on the canvas for a change that moved none of them.
+   */
+  const pinSignature = edges
+    .filter(isLoose)
+    .map((edge) => `${edge.id}:${JSON.stringify(edge.data?.sourcePoint ?? null)}:${JSON.stringify(edge.data?.targetPoint ?? null)}:${edge.source ?? ''}:${edge.target ?? ''}`)
+    .join('|')
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the signature, see above
+  const pins = useMemo(() => pinNodesFor(edges), [pinSignature])
+
   const flowNodes = useMemo(() => {
-    const ordered = orderForFlow(nodes)
+    /* Appended after everything else so they never disturb the parent-before-child order
+       `orderForFlow` guarantees. */
+    const ordered = pins.length ? [...orderForFlow(nodes), ...pins] : orderForFlow(nodes)
     /*
      * `data.locked` -> React Flow's own drag and selection flags, applied here rather than
      * in `toFlowNode`, because this is the one seam every node reaches the canvas through.
@@ -241,7 +287,7 @@ export default function Canvas({
     return ordered.map((node) =>
       node.data?.locked ? { ...node, draggable: false, dragHandle: undefined } : node,
     )
-  }, [nodes])
+  }, [nodes, pins])
 
   /*
    * No anchor notes are drawn here at all any more, and there is no control for them.
@@ -365,12 +411,24 @@ export default function Canvas({
     for (const edge of edges) {
       for (const end of ['source', 'target']) {
         const nodeId = end === 'source' ? edge.source : edge.target
+        /* A loose end has no component and so no side to share. */
+        if (!nodeId) continue
         const stored = end === 'source' ? edge.data?.sourceAnchor : edge.data?.targetAnchor
         if (parseFreeHandle(stored)) continue
-        const other = getInternalNode(end === 'source' ? edge.target : edge.source)
+        const farEnd = end === 'source' ? 'target' : 'source'
+        /* The far end of a loose connector is a point, which orders it just as well as a card. */
+        const farPoint = loosePoint(edge, farEnd)
+        const other = farPoint
+          ? { internals: { positionAbsolute: farPoint }, measured: { width: 0, height: 0 } }
+          : getInternalNode(edge[farEnd])
         const at = other?.internals?.positionAbsolute
         if (!at) continue
-        const side = sideOf(edge, nodeId)
+        /* `.side`, because `sideOf` returns `{side, flow, edgeId}`. Passing the whole record made
+           every key `"<nodeId>|[object Object]"`, so all of a card's ends landed in one bucket
+           whatever side they used -- an end on the left was spread as though it shared the right
+           with three others, and a single connector arriving alone was pushed off the midpoint by
+           siblings on other sides entirely. */
+        const side = sideOf(edge, nodeId)?.side
         const across =
           side === 'left' || side === 'right'
             ? at.y + (other.measured?.height ?? 0) / 2
@@ -383,6 +441,233 @@ export default function Canvas({
        its connectors deserve. */
   }, [edges, nodes, getInternalNode])
 
+  /*
+   * One end of a connector, dragged to a point and dropped.
+   *
+   * ## Why this exists alongside `onReconnect`
+   *
+   * `onReconnect` is React Flow's path, and it is reached through anchors the library draws
+   * itself: two `<circle fill="transparent">`s (`EdgeAnchor`) placed at the edge's reported
+   * endpoint and shifted `reconnectRadius` *outward* from the node. Two problems, and together
+   * they are the whole of "I cannot move the ends of a connector".
+   *
+   * They are invisible, so nothing says an end can be grabbed at all. And on this canvas they
+   * are frequently not where the line is: an end carrying a `data.sourceAnchor` or a
+   * `fanOutAnchors` share is *drawn* at a point `FlowEdge` computes, while React Flow's anchor
+   * stays at the handle's midpoint. So the reader aims at the visible end of the line and
+   * grabs nothing, because the target is somewhere else and cannot be seen either way.
+   *
+   * So `edgesReconnectable` is off and `FlowEdge` draws its own grips at `start`/`end` -- the
+   * points it actually strokes between -- and releases into this. `onReconnect` stays wired up
+   * regardless: it costs nothing, and a future path that goes through the library should not
+   * find it missing.
+   *
+   * ## What it writes
+   *
+   * The same three facts, in the same shape, as `onConnect`: the endpoint id, the *fixed*
+   * handle for the side, and the precise point as an anchor in `data`. Never a `free:` id in
+   * `sourceHandle` -- see canvas/handles.js, where that mistake made the edge undrawable
+   * forever rather than merely misplaced.
+   *
+   * @param end   'source' or 'target' -- which end the gesture grabbed
+   * @param drop  `{nodeId, side, t}` from `endpointDropTarget`, or null for a release on
+   *   nothing, which is a cancel
+   */
+  const onEndpointMove = useCallback(
+    (edgeId, end, drop, point) => {
+      const edge = edges.find((entry) => entry.id === edgeId)
+      if (!edge) return
+      const other = end === 'source' ? 'target' : 'source'
+      const free = looseEnds(edge)
+
+      /* A merged line stands for several connectors, none of which is the one being dragged. */
+      if (edge.data?.aggregated) {
+        onNotify?.({
+          tone: 'info',
+          message: 'This line stands for several connectors. Expand the group to move one of them.',
+        })
+        return
+      }
+
+      /*
+       * Released over empty canvas: the end is let go of *there*, and the connector is left pointing at
+       * a component that does not exist yet -- see edges/looseEnds.js.
+       *
+       * Refused for the two cases where that would be destroying something rather than drawing it. A
+       * connector whose other end is already loose would be attached to nothing at all, which is not a
+       * connector. And one read from the workspace is a fact: disconnecting it on the diagram would
+       * claim something about the customer's setup that is not true.
+       */
+      if (!drop) {
+        const at = cleanPoint(point)
+        if (!at) return
+        if (free[end]) {
+          setEdges((current) =>
+            current.map((entry) =>
+              entry.id === edgeId
+                ? {
+                    ...entry,
+                    data: { ...entry.data, [pointKey(end)]: { x: Math.round(at.x), y: Math.round(at.y) } },
+                  }
+                : entry,
+            ),
+          )
+          return
+        }
+        if (free[other]) {
+          onNotify?.({
+            tone: 'info',
+            message: 'The other end is not connected either. Drop this end on a component, or delete the connector.',
+          })
+          return
+        }
+        if ((edge.data?.discovered ?? edge.discovered) === true) {
+          onNotify?.({
+            tone: 'info',
+            message: 'This connection was read from the workspace, so it cannot be left unconnected. Disconnect it in Segment.',
+          })
+          return
+        }
+        setEdges((current) =>
+          current.map((entry) => (entry.id === edgeId ? detachEnd(entry, end, at) : entry)),
+        )
+        return
+      }
+
+      if (isGroupStackId(drop.nodeId) || isPinId(drop.nodeId)) {
+        onNotify?.({
+          tone: 'info',
+          message: 'Expand the group first — a connection has to name the component it reaches.',
+        })
+        return
+      }
+
+      const connection = {
+        source: end === 'source' ? drop.nodeId : edge.source,
+        target: end === 'target' ? drop.nodeId : edge.target,
+        sourceHandle: end === 'source' ? fixedHandleForSide(drop.side) : edge.sourceHandle,
+        targetHandle: end === 'target' ? fixedHandleForSide(drop.side) : edge.targetHandle,
+      }
+
+      /*
+       * Released over the component at the *other* end, which would fold the connector into a loop
+       * on one card.
+       *
+       * Refused, even though the validator deliberately permits a self-connection -- drawing one on
+       * purpose is a drawable thing and there is a handle on each of four sides for it. Reaching one
+       * *this* way is different: it is a slipped drag, it destroys the connection the reader was
+       * adjusting, and the only way back is to draw it again. So the end returns to where it was,
+       * with a word about why. Checked before the validator, which would wave it through.
+       */
+      if (drop.nodeId === edge[other]) {
+        onNotify?.({
+          tone: 'info',
+          message: 'Both ends would be on the same component. Drop this end somewhere else, or delete the connector.',
+        })
+        return
+      }
+
+      /* Nothing moved: the end went back onto the same side of the same component. Returned
+         before the validator, which would refuse it as a duplicate of the edge it *is*. */
+      const sameEnd =
+        connection[end] === edge[end] &&
+        connection[`${end}Handle`] === edge[`${end}Handle`]
+
+      /* The edge being moved is excluded, exactly as in `onReconnect`: counting it against
+         itself would report the pair as already connected.
+
+         Only asked when both ends will be attached. The rules are about what may connect to what, and
+         a connector still loose at its other end does not connect two things yet -- the check runs
+         when that end is dropped. */
+      const others = edges.filter((entry) => entry.id !== edgeId)
+      if (
+        !sameEnd &&
+        !free[other] &&
+        !makeConnectionValidator({ topology, getNode, edges: others })(connection)
+      ) {
+        onNotify?.({
+          tone: 'error',
+          message: explainRejection({
+            from: getNode(connection.source),
+            to: getNode(connection.target),
+            edges: others,
+          }),
+        })
+        return
+      }
+
+      setEdges((current) =>
+        current.map((entry) =>
+          entry.id === edgeId
+            ? {
+                ...entry,
+                ...connection,
+                data: {
+                  /* An end that was loose is not any more, so its point goes. */
+                  ...withoutPoint(entry.data, end),
+                  /* Where along that side, which is the point of dragging rather than picking
+                     from a menu. Only the end that moved -- the other keeps whatever it had. */
+                  [`${end}Anchor`]: encodeFreeHandle(drop.side, drop.t),
+                },
+              }
+            : entry,
+        ),
+      )
+    },
+    [edges, topology, getNode, setEdges, onNotify],
+  )
+
+  /*
+   * Where an endpoint drag would land, given the pointer in flow coordinates.
+   *
+   * Built here rather than inside the edge because it needs every node's box, which no single
+   * edge can see. A callback rather than a value: it runs on pointer release, not on render.
+   *
+   * ## Hit-tested against `nodes`, not `documentNodes`
+   *
+   * The *view*, deliberately, and it is the one place in this file where that is the right list.
+   * `documentNodes` holds the members of a collapsed group, which are not on screen -- so a release
+   * over a stack would silently attach the connector to whichever hidden member happened to be
+   * nearest, and the reader would see a line vanish into a stack pointing at something they cannot
+   * see. Hit-testing what is drawn means a stack is found *as a stack*, which `onEndpointMove` can
+   * then refuse by name.
+   *
+   * Components win over zones outright, and a zone is only considered when no component is in
+   * reach. A zone's box covers everything inside it, so ranking the two together would attach
+   * most drops to the backdrop the reader was aiming *through*.
+   */
+  const endpointDropTarget = useCallback(
+    (point) => {
+      const reach = ENDPOINT_REACH / getZoom()
+      let best = null
+      let bestDistance = Infinity
+      for (const box of componentBoxes(nodes, { stacks: true })) {
+        const distance = distanceToBox(box, point)
+        if (distance > reach || distance >= bestDistance) continue
+        best = box
+        bestDistance = distance
+      }
+
+      /* Only the inside of a zone counts, via the same containment test a palette drop uses --
+         a zone is a region, so "near its border" is not a thing anyone aims at.
+
+         A *divider* is excluded. It is stored as a zone and `zoneAtPosition` prefers the deepest
+         hit, so a release over empty canvas inside one resolved to the frame -- and a connector
+         attached to a layout divider is a line pointing at a piece of furniture, which nothing
+         downstream refuses and no reader could explain. */
+      const under = zoneAtPosition(nodes, point)
+      const box = best ?? (under?.data?.frame ? null : boxOfZone(under, nodes))
+      if (!box) return null
+
+      const found = nearestBorder(
+        { x: point.x - box.x, y: point.y - box.y },
+        { width: box.width, height: box.height },
+      )
+      return { nodeId: box.id, side: found.side, t: found.t }
+    },
+    [nodes, getZoom],
+  )
+
   const chrome = useMemo(
     () => ({
       showFlags,
@@ -391,6 +676,8 @@ export default function Canvas({
       setRadius: onSetRadius ?? null,
       updateData: onUpdateData ?? null,
       onWaypoints,
+      onEndpointMove,
+      endpointDropTarget,
       adjustingEdgeId,
       walkthroughActive,
       flowPreview,
@@ -407,6 +694,8 @@ export default function Canvas({
       onSetRadius,
       onUpdateData,
       onWaypoints,
+      onEndpointMove,
+      endpointDropTarget,
       adjustingEdgeId,
       walkthroughActive,
       flowPreview,
@@ -467,19 +756,16 @@ export default function Canvas({
    */
   const facingFor = useCallback(
     (connection) => {
-      const boxOf = (id) => {
-        const node = getInternalNode?.(id)
-        const at = node?.internals?.positionAbsolute
-        const width = node?.measured?.width
-        const height = node?.measured?.height
-        return at && width && height ? { x: at.x, y: at.y, width, height } : null
-      }
-      const from = boxOf(connection.source)
-      const to = boxOf(connection.target)
+      const boxOf = (id) => internalBox(getInternalNode?.(id))
+      /* A loose end is a point, which the attached end can face just as well as a card. It gets no
+         handle of its own -- there is no component there to have one. */
+      const from = endBox(connection, 'source', boxOf)
+      const to = endBox(connection, 'target', boxOf)
       if (!from || !to) return { source: null, target: null }
+      const free = looseEnds(connection)
       return {
-        source: fixedHandleForSide(facingSide(from, to)),
-        target: fixedHandleForSide(facingSide(to, from)),
+        source: free.source ? null : fixedHandleForSide(facingSide(from, to)),
+        target: free.target ? null : fixedHandleForSide(facingSide(to, from)),
       }
     },
     [getInternalNode],
@@ -590,9 +876,13 @@ export default function Canvas({
        perfectly valid. */
     return (candidate) => {
       const connection = orientConnection(candidate, connectFrom.current)
+      /* A pin is a loose end's stand-in, not a component -- see edges/looseEnds.js. It registers a
+         handle so React Flow can draw to it, which also makes it findable by a connection drag. */
       return (
         !isGroupStackId(connection.source) &&
         !isGroupStackId(connection.target) &&
+        !isPinId(connection.source) &&
+        !isPinId(connection.target) &&
         valid(connection)
       )
     }
@@ -627,24 +917,37 @@ export default function Canvas({
       }
 
       /*
-       * A zone being resized takes its contents with it.
+       * A zone being resized stops at its own contents.
        *
-       * Skipped when the same frame also moves the zone -- that is a top or left handle,
-       * and the resizer already shifts the children the opposite way to hold them still.
-       * Scaling on top of that would apply two transforms to one drag.
+       * Not skipped when the same frame also moves the zone, which is what a top or left
+       * handle does: `clampZoneResize` needs that position, because whatever the floor
+       * refuses to take off the size has to be given back to the origin or the zone grows
+       * from the edge nobody dragged. So the two changes are paired up here rather than
+       * one of them disqualifying the other.
        *
-       * Done inside one `setNodes` rather than after `onNodesChange`, because the
-       * scaling factor is the ratio of the new size to the old one and the old one is
-       * only readable before the change lands. Two queued updates would read it after.
+       * Done inside one `setNodes` rather than after `onNodesChange`, because the floor is
+       * measured against the children's *current* positions and the clamped position has to
+       * replace the resizer's before either lands. Two queued updates would race.
+       *
+       * `setAttributes` is the discriminator, for exactly the reason stated on `sized` below:
+       * React Flow emits a `dimensions` change for every *measurement* too -- once per node on
+       * mount and again whenever the DOM reports a new box -- and only a resize handle sets this
+       * flag. A measurement reports the zone's box in *screen* pixels, so treating one as a resize
+       * ran the clamp against a number at the current zoom: the shipped template opened at
+       * 2035 wide and was immediately written down to 1914, the measured width at 0.19 zoom.
+       *
+       * This filter lacked the flag while the branch called `scaleZoneChildren`, and the bug was
+       * invisible there only because a measurement's ratio is ~1 and scaling by 1 changes nothing.
+       * The clamp has no such accidental immunity, which is what surfaced it.
        */
-      const moved = new Set(
-        changes.filter((change) => change.type === 'position').map((change) => change.id),
+      const movedTo = new Map(
+        changes.filter((change) => change.type === 'position').map((change) => [change.id, change]),
       )
       const resizes = changes.filter(
         (change) =>
           change.type === 'dimensions' &&
+          change.setAttributes &&
           change.dimensions &&
-          !moved.has(change.id) &&
           documentNodes.some((node) => node.id === change.id && node.type === 'zone'),
       )
 
@@ -669,29 +972,61 @@ export default function Canvas({
       if (resizes.length || sized.length) {
         setNodes((current) => {
           let next = applyNodeChanges(changes, current)
+          /* The dividers resized in this batch, which `growZones` must not touch -- see the note
+             where it is called. Ids rather than a flag, so a batch that resized a divider *and*
+             something else still grows the something else. */
+          const framesResized = new Map()
           for (const change of resizes) {
             const before = current.find((node) => node.id === change.id)
-            const from = zoneSize(before)
             /*
-             * A divider's contents move; a zone's contents scale.
+             * A divider's contents move; a zone's contents stay exactly where they are.
              *
-             * The difference is what each one *is*. A zone is a box drawn around a group of
-             * components, so stretching it should spread them out -- that is `scaleZoneChildren`.
-             * A divider is a division of the canvas into sections, and its sections hold whole
-             * diagrams: scaling those would rearrange every component inside them. What moves
-             * instead is each section, by however far its own origin moved, taking its contents
-             * with it. See `shiftSections` in canvas/frames.js.
+             * The difference is what each one *is*. A divider is a division of the canvas into
+             * sections, and its sections hold whole diagrams: what moves when it is dragged is
+             * each section, by however far its own origin moved, taking its contents with it.
+             * See `shiftSections` in canvas/frames.js.
+             *
+             * A zone is a box drawn *around* components that are already arranged. Stretching
+             * or tightening the box says nothing about the arrangement inside it, so nothing
+             * inside moves -- the box simply stops when it reaches them. See `clampZoneResize`,
+             * and its header for what this used to do instead.
              */
             if (before?.data?.frame) {
+              framesResized.set(change.id, change.dimensions)
+              const from = zoneSize(before)
               next = shiftSections(
                 next,
                 change.id,
                 { frame: before.data.frame, ...from },
                 { frame: before.data.frame, ...change.dimensions },
               )
-            } else {
-              next = scaleZoneChildren(next, change.id, from, change.dimensions)
+              continue
             }
+
+            /* Measured against `current`, the positions the children had before this batch --
+               which is also what they have after it, since a zone resize never moves them. */
+            /* `before.position` is the third argument and is load-bearing: it is how the clamp tells
+               a near-edge drag from a far-edge one per axis. Omitted, the size object bound to
+               `from` and `to` came through undefined, so every resize collapsed to the contents'
+               bounding box. */
+            const clamped = clampZoneResize(current, change.id, before?.position, {
+              ...change.dimensions,
+              position: movedTo.get(change.id)?.position,
+            })
+            next = next.map((node) =>
+              node.id === change.id
+                ? {
+                    ...node,
+                    width: clamped.width,
+                    height: clamped.height,
+                    /* Both, because React Flow renders the top-level pair and `zoneSize` reads
+                       it first -- a zone carrying a stale `style` size would serialize at one
+                       size and draw at another. */
+                    ...(node.style ? { style: { ...node.style, width: clamped.width, height: clamped.height } } : {}),
+                    ...(clamped.position ? { position: clamped.position } : {}),
+                  }
+                : node,
+            )
           }
           if (sized.length) {
             const byId = new Map(sized.map((change) => [change.id, change.dimensions]))
@@ -721,11 +1056,41 @@ export default function Canvas({
               }
               return { ...node, data: { ...node.data, size } }
             })
-            /* A card dragged wider than the room its zone has left overhangs the backdrop,
-               which reads as a rendering bug. Same call the drag does, for the same reason. */
-            next = growZones(next)
           }
-          return next
+          /*
+           * Grow whatever now has to contain more than it did: a card dragged wider than the room
+           * its zone has left, or a sub-zone dragged wider than its parent -- either of which
+           * leaves a child drawn outside a backdrop it is still a child of.
+           *
+           * A no-op for a zone just clamped, deliberately: `clampZoneResize` floors it at exactly
+           * the `minZoneSize` this measures, so there is nothing left to grow. That is what makes
+           * the handle stop where it stopped rather than springing back a frame later.
+           *
+           * Skipped entirely for a *divider*, which is the one resize whose contents move. A
+           * divider tightened from 400 to 300 has just pulled its sections inward, and `growZones`
+           * -- which cannot tell a section's margin from an overflow -- measured the moved cards and
+           * pushed it back out to 310. So a frame resize returns what `shiftSections` produced,
+           * untouched. Nothing is lost: a frame's children are only ever moved *inward* by this
+           * path, so there is no overflow for a grow pass to fix.
+           */
+          if (!framesResized.size) return growZones(next)
+          /*
+           * Grow everything else, then put the dividers back.
+           *
+           * `growZones` floors every zone at `minZoneSize`, which adds `CHILD_MARGIN` beyond the
+           * last child -- right for a zone drawn *around* an arrangement, and wrong for a divider,
+           * whose sections legitimately run right up to their own boundary. `shiftSections` has
+           * just pulled those sections inward, so the grow pass measured the moved cards and pushed
+           * the frame back out: a divider dragged 400 -> 300 sprang to 310.
+           *
+           * Restoring by id rather than skipping the pass outright, so a component resized in the
+           * same batch still gets the zone growth it needs.
+           */
+          const grown = growZones(next)
+          return grown.map((node) => {
+            const box = framesResized.get(node.id)
+            return box ? { ...node, width: box.width, height: box.height } : node
+          })
         })
         return
       }
@@ -1062,6 +1427,81 @@ export default function Canvas({
   )
 
   /*
+   * A connection drag released somewhere React Flow did not read as a handle.
+   *
+   * It used to be thrown away, with no line drawn and nothing said -- which is what made "aim at the
+   * card" fail whenever the release was a little way inside it, out of reach of all four side dots.
+   * There are two things the reader can have meant, and both are drawn now:
+   *
+   *   - Over a component: connect to it, at the side nearest the pointer. The same answer an endpoint
+   *     drag gets, through the same hit test, so the two gestures cannot disagree about where a drop
+   *     landed.
+   *   - Over empty canvas: a connector to *nothing yet*, ending where the pointer is -- see
+   *     edges/looseEnds.js. Dropped onto a component later, it connects.
+   *
+   * A release on the component the drag started from is neither, and is left alone: it is a drag that
+   * never left the card, not a request for a loop.
+   */
+  const finishLooseConnection = useCallback(
+    (event, state, from) => {
+      /* React Flow already connected it (or refused it mid-drag, with the handle shown red). A pin
+         does not count: it is a loose end's stand-in, and landing near one is landing on canvas. */
+      if (state?.toHandle && !isPinId(state.toNode?.id)) return
+      const startId = state?.fromNode?.id ?? from?.nodeId
+      if (!startId || isGroupStackId(startId) || isPinId(startId)) return
+
+      const pointer = 'changedTouches' in (event ?? {}) ? event.changedTouches[0] : event
+      if (!pointer || !Number.isFinite(pointer.clientX)) return
+      const point = screenToFlowPosition({ x: pointer.clientX, y: pointer.clientY })
+
+      const drop = endpointDropTarget(point)
+      if (drop) {
+        if (drop.nodeId === startId) return
+        /* Through `onConnect`, so the rules, the refusal message, the facing sides and the route
+           avoidance are the ones every other new connector gets. The landing point is handed over the
+           same way `ConnectionHandles` hands over a slide along the border. */
+        dragAnchorRegistry.set(drop.nodeId, drop.side, drop.t)
+        onConnect({
+          source: startId,
+          target: drop.nodeId,
+          sourceHandle: state?.fromHandle?.id ?? null,
+          targetHandle: fixedHandleForSide(drop.side),
+        })
+        return
+      }
+
+      const edge = {
+        id: `manual-edge:${crypto.randomUUID().slice(0, 8)}`,
+        source: startId,
+        target: null,
+        type: 'flow',
+        data: {
+          discovered: false,
+          targetPoint: { x: Math.round(point.x), y: Math.round(point.y) },
+        },
+      }
+      /* The end it leaves from faces the point it is going to, unless the drag slid along the border
+         to a particular place first -- the same precedence `onConnect` gives a hand-placed anchor. */
+      const anchor = dragAnchorRegistry.take(startId)
+      const facing = facingFor(edge)
+      setEdges((current) => [
+        ...current,
+        {
+          ...edge,
+          sourceHandle: anchor
+            ? fixedHandleForSide(anchor.side)
+            : (facing.source ?? state?.fromHandle?.id ?? null),
+          data: {
+            ...edge.data,
+            ...(anchor ? { sourceAnchor: encodeFreeHandle(anchor.side, anchor.t) } : {}),
+          },
+        },
+      ])
+    },
+    [screenToFlowPosition, endpointDropTarget, dragAnchorRegistry, onConnect, facingFor, setEdges],
+  )
+
+  /*
    * Moving one end of an existing connection somewhere else.
    *
    * Without this the only way to change where a connection goes is to delete it and
@@ -1236,6 +1676,40 @@ export default function Canvas({
       }
 
       const kind = payload.kind
+
+      /*
+       * A workspace component dropped onto a card already on the canvas binds that card rather than
+       * adding a second one beside it. Only onto the same kind -- binding across kinds would move the
+       * card to another pipeline zone and break the connectors already on it, which is the one thing
+       * the Bind tab refuses too.
+       */
+      if (payload.bound && payload.data?.segmentId) {
+        const hit = event.target?.closest?.('.react-flow__node')?.getAttribute('data-id')
+        const target = hit ? nodes.find((node) => node.id === hit && node.type !== 'zone') : null
+        if (target && !isGroupStackId(target.id)) {
+          const name = target.data?.templateName ?? target.data?.name ?? 'This component'
+          if (target.data?.kind !== kind) {
+            onNotify?.({
+              tone: 'error',
+              message: `“${name}” is a ${target.data?.kind ?? 'different kind'}, and ${payload.data.name} is a ${kind}. Drop it on a ${kind}, or on empty canvas to add it.`,
+            })
+            return
+          }
+          if (boundSegmentIds(nodes, target.id).has(payload.data.segmentId)) {
+            onNotify?.({
+              tone: 'error',
+              message: `${payload.data.name} is already bound to another component on this canvas.`,
+            })
+            return
+          }
+          const next = replacementPatch(target.data, applyBinding(target.data, payload.data))
+          onUpdateData?.(target.id, next)
+          onNotify?.({ tone: 'success', message: `Bound “${name}” to ${payload.data.name}.` })
+          onInspect?.(target)
+          return
+        }
+      }
+
       const dropped = screenToFlowPosition({ x: event.clientX, y: event.clientY })
       const zone = zoneAtPosition(nodes, dropped)
 
@@ -1319,7 +1793,7 @@ export default function Canvas({
       setNodes((current) => [...current, node])
       onInspect?.(node)
     },
-    [screenToFlowPosition, nodes, topology, setNodes, onInspect, onNotify, onAdvise],
+    [screenToFlowPosition, nodes, topology, setNodes, onInspect, onNotify, onAdvise, onUpdateData],
   )
 
   /*
@@ -1330,7 +1804,12 @@ export default function Canvas({
    * through on its way to React Flow, whatever created it.
    */
   const layeredEdges = useMemo(
-    () => edges.map((edge) => (edge.zIndex === edgeZFor(edge) ? edge : { ...edge, zIndex: edgeZFor(edge) })),
+    () =>
+      /* Loose ends pointed at their pins here, at the last moment, so nothing upstream -- the store,
+         the inspector, the serializer -- ever sees an id that is not a component. */
+      pinnedEdges(edges).map((edge) =>
+        edge.zIndex === edgeZFor(edge) ? edge : { ...edge, zIndex: edgeZFor(edge) },
+      ),
     [edges],
   )
 
@@ -1356,8 +1835,10 @@ export default function Canvas({
                  drag end) cannot leave an anchor for *this* gesture to inherit. */
               dragAnchorRegistry.clear()
             }}
-            onConnectEnd={() => {
+            onConnectEnd={(event, state) => {
+              const from = connectFrom.current
               connectFrom.current = null
+              finishLooseConnection(event, state, from)
               /* A no-op if `onConnect` already consumed it; a stale one otherwise, from a drag
                  that ended without connecting -- which must not attach itself to a later,
                  unrelated connection drawn from the same node. */
@@ -1365,19 +1846,22 @@ export default function Canvas({
             }}
             onConnect={onConnect}
             onReconnect={onReconnect}
-            /* So clicking a connection shows a draggable dot at each end. Generous
-               radius: the ends of an edge are two small dots on a diagram the reader is
-               usually zoomed out of, and 10px of slop is the difference between
-               "draggable" and "fiddly". */
-            edgesReconnectable
             /*
-             * Generous, because the thing being grabbed is a dot on a line the reader is usually
-             * zoomed out of. 20 rather than the library's 10 for a second reason too: the anchor is
-             * centred on the endpoint, which is exactly where the node's own connection handle is,
-             * so the inner part of it is under the card. The radius is what leaves a ring of it
-             * outside.
+             * Off, and this is the fix for "I cannot move the ends of a connector".
+             *
+             * React Flow's reconnect anchors are two `<circle fill="transparent">`s drawn at the
+             * edge's reported endpoint and shifted `reconnectRadius` *outward* from the node. Both
+             * halves of that are wrong here. They are invisible, so nothing advertises that an end
+             * can be grabbed at all -- and on this canvas the reported endpoint is frequently not
+             * where the line is: an end carrying a `data.sourceAnchor` or a share of a fanned-out
+             * side is drawn at a point `FlowEdge` computes, while the anchor stays at the handle's
+             * midpoint. So the reader aims at the visible end of the line and grabs nothing.
+             *
+             * `FlowEdge` draws its own grips instead, at the points it actually strokes between,
+             * and releases into `onEndpointMove`. `onReconnect` stays wired above: it costs
+             * nothing and this could be switched back on.
              */
-            reconnectRadius={20}
+            edgesReconnectable={false}
             /*
              * How close to a handle a connection has to be *released* to land on it. The
              * library's default is 20, which is a ring barely wider than the dot itself --
@@ -1865,18 +2349,24 @@ function dropZone(payload, dropped, { nodes, zone, topology, onNotify, onAdvise 
  *
  * Zones are excluded, and that is not an optimisation: a zone is the region the diagram is drawn
  * *in*, so a line asked to route around Connections rather than through it would have nowhere left
- * to go. Collapsed group stacks are excluded for the opposite reason -- their id is not in the
- * document, so a route stored against one would be dropped on the next expand.
+ * to go. Collapsed group stacks are excluded by default for the opposite reason -- their id is not
+ * in the document, so a route stored against one would be dropped on the next expand.
+ *
+ * `stacks: true` includes them, for the one caller that needs to *find* a stack rather than avoid
+ * one: an endpoint drop released over a collapsed group has to be recognised and refused by name,
+ * and a hit test that skipped stacks would instead attach the connector to a hidden member. See
+ * `endpointDropTarget`.
  *
  * Positions are absolute. A component inside a zone stores its position relative to that zone, and
  * an obstacle test against parent-relative coordinates would place every card in Unify a few
  * hundred pixels from where it is drawn.
  */
-function componentBoxes(nodes) {
+function componentBoxes(nodes, { stacks = false } = {}) {
   const positions = absolutePositions(nodes ?? [])
   const boxes = []
   for (const node of nodes ?? []) {
-    if (node.type === 'zone' || isGroupStackId(node.id)) continue
+    if (node.type === 'zone') continue
+    if (isGroupStackId(node.id) && !stacks) continue
     const at = positions.get(node.id)
     if (!at) continue
     const chosen = componentSize(node)
@@ -1889,6 +2379,22 @@ function componentBoxes(nodes) {
     })
   }
   return boxes
+}
+
+/**
+ * A zone node's box in flow coordinates, or null when there is no zone.
+ *
+ * `componentBoxes` deliberately excludes zones -- a connector routing *around* Connections
+ * would have nowhere to go -- but a zone is a legal endpoint (one zone can be drawn feeding
+ * another), so an endpoint drop still has to be able to find one. Its size comes from
+ * `zoneSize` rather than from `measured`, because React Flow does not measure group nodes.
+ */
+function boxOfZone(zone, nodes) {
+  if (!zone) return null
+  const at = absolutePositions(nodes ?? []).get(zone.id)
+  const { width, height } = zoneSize(zone)
+  if (!at || !width || !height) return null
+  return { id: zone.id, x: at.x, y: at.y, width, height }
 }
 
 /**

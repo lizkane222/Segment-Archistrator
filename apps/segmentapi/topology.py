@@ -28,6 +28,12 @@ ZONE_PROTOCOLS = "protocols"
 ZONE_SOURCES = "sources"
 ZONE_DESTINATIONS = "destinations"
 ZONE_WAREHOUSES = "warehouses"
+# Linked Events enrich a live event stream with warehouse entities on its way out. In
+# Connections, because that is where the enrichment happens -- it is configured on an
+# actions destination's mapping, and the event passes through it between a source and a
+# destination. Segment's own navigation files the *setup* under Unify > Data graph, which is
+# a fact about where the entities are defined rather than about where data flows.
+ZONE_LINKED_EVENTS = "linked_events"
 
 # Unify sub-zones
 ZONE_PROFILE_SOURCES = "profile_sources"
@@ -95,6 +101,17 @@ ZONES = [
         "label": "Warehouse",
         "description": "The warehouses Segment loads into, and the models read back out.",
         "order": 3,
+        "parent": ZONE_CONNECTIONS,
+        "subdivision": True,
+    },
+    {
+        "id": ZONE_LINKED_EVENTS,
+        "label": "Linked Events",
+        "description": (
+            "Warehouse entities joined onto a live event on its way out, so a destination "
+            "sees more than the event carried."
+        ),
+        "order": 4,
         "parent": ZONE_CONNECTIONS,
         "subdivision": True,
     },
@@ -220,6 +237,47 @@ DISCOVERED_ZONES = [zone for zone in ZONES if zone["id"] not in PALETTE_ONLY_ZON
 # being a drawing choice.
 CONTAINER_ZONES = frozenset({ZONE_SEGMENT})
 
+# A second home for a component that genuinely has two.
+#
+# `ZONE_FOR_KIND` holds one zone per kind, because the stored `zone` field holds one -- and
+# for almost every kind that single answer is the whole truth. Profiles Sync is the case where
+# it is not: it is *configured* in Unify, which is why it is homed there, and what it does is
+# land profiles and audience membership in a warehouse. A diagram drawing the second half puts
+# it in the Warehouse region, and neither of `is_valid_placement`'s two rules can allow that --
+# Unify is not a subdivision, so the upward rule stops there, and `warehouses` never appears in
+# Unify's chain. The result was an advisory on every save telling the reader their correct
+# diagram was wrong.
+#
+# A table rather than a special case in the function, and deliberately narrow: this is for a
+# component whose *work* spans two products, not for making misfilings quiet. CONTAINER_ZONES
+# is the precedent -- the same shape of answer for the same shape of problem.
+#
+# Mirrored by `isValidPlacement` in frontend/src/canvas/rules.js, which reads it off the
+# topology payload rather than restating it.
+# Every entry is a component that does its work in one product and is *configured* in another, so
+# a diagram has two honest places to draw it -- and the one the reader picks depends on which half
+# the diagram is about. Read the comment on each as the answer to "why would anyone draw it there".
+ALSO_VALID_ZONES: dict[str, frozenset[str]] = {
+    # Configured in Unify; lands profiles and audience membership in a warehouse. A diagram drawing
+    # the destination rather than the setting puts it in the Warehouse region.
+    "profile_sync": frozenset({ZONE_WAREHOUSES}),
+    # A source exists in Connections, and the *same* source appears again as a feeder of profiles
+    # or as the origin of the events a debugger is showing. Those are the two Unify/Engage regions
+    # that exist to be drawn around it -- `profile_sources` homes the separate `profile_source`
+    # kind, but a diagram is entitled to draw the real source there instead and usually does, since
+    # whether a source is connected to the space is the commonest reason Unify sees nothing.
+    "source": frozenset({ZONE_PROFILE_SOURCES, ZONE_DEBUGGER}),
+    # The Segment Profiles destination is how a source's events reach a space at all: a destination
+    # in the catalogue, configured in Connections, whose entire purpose is Unify. Drawn in Profile
+    # Sources it is the clearest thing on the diagram; refused there, the commonest way profiles
+    # get populated is the one thing a diagram cannot say.
+    "destination": frozenset({ZONE_PROFILE_SOURCES}),
+    # Configured in Unify, and what it is *for* is the audiences and journeys keyed on it -- which
+    # is also where the cost of recomputing it is felt. Engage homes `audience` and `journey`
+    # already, so a trait drawn beside them reads correctly.
+    "computed_trait": frozenset({ZONE_ENGAGE}),
+}
+
 
 #: How a second copy of a zone on one canvas is named: `connections~2`.
 #:
@@ -305,6 +363,20 @@ KINDS = {
         "expandable": True,
     },
     "destination": {"label": "Destination", "zone": ZONE_CONNECTIONS, "api": True},
+    # A warehouse entity joined onto a live event on its way out: the event carries a
+    # `product_id`, the destination receives the whole product row. Its own kind rather
+    # than a flag on `destination_mapping`, because what it depends on is entirely
+    # different -- a Data Graph entity with enrichment enabled, and the Reverse ETL
+    # machinery that caches it -- and because a reader has to be able to see that the
+    # enrichment is a thing that can be missing.
+    #
+    # `api: False`: the Public API does not list them, so they are transcribed by hand
+    # like a journey. Zoned to Connections rather than Unify -- see ZONE_LINKED_EVENTS.
+    "linked_event": {
+        "label": "Linked Event",
+        "zone": ZONE_LINKED_EVENTS,
+        "api": False,
+    },
     "source_schema_control": {
         "label": "Schema Controls",
         "zone": ZONE_CONNECTIONS,
@@ -480,10 +552,16 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # A table feeds the entity model that describes it, and the audience that queries it. The arrow
     # runs from the table outward because that is the direction the *data* is read in -- a Linked
     # Audience pulls from the warehouse, it does not push.
-    "sql_table": {"data_graph", "linked_audience"},
+    "sql_table": {"data_graph", "linked_audience", "linked_event"},
     # The entity model is what a Linked Audience traverses, so it points at them. It also feeds the
-    # space: the Data Graph is part of how profiles are understood, not a thing beside them.
-    "data_graph": {"linked_audience", "space"},
+    # space: the Data Graph is part of how profiles are understood, not a thing beside them. And a
+    # Linked Event, which joins one of its entities onto an outbound event -- the same entities,
+    # read for a different purpose.
+    "data_graph": {"linked_audience", "space", "linked_event"},
+    # Where the enrichment is applied: an actions destination's mapping, which is the last thing to
+    # touch the payload. Listed explicitly rather than by reaching for `_POST_SEGMENT`, which would
+    # claim a Linked Event can feed a warehouse or a space.
+    "linked_event": {"destination_mapping", "destination", "destination_function"},
     # Terminal in the same sense a destination is: it is the thing being built, and what happens to
     # an audience afterwards -- a sync to a destination -- is drawn from the audience side.
     #
@@ -607,6 +685,9 @@ def is_valid_placement(kind: str, zone: str) -> bool:
     single combined chain would make a profile legal in Profile Sources, since both
     are inside Unify -- the sideways move, which neither rule permits and which is the
     one genuine misfiling among sibling subdivisions.
+
+    And a third, for the handful of components whose work spans two products: see
+    ALSO_VALID_ZONES. Containment, so a second home admits that home's subdivisions too.
     """
     expected = ZONE_FOR_KIND.get(kind)
     if expected is None:
@@ -615,7 +696,12 @@ def is_valid_placement(kind: str, zone: str) -> bool:
     # judged against Connections' rules rather than reported as being in a zone this table
     # has never heard of. Identical for every zone that appears once -- see `zone_product`.
     product = zone_product(zone)
-    return expected in zone_chain(product) or product in placement_zones(kind)
+    chain = zone_chain(product)
+    return (
+        expected in chain
+        or product in placement_zones(kind)
+        or bool(ALSO_VALID_ZONES.get(kind, frozenset()) & set(chain))
+    )
 
 
 def expected_zone(kind: str) -> str | None:
@@ -631,6 +717,14 @@ def as_payload() -> dict:
                 **spec,
                 "allowedTargets": sorted(ALLOWED_EDGES.get(kind, set())),
                 "edgePhase": EDGE_PHASE.get(kind),
+                # The second home, for the few kinds that have one -- see ALSO_VALID_ZONES.
+                # Sent per kind rather than as a table of its own so the client reads it the
+                # same way it reads `zone`: off the kind it is asking about.
+                **(
+                    {"alsoValidZones": sorted(ALSO_VALID_ZONES[kind])}
+                    if kind in ALSO_VALID_ZONES
+                    else {}
+                ),
             }
             for kind, spec in KINDS.items()
         },

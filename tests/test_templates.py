@@ -17,7 +17,7 @@ from django.core.management.base import CommandError
 from apps.diagrams.management.commands import seed_templates as seed_module
 from apps.diagrams.models import Diagram, Template, is_placeholder
 from apps.diagrams.validators import placement_advisories, validate_architecture
-from apps.segmentapi import topology
+from apps.segmentapi import deeplinks, topology
 
 pytestmark = pytest.mark.django_db
 
@@ -103,11 +103,37 @@ def test_the_full_pipeline_template_keeps_its_regions_outside_segment(seeded):
     """
     template = Template.objects.get(key="end-to-end-full-pipeline")
     custom = [z for z in template.graph["zones"] if z.get("custom")]
-    assert [z["label"] for z in custom] == ["Destination", "App / Mobile / Server / Warehouse"]
+    assert [z["label"] for z in custom] == ["Destinations", "App / Mobile / Server / Warehouse"]
     for zone in custom:
         # Beside Segment, not inside it. That is the whole claim they make.
         assert "parent" not in zone, zone["id"]
         assert zone["width"] and zone["height"] and zone["position"]
+
+
+def test_a_copied_zone_is_resolved_by_its_product(seeded):
+    """
+    `destinations~2` is Destinations, and every derived field has to agree.
+
+    One canvas may legitimately hold two Destinations boxes -- one in Connections, one in Engage --
+    and the copy gets its own id because two zones sharing one would collide on save. Every other
+    part of the project already resolves these by product: the colour table, the placement rules,
+    the palette. This loader was the last place that did not, and it refused the fixture outright;
+    the docs link was then the last *field* that did not, so a copy shipped without one while the
+    original had it.
+    """
+    graph = Template.objects.get(key="end-to-end-full-pipeline").graph
+    copies = [z for z in graph["zones"] if topology.ZONE_INSTANCE_SEPARATOR in z["id"]]
+    assert copies, "this template is the one that exercises duplicated zones"
+
+    by_id = {z["id"]: z for z in graph["zones"]}
+    for copy in copies:
+        product = topology.zone_product(copy["id"])
+        assert product in {z["id"] for z in topology.ZONES}, copy["id"]
+        # Whatever the product's own docs link is, the copy has the same -- including None.
+        assert copy["docsUrl"] == deeplinks.zone_docs_url(product), copy["id"]
+        # And the description, which is the product's rather than the fixture's.
+        if product in by_id:
+            assert copy["description"] == by_id[product]["description"], copy["id"]
 
 
 def test_every_hand_arranged_node_carries_a_position(seeded):
@@ -387,12 +413,30 @@ def test_an_edge_drawn_with_no_route_stays_clean(tmp_path, monkeypatch):
 
 
 def test_the_shipped_pipeline_keeps_the_arrangement_it_was_drawn_with(seeded):
-    """The hand-arranged template is the reason the two tests above exist."""
+    """
+    The hand-arranged template is the reason the two tests above exist.
+
+    Proportions rather than exact counts, deliberately. This diagram is the one shipped as the
+    default reference architecture, so it gets edited -- and a test asserting "22 anchored edges"
+    fails on every such edit while saying nothing about whether the arrangement survived. What
+    matters is that the anchors and routes come through the fixture *at all*: dropping them leaves
+    a template that validates, seeds, opens, and looks nothing like the diagram it was made from,
+    which is the failure this is here to catch.
+    """
     graph = Template.objects.get(key="end-to-end-full-pipeline").graph
-    anchored = [e for e in graph["edges"] if e.get("sourceAnchor") or e.get("targetAnchor")]
-    routed = [e for e in graph["edges"] if e.get("waypoints")]
-    assert len(anchored) == 22, "every connector in this diagram was placed by hand"
-    assert len(routed) == 2
+    edges = graph["edges"]
+    anchored = [e for e in edges if e.get("sourceAnchor") or e.get("targetAnchor")]
+    routed = [e for e in edges if e.get("waypoints")]
+    sided = [e for e in edges if e.get("sourceHandle") or e.get("targetHandle")]
+
+    assert len(edges) > 15, "this is the whole-pipeline diagram; it has a lot of connectors"
+    # Nearly every end in this drawing was placed by hand, so a handful of defaults is fine and a
+    # majority of them means the anchors were lost on the way through.
+    assert len(anchored) >= len(edges) - 2
+    assert len(sided) == len(edges), "every connector names the sides it meets"
+    assert routed, "the two connectors that route around a component keep their bends"
+    for edge in routed:
+        assert all("x" in point and "y" in point for point in edge["waypoints"])
 
 
 def test_a_template_may_ship_a_walkthrough(seeded):
@@ -786,15 +830,23 @@ def test_the_backdrop_exemption_does_not_reach_the_product_zones(auth_client):
     assert "usually goes in Connections" in response.data["advisories"][0]
 
 
-def test_the_shipped_full_pipeline_template_is_advised_about_less_than_it_was(seeded):
+def test_every_shipped_template_opens_without_being_advised_about(seeded):
     """
-    The template is hand-arranged, so some advice on it is expected and correct --
-    Computed Trait really is drawn outside Unify. What must *not* be there any more is
-    the pair on the Segment backdrop, which is where they belong.
+    Nothing we ship tells the reader their diagram is wrong.
+
+    This used to allow a few notes on the hand-arranged template, on the grounds that a Computed
+    Trait really is drawn outside Unify and the advice was therefore correct. It was correct and it
+    was still the wrong thing to ship: a reader who opens the default reference architecture and is
+    immediately told four of its components are misplaced learns that the advice is noise, which
+    costs the feature its whole value the first time it has something real to say.
+
+    So the four cases were the *table* being too narrow rather than the diagram being wrong -- a
+    source drawn again as a profile source, Segment Profiles drawn in Unify, a computed trait drawn
+    in Engage, a debugger's source drawn in the Debugger -- and they are now stated in
+    ALSO_VALID_ZONES. Every template opening clean is what that buys, and this is what keeps it.
     """
-    template = Template.objects.get(key="end-to-end-full-pipeline")
-    notes = placement_advisories(template.graph)
-    assert not any("segment zone" in note for note in notes), notes
+    for template in seeded:
+        assert placement_advisories(template.graph) == [], template.key
 
 
 def test_a_component_with_no_zone_at_all_is_not_even_advised(auth_client):
@@ -1046,8 +1098,10 @@ def test_a_hand_arranged_template_round_trips_with_its_layout(auth_client, seede
     ]
     # The two regions outside Segment, which cannot be regenerated from the topology.
     assert sum(1 for z in reloaded["zones"] if z.get("custom")) == 2
-    # And the placement advice is given rather than the save being refused.
-    assert created.data["advisories"]
+    # And no advice, because every placement in it is one the topology now recognises -- see
+    # ALSO_VALID_ZONES. That a *save* reports advice rather than refusing is asserted on diagrams
+    # that actually have a misplacement, above.
+    assert created.data["advisories"] == []
 
 
 def test_a_write_key_in_a_saved_graph_never_reaches_the_database(auth_client):
@@ -1164,3 +1218,47 @@ def test_a_divider_exempts_its_contents_like_any_region_the_user_drew(auth_clien
     )
     assert response.status_code == 201, response.data
     assert response.data["advisories"] == []
+
+
+def test_a_connector_may_be_loose_at_one_end():
+    """
+    A connector drawn to a component that does not exist yet: a null end and the
+    point it stops at. It is an unfinished drawing, not a broken one, so saving it
+    must not be refused.
+    """
+    node = [{"id": "s", "kind": "source", "zone": "connections"}]
+    for edge in (
+        {"id": "e", "source": "s", "target": None, "targetPoint": {"x": 400, "y": 80}},
+        {"id": "e", "source": None, "target": "s", "sourcePoint": {"x": -10.5, "y": 0}},
+    ):
+        assert validate_architecture({"nodes": node, "edges": [edge]}) == []
+
+
+def test_a_loose_end_needs_a_real_point_and_only_one_end_may_be_loose():
+    node = [{"id": "s", "kind": "source", "zone": "connections"}]
+    no_point = {"id": "e", "source": "s", "target": None}
+    bad_point = {"id": "e", "source": "s", "target": None, "targetPoint": {"x": "4", "y": True}}
+    both = {
+        "id": "e",
+        "source": None,
+        "target": None,
+        "sourcePoint": {"x": 0, "y": 0},
+        "targetPoint": {"x": 1, "y": 1},
+    }
+    assert "not in the graph" in validate_architecture({"nodes": node, "edges": [no_point]})[0]
+    assert "not in the graph" in validate_architecture({"nodes": node, "edges": [bad_point]})[0]
+    assert "either end" in validate_architecture({"nodes": node, "edges": [both]})[0]
+
+
+def test_a_diagram_with_a_loose_connector_saves_and_reloads(auth_client):
+    graph = {
+        "nodes": [{"id": "s", "kind": "source", "zone": "connections", "name": "Website"}],
+        "edges": [
+            {"id": "e", "source": "s", "target": None, "targetPoint": {"x": 400, "y": 80}},
+        ],
+        "zones": [{"id": "connections", "label": "Connections", "order": 0}],
+    }
+    created = auth_client.post("/api/diagrams", {"name": "Unfinished", "graph": graph}, format="json")
+    assert created.status_code == 201, created.content
+    reloaded = auth_client.get(f"/api/diagrams/{created.json()['id']}")
+    assert reloaded.json()["graph"]["edges"] == graph["edges"]

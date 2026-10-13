@@ -49,7 +49,9 @@ export function parseDiagramFile(text) {
     throw new Error('That file is not a diagram export.')
   }
   if (parsed.format !== DIAGRAM_FILE_FORMAT) {
-    throw new Error('That file is not a diagram exported from this app.')
+    throw new Error(
+      'That JSON is not a diagram exported from this app or a Lucid document. Import accepts this app’s JSON, a Lucid JSON export, or a Mermaid flowchart (.mmd).',
+    )
   }
   if (typeof parsed.version !== 'number' || parsed.version > DIAGRAM_FILE_VERSION) {
     throw new Error('This diagram file was exported by a newer version of the app.')

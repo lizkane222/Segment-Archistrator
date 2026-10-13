@@ -9,7 +9,9 @@ workspace's diagrams.
 
 from rest_framework import serializers
 
-from .models import Diagram, Template
+from apps.auth_workspace.models import RememberedConnection
+
+from .models import Diagram, Template, has_bound_nodes
 from .validators import placement_advisories, placement_notes, validate_architecture
 
 
@@ -51,6 +53,7 @@ class DiagramSerializer(serializers.ModelSerializer):
     advisories = serializers.SerializerMethodField()
     advisory_nodes = serializers.SerializerMethodField()
     owner = serializers.SerializerMethodField()
+    workspace = serializers.SerializerMethodField()
 
     class Meta:
         model = Diagram
@@ -66,6 +69,9 @@ class DiagramSerializer(serializers.ModelSerializer):
             # docstring. It is set from the session on create, and on update only when
             # sharing is switched on for a diagram drawn before a workspace existed.
             "workspace_id",
+            # Where its bound components came from, and whether this account can get
+            # back there -- see `get_workspace`.
+            "workspace",
             "owner",
             "node_count",
             "placeholder_count",
@@ -77,6 +83,7 @@ class DiagramSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "workspace_id",
+            "workspace",
             "owner",
             "node_count",
             "placeholder_count",
@@ -149,6 +156,36 @@ class DiagramSerializer(serializers.ModelSerializer):
             return "unclaimed"
         return "shared"
 
+    def get_workspace(self, obj) -> dict | None:
+        """
+        The workspace this diagram's bound components came from, as the reader can reach it.
+
+        `{id, name, slug, region, connected, remembered}`. `connected` is whether the
+        current session holds it; `remembered` is whether this account has a stored
+        connection the SPA can resume with `POST /api/session/resume`. That pair is what
+        lets reopening a diagram days later put the workspace back without asking for
+        the token again. Names come from the remembered row because the diagram stores
+        only the id.
+
+        Null for a diagram about no workspace.
+        """
+        if not obj.workspace_id:
+            return None
+        principal = self.context.get("principal")
+        connected = obj.workspace_id in (getattr(principal, "connected_workspace_ids", None) or [])
+        remembered = RememberedConnection.lookup(
+            getattr(principal, "account", None), obj.workspace_id
+        )
+        source = principal.session if connected else remembered
+        return {
+            "id": obj.workspace_id,
+            "name": getattr(source, "workspace_name", "") or "",
+            "slug": getattr(source, "workspace_slug", "") or "",
+            "region": getattr(source, "region", "") or "",
+            "connected": connected,
+            "remembered": remembered is not None,
+        }
+
     def validate_shared_with_workspace(self, value):
         """
         Sharing needs a workspace to share *with*, and a credential proving you reach it.
@@ -192,8 +229,20 @@ class DiagramSerializer(serializers.ModelSerializer):
         # Stamp the subject when sharing is switched on for something drawn before a
         # workspace was connected. `workspace_id` stays unwritable from the body, so
         # this is the only way it can ever be set after creation.
+        principal = self.context["principal"]
         if validated_data.get("shared_with_workspace") and not instance.workspace_id:
-            principal = self.context["principal"]
+            validated_data["workspace_id"] = principal.workspace_id
+        # And when it is first saved with components bound from a connected workspace.
+        # Without this, a diagram created before connecting stayed about no workspace
+        # for ever, however many real components were bound into it -- and the next
+        # session had nothing to say which connection to resume when it was reopened.
+        graph = validated_data.get("graph")
+        if (
+            not instance.workspace_id
+            and getattr(principal, "has_token", False)
+            and graph is not None
+            and has_bound_nodes(graph)
+        ):
             validated_data["workspace_id"] = principal.workspace_id
         return super().update(instance, validated_data)
 

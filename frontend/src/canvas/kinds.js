@@ -22,6 +22,7 @@ import {
   Fingerprint,
   Globe,
   Layers,
+  Link2,
   ListChecks,
   Network,
   RefreshCw,
@@ -89,6 +90,10 @@ export const KIND_STYLES = {
   destination_function: { icon: Braces, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
   destination_mapping: { icon: ArrowRightLeft, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
   destination: { icon: Send, shape: 'rounded', border: '#0e7c3a', text: '#121c2d' },
+  /* Notched like the other things that happen *to* a payload on its way through, and in the
+     destination side's orange rather than Unify's purple: the entities come from a Data Graph, but
+     what a reader goes to when an enrichment is missing is the mapping. */
+  linked_event: { icon: Link2, shape: 'notched', border: '#e67e22', text: '#7a4a12' },
 
   warehouse: { icon: Warehouse, shape: 'sharp', border: '#354052', text: '#121c2d' },
   reverse_etl_model: { icon: Database, shape: 'sharp', border: '#354052', text: '#354052' },
@@ -258,6 +263,7 @@ export const ZONE_STYLES = {
   sources: subZoneOf('connections'),
   destinations: subZoneOf('connections'),
   warehouses: subZoneOf('connections'),
+  linked_events: subZoneOf('connections'),
   unify: { bg: 'var(--color-zone-unify)', border: 'var(--color-zone-unify-border)' },
   profile_sources: subZoneOf('unify'),
   profiles: subZoneOf('unify'),

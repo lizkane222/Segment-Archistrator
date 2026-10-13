@@ -63,9 +63,10 @@ import {
 } from './commands/clipboard.js'
 import SplitView from './ui/SplitView.jsx'
 import TabStrip from './diagram/TabStrip.jsx'
-import { useTabs } from './diagram/tabs.js'
+import { restoreTabs, useTabs } from './diagram/tabs.js'
 import { readSession, writeSession } from './diagram/session.js'
 import { centreOf, toZoneLocal, zoneAtPosition } from './canvas/rules.js'
+import { internalBox, resolveReleasedHandles } from './canvas/handles.js'
 import { autoAlignNodes } from './canvas/autoAlign.js'
 import { growZones, toFlowEdge, toFlowNode, zoneSize } from './canvas/layout.js'
 import { shiftSections } from './canvas/frames.js'
@@ -84,6 +85,8 @@ import {
 import { useDiagrams } from './diagram/useDiagrams.js'
 import { usePlayback } from './simulation/usePlayback.js'
 import { useWorkspaceGraph } from './hooks/useWorkspaceGraph.js'
+import { useWorkspaceResources } from './hooks/useWorkspaceResources.js'
+import { visualizeWorkspace } from './canvas/visualize.js'
 import {
   PLAY_MODES,
   isSequential,
@@ -98,7 +101,8 @@ import {
   tickDurations,
 } from './simulation/scenarios.js'
 import { createAnchorFocus } from './canvas/anchors.js'
-import { NOTES_LANE_OPEN } from './ui/preferences.js'
+import { INSPECTOR_OPEN, NOTES_LANE_OPEN, PALETTE_OPEN } from './ui/preferences.js'
+import SidebarToggle from './ui/SidebarToggle.jsx'
 import { choreograph } from './simulation/choreography.js'
 import { notesInView, notesSoFar } from './simulation/notes.js'
 import NotesLane from './simulation/NotesLane.jsx'
@@ -112,6 +116,9 @@ import {
   serializeGraph,
 } from './diagram/serialize.js'
 import { downloadDiagramFile, parseDiagramFile } from './diagram/diagramFile.js'
+import { looksLikeMermaid, mermaidToGraph } from './diagram/mermaid.js'
+import { convertIfLucid } from './diagram/lucid.js'
+import MermaidDialog from './diagram/MermaidDialog.jsx'
 import { useSession } from './auth/session.js'
 import {
   isSessionLoss,
@@ -122,7 +129,7 @@ import {
 } from './auth/recover.js'
 import { useSessionKeepAlive } from './auth/useSessionKeepAlive.js'
 import { exportPdf, exportPng, waitForRender } from './diagram/exportImage.js'
-import { feedback as feedbackApi, meta } from './services/api.js'
+import { feedback as feedbackApi, meta, session as sessionApi } from './services/api.js'
 
 /*
  * How fast the event travels along a connector, in flow pixels per second.
@@ -213,8 +220,32 @@ export default function AppShell({
    * for what a restored tab does and does not carry.
    */
   const restored = useRef(null)
-  if (restored.current === null) restored.current = readSession() ?? false
+  if (restored.current === null) {
+    /* Ids made unique here rather than only inside `useTabs`, so the dirty seed below is keyed on
+       the same ids the tabs end up with. See `restoreTabs`. */
+    const session = readSession()
+    restored.current = session ? { ...session, tabs: restoreTabs(session.tabs) } : false
+  }
   const tabs = useTabs(restored.current?.tabs, restored.current || {})
+
+  /* Read once for every tab, and only ever listed -- see hooks/useWorkspaceResources.js. */
+  const resources = useWorkspaceResources(workspace)
+
+  /* "Visualize all" opens a new tab rather than replacing the one in front of the reader, which may
+     hold a diagram they are binding against this very list. */
+  const visualizeAll = useCallback(() => {
+    if (!resources.graph || !topology) return
+    tabs.open({
+      doc: {
+        id: null,
+        name: `${workspace?.name ?? 'Workspace'} — all components`,
+        description: '',
+        sourceTemplate: '',
+        updatedAt: null,
+      },
+      graph: visualizeWorkspace(resources.graph, topology),
+    })
+  }, [resources.graph, topology, tabs.open, workspace?.name])
 
   /* Which pane the shared controls act on. The last one clicked, held here rather than derived,
      because "the active tab" and "the pane you are working in" are different questions once there
@@ -399,6 +430,8 @@ export default function AppShell({
           <ReactFlowProvider key={tab.id}>
             <Workbench
               workspace={workspace}
+              resources={resources}
+              onVisualizeAll={visualizeAll}
               onConnected={onConnected}
               onSignOut={onSignOut}
               onLogOut={onLogOut}
@@ -483,6 +516,8 @@ export function chromePlacement({ chromeOwner, slots, slot }) {
 
 function Workbench({
   workspace,
+  resources,
+  onVisualizeAll,
   onConnected,
   onSignOut,
   onLogOut,
@@ -537,11 +572,24 @@ function Workbench({
   )
 
   const graphState = useWorkspaceGraph({ topology })
+  const workspaceGraph = resources?.graph ?? null
   const docs = useDiagrams()
-  const { deleteElements, fitView, getNodes, getViewport, screenToFlowPosition, setViewport } =
-    useReactFlow()
+  const {
+    deleteElements,
+    fitView,
+    getNodes,
+    /* For `edgeEnds` below: releasing a connector end back to Auto needs measured geometry to work
+       out which side now faces the other component, and `getNodes` does not carry it. */
+    getInternalNode,
+    getViewport,
+    screenToFlowPosition,
+    setViewport,
+  } = useReactFlow()
 
   const [dialogOpen, setDialogOpen] = useState(false)
+  /* `'export'` or `'import'` -- which tab the Mermaid dialog opens on -- or `{tab, text, notes}` to open
+     it pre-filled (a converted Lucid export), or null when it is closed. */
+  const [mermaidOpen, setMermaidOpen] = useState(null)
   const [connectOpen, setConnectOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
   /*
@@ -591,6 +639,40 @@ function Workbench({
     if (signInNotice) notify(signInNotice)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signInNotice])
+
+  /*
+   * Put back the workspace a reopened diagram is about.
+   *
+   * A saved diagram records the workspace its bound components came from, and the server
+   * says whether this account has a remembered connection for it. When it does and this
+   * session is holding nothing, reconnect quietly -- that is the whole of "come back days
+   * later and it still works". When something *else* is connected it is left alone: which
+   * workspace someone is looking at is their choice, and swapping it out from under them
+   * because they opened a file would be a surprise.
+   */
+  const reopened = docs.openedWorkspace
+  useEffect(() => {
+    if (!reopened || reopened.connected || !reopened.remembered || workspace) return
+    let cancelled = false
+    sessionApi
+      .resume(reopened.id)
+      .then(() => {
+        if (cancelled) return
+        onRefreshSession?.()
+        notify({
+          tone: 'info',
+          message: `Reconnected to ${reopened.name || reopened.slug || 'the workspace'} — this diagram's components came from it.`,
+        })
+      })
+      .catch(() => {
+        /* Forgotten since, or the credential was revoked. The diagram still opened; the
+           Connect button is where to go next, and saying so here would be noise. */
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reopened])
 
   const [drawing, setDrawing] = useState(false)
   /* Culling has to be off while the canvas is captured -- see exportImage.js. */
@@ -1086,6 +1168,11 @@ function Workbench({
   const notesCollapsed = !notesOpen
   const setNotesCollapsed = (collapsed) => NOTES_LANE_OPEN.set(!collapsed)
 
+  /* Same reasoning, same store shape, for the two side panels: remembered rather than
+     `useState` so collapsing the palette sticks across a diagram-tab switch and a reload. */
+  const paletteOpen = useSyncExternalStore(PALETTE_OPEN.subscribe, PALETTE_OPEN.get)
+  const inspectorOpen = useSyncExternalStore(INSPECTOR_OPEN.subscribe, INSPECTOR_OPEN.get)
+
   /*
    * The notes for the lane above the diagram.
    *
@@ -1105,11 +1192,13 @@ function Workbench({
   )
 
   const addScenario = useCallback(
-    (type = 'track') => {
+    /* `event` and `name` come from the Events tab, which hands over a payload already corrected to a
+       valid call; everything else starts from the type's skeleton. */
+    (type = 'track', { event, name } = {}) => {
       const created = newScenario({
         id: `path:${crypto.randomUUID().slice(0, 8)}`,
-        name: `Path ${scenarios.length + 1}`,
-        event: skeleton(type),
+        name: name || `Path ${scenarios.length + 1}`,
+        event: event ? structuredClone(event) : skeleton(type),
         existing: scenarios,
       })
       setScenarios((current) => [...current, created])
@@ -1172,7 +1261,7 @@ function Workbench({
   )
 
   const startSimulation = useCallback(
-    (type) => {
+    (type, options) => {
       if (!defaultSourceId(simGraph)) {
         notify({
           tone: 'info',
@@ -1181,7 +1270,7 @@ function Workbench({
         })
         return
       }
-      addScenario(type)
+      addScenario(type, options)
     },
     [simGraph, addScenario, notify],
   )
@@ -1458,7 +1547,19 @@ function Workbench({
     event.target.value = ''
     if (!file) return
     try {
-      const parsed = parseDiagramFile(await file.text())
+      const text = await file.text()
+      /* One picker for both formats, told apart by content rather than by extension: a Mermaid
+         flowchart saved as `.txt` or `.md` is still one, and a JSON export renamed is still JSON. */
+      if (looksLikeMermaid(text)) return importMermaid(text)
+      /* A Lucid JSON export is converted to a flowchart and shown in the Mermaid dialog first -- see
+         diagram/lucid.js for why it cannot simply be drawn as it looked in Lucid. */
+      const lucid = convertIfLucid(text)
+      if (lucid) {
+        setDialogOpen(false)
+        setMermaidOpen({ tab: 'import', text: lucid.text, notes: lucid.notes })
+        return
+      }
+      const parsed = parseDiagramFile(text)
       docs.importGraph(parsed)
       const layout = applyGraph(parsed.graph)
       setDialogOpen(false)
@@ -1472,6 +1573,33 @@ function Workbench({
     } catch (err) {
       notify({ tone: 'error', message: err.message })
     }
+  }
+
+  /*
+   * A Mermaid flowchart onto the canvas, as a new unsaved diagram -- the same path a JSON import takes,
+   * so undo, dirty-tracking and the placeholder banner all behave identically.
+   *
+   * Throws on text that is not a flowchart, so the dialog can show the reason beside the text; the
+   * file picker's caller turns that into a toast.
+   */
+  const importMermaid = (text) => {
+    const parsed = mermaidToGraph(text, { topology })
+    docs.importGraph(parsed)
+    const layout = applyGraph(parsed.graph)
+    setMermaidOpen(null)
+    setDialogOpen(false)
+    for (const message of parsed.warnings) log.record({ level: 'warning', message, source: 'mermaid' })
+    const unbound = countPlaceholders(layout.nodes)
+    const title = parsed.name || 'Untitled architecture'
+    const how = parsed.restored ? `Restored “${title}” from Mermaid.` : `Drew “${title}” from a Mermaid flowchart.`
+    const extra = [
+      unbound ? `${unbound} placeholder${unbound === 1 ? '' : 's'} to bind.` : null,
+      parsed.warnings.length
+        ? `${parsed.warnings.length} line${parsed.warnings.length === 1 ? '' : 's'} skipped — see the console.`
+        : null,
+      'Not saved yet.',
+    ].filter(Boolean)
+    notify({ tone: unbound || parsed.warnings.length ? 'info' : 'success', message: `${how} ${extra.join(' ')}` })
   }
 
   const exportDiagramFile = () => {
@@ -1644,6 +1772,7 @@ function Workbench({
     })
   }
 
+  /* Refreshes the Workspace tab's list. Never touches the canvas -- that is "Visualize all". */
   const loadWorkspace = async ({ refresh = false } = {}) => {
     if (workspaceReason) {
       notify({ tone: 'info', message: workspaceReason })
@@ -1651,9 +1780,13 @@ function Workbench({
       return
     }
     try {
-      const result = await graphState.load({ refresh })
+      const result = await resources.load({ refresh })
+      if (!result) return
       const count = result.nodes?.length ?? 0
-      notify({ tone: 'success', message: `Loaded ${count} components from ${workspace.name}.` })
+      notify({
+        tone: 'success',
+        message: `Loaded ${count} components from ${workspace.name}. They are listed under the Workspace tab.`,
+      })
       /* Server-reported gaps, verbatim. These are the honest caveats -- missing
          Unify, a rate limit mid-fanout, journeys inferred from trait names. */
       for (const warning of result.warnings ?? []) {
@@ -1874,6 +2007,34 @@ function Workbench({
             edge.id === edgeId ? { ...edge, data: { ...edge.data, ...patch } } : edge,
           ),
         ),
+      /*
+       * Which side of each component a connector meets, set from the panel rather than by
+       * dragging its end.
+       *
+       * Separate from `edgeStyle` because it writes in two places at once: the handle is a
+       * top-level edge field (React Flow resolves the end from it) and the anchor is in `data`
+       * (the precise point along that side). `edgeStyle` merges into `data` alone, so a handle
+       * passed to it would be stored where nothing reads it. See `endpointSidePatch`.
+       *
+       * A *released* end (the panel's `Auto`) arrives with a null handle, which must not be stored --
+       * see `resolveReleasedHandles`, which turns it into the side that now faces the other
+       * component. The measured geometry that needs lives in the flow store, which is why this
+       * action reads `getInternalNode` rather than being a pure patch.
+       */
+      edgeEnds: (edgeId, { handle, anchor }) =>
+        setEdges((current) =>
+          current.map((edge) =>
+            edge.id === edgeId
+              ? {
+                  ...edge,
+                  ...resolveReleasedHandles(edge, handle, (id) =>
+                    internalBox(getInternalNode?.(id)),
+                  ),
+                  data: { ...edge.data, ...anchor },
+                }
+              : edge,
+          ),
+        ),
       /* `[]` clears rather than stores an empty array -- see the same reasoning in Canvas's
          `onWaypoints`: an edge with no bends must serialize like one that never had any. */
       route: (edgeId, waypoints) =>
@@ -1957,7 +2118,17 @@ function Workbench({
         /* A connector is asked about via the component it feeds: getting the event *to* its target
            is what puts the line on the path, and it is the same question one hop further on. */
         const targetId = nodeId ?? edge?.target ?? null
-        if (!targetId) return
+        if (!targetId) {
+          /* A connector with no component at its far end yet -- see canvas/edges/looseEnds.js. There
+             is nothing for the path to reach, and saying so beats a menu row that does nothing. */
+          if (edge) {
+            notify({
+              tone: 'info',
+              message: 'This connector does not reach a component yet. Drop its loose end on one first.',
+            })
+          }
+          return
+        }
 
         const name = (id) =>
           currentGraph.nodes.find((entry) => entry.id === id)?.name ?? 'that component'
@@ -2096,6 +2267,7 @@ function Workbench({
       deleteElements,
       notify,
       getNodes,
+      getInternalNode,
       reverseEdges,
       /* `includeInPath` reads the paths and the document to work out *why* something is off a
          path, and re-simulates the one path it was asked about. */
@@ -2165,7 +2337,7 @@ function Workbench({
   useShortcuts({
     context: commandContext,
     onRefuse: (message) => notify({ tone: 'info', message }),
-    enabled: !dialogOpen && !connectOpen && !nuancesFor && !feedbackOpen,
+    enabled: !dialogOpen && !connectOpen && !nuancesFor && !feedbackOpen && !mermaidOpen,
   })
 
   /*
@@ -2220,21 +2392,21 @@ function Workbench({
               <>
                 <button
                   type="button"
-                  onClick={() => loadWorkspace({ refresh: graphState.status === 'ready' })}
+                  onClick={() => loadWorkspace({ refresh: resources?.status === 'ready' })}
                   /* Disabled, with the reason on the tooltip, when the connected credential
                      cannot reach the Public API. Leaving it live would send the user at a
                      request that 403s and report it as a failure to load rather than as a
                      credential that cannot. */
-                  disabled={graphState.status === 'loading' || Boolean(workspaceReason)}
+                  disabled={resources?.status === 'loading' || Boolean(workspaceReason)}
                   title={workspaceReason ?? undefined}
                   className="flex items-center gap-1.5 rounded-md bg-twilio-blue px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-twilio-blue-dark disabled:opacity-50"
                 >
                   <RefreshCw
                     size={13}
                     aria-hidden="true"
-                    className={graphState.status === 'loading' ? 'animate-spin' : undefined}
+                    className={resources?.status === 'loading' ? 'animate-spin' : undefined}
                   />
-                  {graphState.status === 'ready' ? 'Refresh workspace' : 'Load workspace'}
+                  {resources?.graph ? 'Refresh workspace' : 'Load workspace'}
                 </button>
                 <button
                   type="button"
@@ -2311,6 +2483,7 @@ function Workbench({
           onRename={docs.rename}
           onExport={exportDiagram}
           onExportFile={exportDiagramFile}
+          onExportMermaid={() => setMermaidOpen('export')}
           onImportFile={triggerImport}
           onFocusPlaceholder={focusPlaceholder}
           onApplyPalette={applyPalette}
@@ -2322,7 +2495,7 @@ function Workbench({
         <input
           ref={importInputRef}
           type="file"
-          accept="application/json"
+          accept="application/json,.json,.mmd,.mermaid,.md,.txt"
           className="hidden"
           onChange={importDiagramFile}
         />
@@ -2333,10 +2506,18 @@ function Workbench({
         {chrome(
           slots?.left,
           <>
+          {/* `relative` and not `overflow-hidden` -- the toggle below hangs half outside this box
+              once the width collapses to zero, and a clipping wrapper would take it with it. The
+              `<aside>` itself keeps its own `overflow-hidden` so its content clips as it shrinks. */}
+          <div className="relative shrink-0">
           {/* A column, so the payload panel takes the height it needs and the palette scrolls in what
               is left. `min-h-0` on the palette wrapper is what allows that -- a flex child defaults to
               never shrinking below its content, and the palette's content is long. */}
-          <aside className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-twilio-gray-20 bg-white">
+          <aside
+            className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-twilio-gray-20 bg-white transition-[width] duration-150 ${
+              paletteOpen ? 'w-80' : 'w-0'
+            }`}
+          >
             {inspected?.data?.kind === 'profile' ? (
               /* The Palette is not useful while looking at a profile, and a profile has more to
                  show than the right-hand Inspector's 96px column has room for -- so selecting one
@@ -2366,9 +2547,14 @@ function Workbench({
                 <div className="min-h-0 flex-1 overflow-hidden">
                 <Palette
                   topology={topology}
-                  graph={graphState.graph}
+                  graph={workspaceGraph}
+                  diagram={simGraph}
                   zonesOnCanvas={zonesOnCanvas}
                   workspaceReason={workspaceReason}
+                  workspaceStatus={resources?.status ?? 'idle'}
+                  workspaceError={resources?.error?.message ?? null}
+                  onRetryWorkspace={() => loadWorkspace()}
+                  onVisualizeAll={onVisualizeAll}
                   onConnect={() => setConnectOpen(true)}
                   onStartSimulation={startSimulation}
                 />
@@ -2376,6 +2562,12 @@ function Workbench({
               </>
             )}
           </aside>
+          <SidebarToggle
+            side="left"
+            open={paletteOpen}
+            onToggle={() => PALETTE_OPEN.set(!paletteOpen)}
+          />
+          </div>
           </>,
         )}
 
@@ -2491,7 +2683,8 @@ function Workbench({
               {graphState.status !== 'loading' && componentCount === 0 && !drawing && (
                 <EmptyOverlay
                   workspaceReason={workspaceReason}
-                  onLoad={() => loadWorkspace()}
+                  onLoad={onVisualizeAll}
+                  canVisualize={Boolean(workspaceGraph)}
                   onOpen={() => setDialogOpen(true)}
                   onStartBlank={startBlank}
                   onImportFile={triggerImport}
@@ -2537,6 +2730,17 @@ function Workbench({
               onNotify={notify}
             />
           )}
+          {mermaidOpen && (
+            <MermaidDialog
+              initialTab={mermaidOpen.tab ?? mermaidOpen}
+              initialText={mermaidOpen.text ?? ''}
+              initialNotes={mermaidOpen.notes ?? []}
+              doc={docs.current}
+              getGraph={saveGraph}
+              onImport={importMermaid}
+              onClose={() => setMermaidOpen(null)}
+            />
+          )}
           {feedbackOpen && (
             <FeedbackDialog config={feedbackConfig} onClose={() => setFeedbackOpen(false)} />
           )}
@@ -2556,9 +2760,17 @@ function Workbench({
         {chrome(
           slots?.right,
           <>
+          {/* `relative`, not `overflow-hidden` -- same reasoning as the palette's wrapper on the
+              other side: the toggle hangs half outside this box once collapsed. */}
+          <div className="relative shrink-0">
+          <SidebarToggle
+            side="right"
+            open={inspectorOpen}
+            onToggle={() => INSPECTOR_OPEN.set(!inspectorOpen)}
+          />
           <aside
-            className={`shrink-0 overflow-hidden border-l border-twilio-gray-20 bg-white transition-[width] duration-150 ${
-              inspectorWide ? 'w-[42rem]' : 'w-96'
+            className={`h-full shrink-0 overflow-hidden border-l border-twilio-gray-20 bg-white transition-[width] duration-150 ${
+              !inspectorOpen ? 'w-0' : inspectorWide ? 'w-[42rem]' : 'w-96'
             }`}
           >
             {/* Separately from the canvas, and keyed on the selection. The panel renders
@@ -2578,7 +2790,7 @@ function Workbench({
                    already spoken for by another node. */
                 nodes={graphState.nodes}
                 topology={topology}
-                graph={graphState.graph}
+                graph={workspaceGraph}
                 workspaceReason={workspaceReason}
                 /* For the Code tab: the events saved paths carry, to test a function
                    against, and which paths start at the component being edited. */
@@ -2593,11 +2805,28 @@ function Workbench({
                 styleTargetCount={styleTargets.length}
                 onUpdateKind={updateKindStyle}
                 onUpdateEdge={actions.edgeStyle}
+                /* The two that are not `data` writes: which side each end meets, and which way
+                   the connector points. Both already exist as actions -- the panel is being
+                   given the same operations the right-click menu has, because the panel is
+                   where a reader looks for them. */
+                onUpdateEdgeEnds={actions.edgeEnds}
+                onReverseEdge={reverseEdges}
+                /* The connector's Actions section is its right-click menu as buttons, run through
+                   the same `runCommand` with the same context, so the two cannot disagree. */
+                commandContext={commandContext}
+                onRunCommand={(id) => {
+                  const edge = inspected?.type === 'flow' ? inspected : null
+                  const result = runCommand(id, { ...commandContext, edge })
+                  if (!result.ran && result.reason) notify({ tone: 'info', message: result.reason })
+                  if (result.ran && id === 'delete-edge') setInspectedId(null)
+                }}
+                onPreview={setFlowPreview}
                 onClose={() => setInspectedId(null)}
                 onNotify={notify}
               />
             </ErrorBoundary>
           </aside>
+          </div>
           </>,
         )}
       </div>
@@ -2657,7 +2886,7 @@ const components = (count) => `${count} component${count === 1 ? '' : 's'}`
 /* The canvas is mounted with its zone backdrops and no components, so this sits
    on top rather than replacing it -- dragging from the palette works before any
    fetch, which is how you draw an architecture with no token at all. */
-function EmptyOverlay({ workspaceReason, onLoad, onOpen, onStartBlank, onImportFile }) {
+function EmptyOverlay({ workspaceReason, canVisualize, onLoad, onOpen, onStartBlank, onImportFile }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
       <div className="pointer-events-auto max-w-sm rounded-lg border border-twilio-gray-20 bg-white/95 p-5 text-center shadow-sm">
@@ -2686,11 +2915,11 @@ function EmptyOverlay({ workspaceReason, onLoad, onOpen, onStartBlank, onImportF
           <button
             type="button"
             onClick={onLoad}
-            title={workspaceReason ?? undefined}
+            title={workspaceReason ?? (canVisualize ? 'Open every workspace component in a new tab' : 'The workspace is still loading')}
             className="rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
-            disabled={Boolean(workspaceReason)}
+            disabled={Boolean(workspaceReason) || !canVisualize}
           >
-            Load from workspace
+            Visualize the workspace
           </button>
           <button
             type="button"

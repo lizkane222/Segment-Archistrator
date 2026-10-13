@@ -311,6 +311,58 @@ def test_the_session_id_is_rotated_on_sign_in(anon_client, anon_session, google_
     assert not WorkspaceSession.objects.filter(pk=anon_session.id).exists()
 
 
+def test_signing_in_keeps_the_workspace_this_browser_connected(session, google_ok):
+    """
+    Connect first, sign in second. The sign-in rotates the session row, and it used to
+    rotate the credential out with it -- the account came back disconnected, and every
+    diagram shared with that workspace dropped out of reach with it.
+    """
+    client = APIClient()
+    client.cookies["sab_session"] = str(session.id)
+    token = session.reveal_token()
+
+    state = begin(client)
+    response = client.get(CALLBACK, {"state": state, "code": "code-1"})
+
+    rotated = WorkspaceSession.objects.get(pk=response.cookies["sab_session"].value)
+    assert rotated.id != session.id
+    assert rotated.account is not None
+    assert rotated.has_token
+    assert rotated.workspace_id == session.workspace_id
+    assert rotated.reveal_token() == token
+    assert not WorkspaceSession.objects.filter(pk=session.id).exists()
+
+    payload = client.get("/api/session").json()
+    assert payload["connected"] is True
+    assert payload["workspace"]["slug"] == session.workspace_slug
+
+
+def test_signing_in_as_a_different_account_does_not_inherit_the_workspace(
+    account, mock_segment, google_configured
+):
+    """The credential follows the same rule as the scope: never across accounts."""
+    google_configured.ALLOWED_EMAIL_DOMAINS = ["example.com"]
+    from tests.conftest import FAKE_TOKEN, WORKSPACE
+
+    first = WorkspaceSession.start(
+        token=FAKE_TOKEN, workspace=WORKSPACE, region="us", account=account
+    )
+    client = APIClient()
+    client.cookies["sab_session"] = str(first.id)
+    mock_segment.add(
+        responses_lib.POST,
+        GOOGLE_TOKEN_URL,
+        json={"id_token": fake_id_token(email="second@example.com", sub="second-sub")},
+        status=200,
+    )
+    state = begin(client)
+    response = client.get(CALLBACK, {"state": state, "code": "code-1"})
+
+    rotated = WorkspaceSession.objects.get(pk=response.cookies["sab_session"].value)
+    assert rotated.account.email == "second@example.com"
+    assert not rotated.has_token
+
+
 def test_signing_in_as_a_different_account_does_not_inherit_the_previous_ones_work(
     account, mock_segment, google_configured
 ):

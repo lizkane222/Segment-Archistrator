@@ -350,6 +350,9 @@ export function indeterminate(graph) {
 export function revisitable(graph) {
   const inbound = new Map()
   for (const edge of graph?.edges ?? []) {
+    /* A connector loose at its source end (attached to nothing yet) feeds nothing into anything, so
+       it is not a second way in -- see canvas/edges/looseEnds.js. */
+    if (edge.source == null || edge.target == null) continue
     inbound.set(edge.target, (inbound.get(edge.target) ?? 0) + 1)
   }
   const ids = new Set()

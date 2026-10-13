@@ -29,7 +29,7 @@ import {
   routeToReach,
   sideOf,
 } from './direction.js'
-import { LEGACY_SOURCE, LEGACY_TARGET } from './handles.js'
+import { LEGACY_SOURCE, LEGACY_TARGET, endpointSidePatch } from './handles.js'
 
 const edge = (id, source, target, extra = {}) => ({ id, source, target, ...extra })
 
@@ -288,6 +288,15 @@ describe('sideOf', () => {
   it('is null for a connector that does not touch the node, and for a self-loop', () => {
     expect(sideOf(edge('e1', 'a', 'b'), 'z')).toBeNull()
     expect(sideOf(edge('e1', 'a', 'a'), 'a')).toBeNull()
+  })
+
+  it('reads back the side the Connector panel wrote', () => {
+    /* The panel's buttons show which side is current by asking `sideOf`, and set it through
+       `endpointSidePatch` -- so the two have to agree or the highlighted button would name a
+       different side from the one the line meets. */
+    const patch = endpointSidePatch('target', 'bottom')
+    const pinned = edge('e1', 'a', 'b', { ...patch.handle, data: { ...patch.anchor } })
+    expect(sideOf(pinned, 'b').side).toBe('bottom')
   })
 })
 
