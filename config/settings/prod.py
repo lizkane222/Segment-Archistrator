@@ -7,11 +7,8 @@ from .base import SEGMENT_TOKEN_ENCRYPTION_KEYS, env
 
 DEBUG = False
 
-# Render injects the external hostname. Keep localhost out of prod.
+# Keep localhost out of prod.
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
-_render_host = env("RENDER_EXTERNAL_HOSTNAME", default="")
-if _render_host:
-    ALLOWED_HOSTS.append(_render_host)
 
 CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS if h]
 
