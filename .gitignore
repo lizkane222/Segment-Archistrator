@@ -45,3 +45,4 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+AWS_MIGRATION_HANDOFF.md

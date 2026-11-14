@@ -1,18 +1,20 @@
 # Manual smoke tests — pre-deploy validation
 
 Checklist for the Google OAuth accounts feature, GraphQL/Airtable integrations, and
-canvas/simulation rewrite before/after deploying to Render. Check items off as you
+canvas/simulation rewrite before/after deploying to AWS Elastic Beanstalk. Check items off as you
 validate them.
 
-## 0. Render config (do these first — nothing below works without them)
+## 0. AWS config (do these first — nothing below works without them)
 
-- [ ] Set new env vars in the Render dashboard: `GOOGLE_OAUTH_CLIENT_ID`,
+- [ ] Set new env vars as Elastic Beanstalk environment properties (Configuration → Software;
+      put anything secret, such as the OAuth client secret, in SSM Parameter Store under
+      `/segment-builder/prod/` instead): `GOOGLE_OAUTH_CLIENT_ID`,
       `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI` (must exactly match
       `https://<host>/api/auth/google/callback` in Google Cloud console),
       `ALLOWED_EMAIL_DOMAINS`, `AIRTABLE_TABLE` (now has no default — was `Feedback`
       before).
 - [ ] Confirm the Google OAuth redirect URI is registered in Google Cloud Console for
-      the actual Render hostname, not just localhost.
+      the actual Elastic Beanstalk hostname, not just localhost.
 - [ ] Run `python manage.py invite_user --email you@example.com` (or set
       `ALLOWED_EMAIL_DOMAINS`) against prod once deployed — otherwise no one can sign in.
 - [ ] Watch the build log for `seed_templates` — this now **hard-fails the build** if
