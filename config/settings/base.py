@@ -78,8 +78,8 @@ USE_TZ = True
 # --- Static files -----------------------------------------------------------
 # The Vite build lands in static/spa/ and is served by WhiteNoise from the same
 # origin as /api/*. Same-origin is load-bearing: the session cookie could not be
-# SameSite=Lax across two *.onrender.com services, because onrender.com is on
-# the Public Suffix List.
+# SameSite=Lax across two services on a shared hosting domain (e.g.
+# *.elasticbeanstalk.com), because those domains are on the Public Suffix List.
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static" / "spa"] if (BASE_DIR / "static" / "spa").exists() else []
