@@ -8,8 +8,8 @@ Django + DRF serving a React / React Flow single-page app from the same origin.
 
 ## Why one service and not two
 
-`onrender.com` is on the Public Suffix List, so two `*.onrender.com` services cannot share a
-cookie domain. This app's entire auth model is an httpOnly session cookie, so a split
+Hosted platform domains such as `elasticbeanstalk.com` and `amazonaws.com` are on the Public
+Suffix List, so two services on them cannot share a cookie domain. This app's entire auth model is an httpOnly session cookie, so a split
 frontend/backend would force `SameSite=None` third-party cookies — which Safari's ITP and
 Chrome's third-party cookie restrictions break. Serving the built SPA from Django keeps
 everything same-origin: `SameSite=Lax` works, Django's stock CSRF works, and there is no CORS
@@ -88,14 +88,40 @@ row.
 
 ## Deploying
 
-`render.yaml` is a blueprint — point Render at this repo and it provisions the web service and
-the Postgres database. Three environment variables have to be set by hand (`sync: false`):
+The app runs on AWS: Elastic Beanstalk (Python 3.13, single-instance, `t3.micro`) for compute,
+RDS PostgreSQL (Single-AZ, `db.t4g.micro`, reachable only from the EB instance's security group)
+for the database, and CodePipeline for CI/CD. (It previously ran on Render; `render.yaml` is a
+leftover from that.)
 
-| Variable | Why it is manual |
+**Pipeline.** GitHub (via GitHub App connection) → CodeBuild running `buildspec.yml`
+(`pip install`, `npm ci && npm run build`, `collectstatic`) → Elastic Beanstalk deploy. There is
+no test stage. Processes start from `Procfile` (`gunicorn config.wsgi:application`).
+
+**Secrets** live in SSM Parameter Store as SecureString under `/segment-builder/prod/<NAME>` and
+are fetched into the environment at deploy time by `.platform/hooks/predeploy/01_fetch_secrets.sh`.
+
+| Parameter | Notes |
 | --- | --- |
-| `SEGMENT_TOKEN_ENCRYPTION_KEYS` | Fernet needs exactly 32 url-safe-base64 bytes, which Render's generated secrets are not. Generate one and paste it. Rotate by *prepending* a new key to the comma-separated list, so existing ciphertext stays readable. |
-| `ALLOWED_HOSTS` | Your own hostname. Render's `RENDER_EXTERNAL_HOSTNAME` is appended automatically, so this is only needed for a custom domain. |
-| `SEGMENT_CATALOG_TOKEN` | Reads the *global* Segment catalog on deploy. Not a customer token, never used for customer data. |
+| `SECRET_KEY` | Django secret key. |
+| `DATABASE_URL` | The RDS connection string. |
+| `SEGMENT_TOKEN_ENCRYPTION_KEYS` | Fernet needs exactly 32 url-safe-base64 bytes, so generate it (`python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`). Rotate by *prepending* a new key to the comma-separated list, so existing ciphertext stays readable. |
+| `SEGMENT_CATALOG_TOKEN` (optional) | Reads the *global* Segment catalog on deploy. Not a customer token, never used for customer data. |
+| `AIRTABLE_API_KEY` (optional) | Feedback integration. |
+
+**Non-secret config** is set as Elastic Beanstalk environment properties (Configuration →
+Software): `DJANGO_SETTINGS_MODULE=config.settings.prod`, `ALLOWED_HOSTS=<eb-environment-url>`,
+`SECURE_SSL_REDIRECT=False`, and optionally `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE`,
+`ALLOWED_EMAIL_DOMAINS`.
+
+**Migrations and catalog sync** run after each deploy from `.platform/hooks/postdeploy/01_migrate.sh`
+(`migrate`, `seed_templates`, `sync_catalog`). This assumes a single instance, with no leader
+election, so revisit it before scaling out.
+
+**No custom domain or HTTPS yet.** The environment serves plain HTTP on its default Elastic
+Beanstalk URL, which is why `SECURE_SSL_REDIRECT` is set to `False`. Google OAuth variables are
+left unset because Google requires an `https://` redirect URI; the app still works anonymously.
+Once a domain, ACM certificate and HTTPS listener exist, remove the `SECURE_SSL_REDIRECT`
+override (it defaults to `True`) and configure Google OAuth.
 
 `config/settings/prod.py` refuses to boot without an encryption key — a missing one would mean
 tokens stored under a throwaway key, unreadable after the next restart and silently so.
