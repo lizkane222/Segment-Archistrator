@@ -11,7 +11,13 @@
 # leader check first or migrations will race across instances.
 set -euo pipefail
 
-source /opt/elasticbeanstalk/deployment/env
+# Hardcoded, not inherited: manage.py defaults DJANGO_SETTINGS_MODULE to
+# config.settings.dev when unset, and this hook's own environment can't be
+# relied on to carry the console-configured value -- but this script only
+# ever runs against prod, so there's nothing to gain from making it variable.
+export DJANGO_SETTINGS_MODULE=config.settings.prod
+
+source /opt/elasticbeanstalk/deployment/custom_env_vars
 source /var/app/venv/*/bin/activate
 cd /var/app/current
 
