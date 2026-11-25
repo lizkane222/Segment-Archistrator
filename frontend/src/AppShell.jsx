@@ -35,6 +35,7 @@ import { BASE_URL } from './baseUrl.js'
 import NuancesDialog from './commands/NuancesDialog.jsx'
 import OpenDialog from './diagram/OpenDialog.jsx'
 import Palette from './palette/Palette.jsx'
+import { selectedWorkspaceIds } from './palette/filters.js'
 import EventPreview from './simulation/EventPreview.jsx'
 import FeedbackDialog from './feedback/FeedbackDialog.jsx'
 import WalkthroughDrawer from './simulation/WalkthroughDrawer.jsx'
@@ -2216,6 +2217,12 @@ function Workbench({
     [nodes],
   )
 
+  /* The workspace components selected on the canvas, which the Workspace tab narrows itself to. */
+  const selectedWorkspaceNodeIds = useMemo(
+    () => selectedWorkspaceIds(nodes, workspaceGraph?.nodes),
+    [nodes, workspaceGraph],
+  )
+
   const copy = useCallback(
     (ids) => {
       const clip = copyNodes(nodes, edges, ids)
@@ -3143,6 +3150,7 @@ function Workbench({
                   guideWorkspaceTab={guideWorkspaceTab}
                   onGuideDone={onGuideDone}
                   onStartSimulation={startSimulation}
+                  selectedIds={selectedWorkspaceNodeIds}
                   convert={
                     converting
                       ? {

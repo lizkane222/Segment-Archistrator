@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 # the fastest way to trip a rate limit.
 FANOUT_WORKERS = 4
 
+# Cache key for the per-source connection edges.
+CONNECTIONS_RESOURCE = "source_connections"
+
 
 def fetch(session, resource_type: str, loader, *, ttl: int | None = None, refresh: bool = False):
     """
@@ -273,6 +276,53 @@ def _connections_for_source(session, source_node) -> tuple[list[dict], list[str]
     return edges, warnings
 
 
+def _connections_for_sources(session, sources, *, refresh: bool = False) -> tuple[list[dict], list[str]]:
+    """
+    Every source's outgoing edges, reading only what the cache does not already hold.
+
+    This fan-out is two Public API calls per source and is what makes a large workspace slow to
+    load, so it is cached per source for CONNECTIONS_CACHE_TTL. Per source, not as one blob, so a
+    source added since the last read is fetched alone rather than missing until the entry expires.
+
+    A source that hit a rate limit is not cached: its edges are incomplete, and remembering that
+    would turn a transient gap into one that lasts the whole TTL. `refresh` bypasses the read but
+    still writes, so "Refresh workspace" repairs the cache as well as the screen.
+
+    Scoped by workspace id, like every other entry, and holding only edge ids -- no credential.
+    """
+    workspace_id = session.workspace_id
+    cached = {}
+    if not refresh:
+        cached = WorkspaceResourceCache.get_fresh(workspace_id, CONNECTIONS_RESOURCE) or {}
+
+    missing = [node for node in sources if node["segmentId"] not in cached]
+    edges: list[dict] = []
+    warnings: list[str] = []
+    fresh: dict[str, list[dict]] = {}
+
+    if missing:
+        with ThreadPoolExecutor(max_workers=FANOUT_WORKERS) as pool:
+            results = pool.map(lambda node: _connections_for_source(session, node), missing)
+            for node, (source_edges, source_warnings) in zip(missing, results):
+                edges.extend(source_edges)
+                warnings.extend(source_warnings)
+                if not source_warnings:
+                    fresh[node["segmentId"]] = source_edges
+
+    for node in sources:
+        edges.extend(cached.get(node["segmentId"], []))
+
+    if fresh:
+        # Merge into what was already there, dropping sources that no longer exist so the entry
+        # cannot grow without bound across deleted sources.
+        live = {node["segmentId"] for node in sources}
+        merged = {sid: e for sid, e in {**cached, **fresh}.items() if sid in live}
+        WorkspaceResourceCache.put(
+            workspace_id, CONNECTIONS_RESOURCE, merged, settings.CONNECTIONS_CACHE_TTL
+        )
+    return edges, warnings
+
+
 def build_graph_via_graphql(session) -> dict:
     """
     The workspace graph for a session whose credential is an app `auth_token`.
@@ -362,12 +412,8 @@ def build_graph(session, *, refresh: bool = False) -> dict:
 
     edges: list[dict] = []
     if sources:
-        with ThreadPoolExecutor(max_workers=FANOUT_WORKERS) as pool:
-            for source_edges, source_warnings in pool.map(
-                lambda node: _connections_for_source(session, node), sources
-            ):
-                edges.extend(source_edges)
-                warnings.extend(source_warnings)
+        edges, connection_warnings = _connections_for_sources(session, sources, refresh=refresh)
+        warnings.extend(connection_warnings)
 
     # Reverse ETL: warehouse -> model -> destination.
     for model in get_reverse_etl_models(session, refresh=refresh):

@@ -33,6 +33,10 @@ export const initialFilters = {
   kinds: [],
   bound: BOUND_ANY,
   spaceId: null,
+  /* Workspace tab: narrow the list to what is connected to the component selected on the canvas.
+     On by default -- selecting a source and wanting its destinations is the common case -- and not
+     counted as an active filter, because it does nothing until something is selected. */
+  followSelection: true,
 }
 
 export function filtersReducer(state, action) {
@@ -63,6 +67,9 @@ export function filtersReducer(state, action) {
 
     case 'setSpace':
       return { ...state, spaceId: action.spaceId }
+
+    case 'setFollowSelection':
+      return { ...state, followSelection: action.follow }
 
     case 'clear':
       /* Deliberately keeps `tab` and `catalogKind`: "clear filters" means clear
@@ -140,10 +147,11 @@ export function inPipelineZone(node, zoneId, topology = null) {
  * filtering them locally is instant and costs no rate budget. The catalog is the
  * opposite case -- hundreds of entries, filtered server-side via query params.
  */
-export function applyWorkspaceFilters(nodes, state, topology = null) {
+export function applyWorkspaceFilters(nodes, state, topology = null, related = null) {
   const needle = state.search.trim().toLowerCase()
 
   return nodes.filter((node) => {
+    if (related && !related.has(node.id)) return false
     if (state.zones.length && !state.zones.some((zone) => inPipelineZone(node, zone, topology))) return false
     if (state.kinds.length && !state.kinds.includes(node.kind)) return false
 
@@ -172,4 +180,42 @@ export function catalogQuery(state) {
     q: state.search.trim() || undefined,
     category: state.categories.length ? state.categories : undefined,
   }
+}
+
+/**
+ * Ids of the workspace components directly connected to any of `ids`, in either direction.
+ *
+ * Direction is ignored on purpose: a source's destinations and a destination's sources are the same
+ * edges read from opposite ends, and the same holds for a space and its audiences. Only what the
+ * Public API reports is here -- source -> destination/warehouse, warehouse -> Reverse ETL model, and
+ * space -> audience/computed trait. The API publishes no audience -> destination link, so an audience
+ * relates to its space and nothing more. The selected components themselves are excluded.
+ */
+export function relatedNodeIds(edges, ids) {
+  const wanted = new Set(ids ?? [])
+  const related = new Set()
+  if (!wanted.size) return related
+  for (const edge of edges ?? []) {
+    if (wanted.has(edge.source) && !wanted.has(edge.target)) related.add(edge.target)
+    if (wanted.has(edge.target) && !wanted.has(edge.source)) related.add(edge.source)
+  }
+  return related
+}
+
+/** The graph ids of the canvas components that are bound to workspace resources. */
+export function selectedWorkspaceIds(canvasNodes, graphNodes) {
+  const known = new Set((graphNodes ?? []).map((node) => node.id))
+  const out = []
+  for (const node of canvasNodes ?? []) {
+    if (!node.selected || node.type === 'zone') continue
+    const data = node.data ?? {}
+    if (data.bound === false) continue
+    /* `id` is the graph id when the node was dropped from the list; kind + segmentId rebuilds it for
+       components whose id was rewritten, as the graph builds ids the same way. */
+    const id = [data.id, data.kind && data.segmentId ? `${data.kind}:${data.segmentId}` : null].find(
+      (candidate) => candidate && known.has(candidate),
+    )
+    if (id) out.push(id)
+  }
+  return out
 }

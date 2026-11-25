@@ -488,3 +488,51 @@ def test_a_connector_may_end_at_a_zone_by_its_canvas_node_id():
     # A genuinely missing node is still a refusal.
     broken = {**graph, "edges": [{"id": "e3", "source": "zone-nowhere", "target": "n1"}]}
     assert validate_architecture(broken)
+
+
+# --- connection edges cache ---------------------------------------------------
+
+def _connection_calls():
+    return [c for c in responses.calls if "connected-" in c.request.url]
+
+
+@responses.activate
+def test_source_connections_are_cached_and_refresh_bypasses(session):
+    sources = [{"segmentId": "src_1", "name": "Web"}]
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/sources/src_1/connected-destinations",
+        json=_list_page("destinations", [{"id": "dst_1"}]),
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/sources/src_1/connected-warehouses",
+        json=_list_page("warehouses", []),
+    )
+
+    first, _ = resources._connections_for_sources(session, sources)
+    second, _ = resources._connections_for_sources(session, sources)
+    assert first == second == [
+        {"id": "source:src_1->destination:dst_1", "source": "source:src_1",
+         "target": "destination:dst_1", "kind": "flow"}
+    ]
+    assert len(_connection_calls()) == 2, "second read should come from the cache"
+
+    resources._connections_for_sources(session, sources, refresh=True)
+    assert len(_connection_calls()) == 4
+
+
+@responses.activate
+def test_a_new_source_is_fetched_alone(session):
+    for sid in ("src_1", "src_2"):
+        responses.add(responses.GET, f"{API_BASE}/sources/{sid}/connected-destinations",
+                      json=_list_page("destinations", []))
+        responses.add(responses.GET, f"{API_BASE}/sources/{sid}/connected-warehouses",
+                      json=_list_page("warehouses", []))
+
+    resources._connections_for_sources(session, [{"segmentId": "src_1", "name": "A"}])
+    before = len(_connection_calls())
+    resources._connections_for_sources(
+        session, [{"segmentId": "src_1", "name": "A"}, {"segmentId": "src_2", "name": "B"}]
+    )
+    assert len(_connection_calls()) - before == 2
