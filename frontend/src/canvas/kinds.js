@@ -250,7 +250,10 @@ export function borderColorFor(data, zoneData) {
    fourth product. It borrows the parent's border colour instead, which is what says
    which product it is part of. */
 const subZoneOf = (product) => ({
-  bg: 'transparent',
+  /* A light wash of the parent's own hue over the parent's tint, so a child box reads as a step
+     deeper than the product around it -- stacked, not recoloured, which is why it is a percentage of
+     the border colour rather than a fixed second fill. */
+  bg: `color-mix(in srgb, var(--color-zone-${product}-border) 7%, transparent)`,
   border: `var(--color-zone-${product}-border)`,
 })
 
@@ -277,6 +280,21 @@ export const ZONE_STYLES = {
 /* A custom zone gets the same grey as a custom component, so a region the
    customer drew and the components inside it read as one thing. */
 const CUSTOM_ZONE = { bg: 'rgba(96, 107, 133, 0.06)', border: '#606b85' }
+
+/* The colours the product itself uses, named, for every colour control. The five zone hues first --
+   they are what a diagram is already coloured with -- then the neutrals. Values match the zone
+   border tokens in styles/tokens.css. */
+export const COLOR_PRESETS = [
+  { name: 'Blue', value: '#0263e0' },
+  { name: 'Green', value: '#0e7c3a' },
+  { name: 'Purple', value: '#6f42c1' },
+  { name: 'Orange', value: '#e67e22' },
+  { name: 'Red', value: '#db131a' },
+  { name: 'Teal', value: '#0f7c8a' },
+  { name: 'Navy', value: '#121c2d' },
+  { name: 'Grey', value: '#606b85' },
+  { name: 'White', value: '#ffffff' },
+]
 
 export const ZONE_SWATCHES = ['#606b85', '#0263e0', '#6f42c1', '#0e7c3a', '#e67e22', '#db131a']
 

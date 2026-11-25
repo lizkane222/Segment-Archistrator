@@ -88,6 +88,11 @@ function packTab(tab, { dirty }) {
   return {
     id: tab.id,
     doc: tab.doc ?? null,
+    /* Which workspace group the tab sits in. An id, never a credential -- the server decides what
+       that id may reach. */
+    workspaceId: tab.workspaceId ?? null,
+    /* The user's own group label, for a tab in no connected workspace. */
+    groupName: tab.groupName ?? null,
     /* A clean, saved tab is refetched on mount. A dirty one, or one that was never saved, has
        nowhere else to come from. */
     graph: dirty || !tab.doc?.id ? (tab.graph ?? null) : null,
@@ -159,6 +164,10 @@ export function writeSession(session, dirtyIds, storage = safeStorage()) {
       KEY,
       JSON.stringify({
         version: VERSION,
+        /* Whose workbench this is. Storage belongs to the browser, not the account, so without
+           this the next person to sign in on a shared machine would be handed the last one's
+           open diagrams. */
+        owner: session.owner ?? '',
         savedAt: new Date().toISOString(),
         activeId: session.activeId ?? packed[0].id,
         split: Boolean(session.split),
@@ -181,7 +190,10 @@ export function writeSession(session, dirtyIds, storage = safeStorage()) {
  * of the app. Anything it cannot make sense of is discarded in favour of a clean boot, because
  * the failure mode of trusting it is a blank canvas labelled with a real diagram's name.
  */
-export function readSession(storage = safeStorage()) {
+export function readSession(storage = safeStorage(), { owner } = {}) {
+  /* `owner` is who is asking: an email once signed in, '' for a visitor with no account in an app
+     that allows that, and undefined when nobody is signed in and the app is waiting for them to
+     (the sign-in modal is up over the stored work, which must survive to be handed back). */
   let raw
   try {
     raw = storage?.getItem(KEY)
@@ -197,6 +209,12 @@ export function readSession(storage = safeStorage()) {
     return null
   }
   if (!parsed || parsed.version !== VERSION || !Array.isArray(parsed.tabs)) return null
+  /* Somebody else's workbench: discarded, and gone from disk -- not merely hidden. What was drawn
+     before anyone signed in (owner '') is nobody else's, so whoever signs in next adopts it. */
+  if (!ownerMayRead(parsed.owner, owner)) {
+    clearSession(storage)
+    return null
+  }
 
   const tabs = parsed.tabs.filter(restorable)
   if (!tabs.length) return null
@@ -205,6 +223,8 @@ export function readSession(storage = safeStorage()) {
     tabs: tabs.map((tab) => ({
       id: tab.id,
       doc: tab.doc ?? undefined,
+      workspaceId: tab.workspaceId ?? null,
+      groupName: typeof tab.groupName === 'string' ? tab.groupName : null,
       graph: tab.graph ?? null,
       /* Carried through so the caller can tell "restore this from storage" from "refetch this
          from the server", which is the one thing the graph being null does not distinguish. */
@@ -214,7 +234,20 @@ export function readSession(storage = safeStorage()) {
     split: Boolean(parsed.split),
     orientation: parsed.orientation ?? null,
     savedAt: parsed.savedAt ?? null,
+    owner: parsed.owner ?? '',
   }
+}
+
+/**
+ * Whether `reader` may be handed a workbench stored for `stored`.
+ *
+ * Exported for its test. Undefined `reader` is the signed-out wait: nothing is handed over and
+ * nothing is deleted, because the person about to sign in is very likely the one who drew it.
+ */
+export function ownerMayRead(stored, reader) {
+  if (reader === undefined) return true
+  const was = stored ?? ''
+  return was === '' || was === reader
 }
 
 export function clearSession(storage = safeStorage()) {

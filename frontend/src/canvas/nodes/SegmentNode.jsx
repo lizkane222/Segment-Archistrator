@@ -17,7 +17,7 @@
 
 import { memo, useMemo, useState } from 'react'
 import { NodeResizer, useNodesData } from '@xyflow/react'
-import { ChevronDown, ChevronRight, Link2, Lock, TriangleAlert } from 'lucide-react'
+import { ChevronDown, ChevronRight, ImageUp, Link2, Lock, TriangleAlert } from 'lucide-react'
 
 import ConnectionHandles from './ConnectionHandles.jsx'
 import DataGraphBlock from './DataGraphBlock.jsx'
@@ -42,7 +42,8 @@ import { visibleCardFields } from '../../inspector/cardFields.js'
 import { profileIdentity } from '../../inspector/profileSnapshot.js'
 import { useAnchorFocused, useAnchors } from '../anchors.js'
 import { useGroupCollapse } from '../groupCollapse.js'
-import { useFlashing } from '../flash.js'
+import { useFlashing, useHeld } from '../flash.js'
+import { safeHttpUrl } from '../../ui/safeUrl.js'
 
 /*
  * Which printed fields ride on the card's existing meta line rather than getting a row of their own.
@@ -88,7 +89,7 @@ function SegmentNode({ id, data, selected, dragging, parentId }) {
   const hasChildren = (data.children?.length ?? 0) > 0
   /* Both halves of the condition, and the second is the load-bearing one: see chrome.js.
      `bound === false` alone is true of every card on a canvas with no workspace behind it. */
-  const { showFlags, rename, updateData, walkthroughActive } = useChrome()
+  const { showFlags, rename, updateData, walkthroughActive, importRules } = useChrome()
   const isPlaceholder = data.bound === false && showFlags
   const locked = Boolean(data.locked)
 
@@ -106,6 +107,8 @@ function SegmentNode({ id, data, selected, dragging, parentId }) {
   const noted = useAnchorFocused(id)
   /* Pulses when a message names this component -- see canvas/flash.js. */
   const flashing = useFlashing(id)
+  /* Lit for as long as the pointer is on this component's entry in a picker -- see canvas/flash.js. */
+  const picked = useHeld(id)
 
   /*
    * Renaming in place.
@@ -237,9 +240,9 @@ function SegmentNode({ id, data, selected, dragging, parentId }) {
            toolbar's three vertical-alignment buttons do something on a card as well as in a
            shape -- on a card someone has dragged tall, "text to the top" is the difference
            between a title and a label floating in the middle of a box. */
-        className={`group relative flex gap-2 border px-3 py-2 transition-shadow ${label.itemsClass} ${shapeClass} ${
+        className={`nokey group relative flex gap-2 border px-3 py-2 transition-shadow ${label.itemsClass} ${shapeClass} ${
           selected ? 'shadow-lg ring-2 ring-twilio-blue ring-offset-1' : 'shadow-sm'
-        } ${flashing ? 'flash-border' : ''} ${
+        } ${flashing ? 'flash-border' : ''} ${picked ? 'pick-glow' : ''} ${
           here ? 'walkthrough-here' : trail ? 'walkthrough-trail' : aside ? 'walkthrough-aside' : ''
         }`}
         style={{
@@ -430,6 +433,24 @@ function SegmentNode({ id, data, selected, dragging, parentId }) {
               `profileIdentity`. */}
           {data.kind === 'profile' &&
             (() => {
+              /* Every pasted identifier is shown by default; traits and events sit
+                 behind their chips below. */
+              const identifiers = (data.profileSnapshot?.identifiers ?? []).filter((entry) => entry?.id)
+              if (identifiers.length) {
+                return (
+                  <div className="mt-1 space-y-0.5">
+                    {identifiers.map((entry, index) => (
+                      <div
+                        key={`${entry.type}:${entry.id}:${index}`}
+                        className="truncate text-[10px] font-medium leading-snug text-twilio-blue"
+                        title={`${entry.type}: ${entry.id}`}
+                      >
+                        {entry.type ?? 'ID'} · {entry.id}
+                      </div>
+                    ))}
+                  </div>
+                )
+              }
               const identity = profileIdentity(data.profileSnapshot)
               return (
                 identity && (
@@ -454,6 +475,21 @@ function SegmentNode({ id, data, selected, dragging, parentId }) {
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1">
+          {/* An identity resolution rule can be filled in from a screenshot of Segment's settings table. */}
+          {data.kind === 'identity_setting' && importRules && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                importRules({ type: 'node', id })
+              }}
+              title="Import the rules from a screenshot"
+              aria-label="Import the rules from a screenshot"
+              className="nodrag rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
+            >
+              <ImageUp size={13} aria-hidden="true" />
+            </button>
+          )}
           {/* Shown unconditionally, unlike the Unbound flag. A card that will not move needs
               to say so on its face -- otherwise the only way to find out is to try to drag
               it and watch nothing happen, which reads as the canvas being broken. */}
@@ -469,9 +505,9 @@ function SegmentNode({ id, data, selected, dragging, parentId }) {
               <TriangleAlert size={12} className="text-twilio-warning" aria-hidden="true" />
             </span>
           )}
-          {data.workspaceUrl && (
+          {safeHttpUrl(data.workspaceUrl) && (
             <a
-              href={data.workspaceUrl}
+              href={safeHttpUrl(data.workspaceUrl)}
               target="_blank"
               rel="noreferrer"
               /* nodrag: without it React Flow swallows the click as a drag start. */

@@ -88,3 +88,23 @@ class WorkspaceSerializer(serializers.Serializer):
     # than letting the user find out from a failed request.
     credential = serializers.CharField(source="credential_kind")
     canReadWorkspace = serializers.BooleanField(source="can_read_workspace_api")
+
+
+class ConnectionSerializer(serializers.Serializer):
+    """
+    One remembered workspace connection, as the tab groups need it.
+
+    Never the token, its ciphertext or its fingerprint -- a group is a name and a region. Same
+    field names as `WorkspaceSerializer`, so the client has one shape for "a workspace".
+    """
+
+    id = serializers.CharField(source="workspace_id")
+    name = serializers.CharField(source="workspace_name")
+    slug = serializers.CharField(source="workspace_slug")
+    region = serializers.CharField()
+    credential = serializers.CharField(source="credential_kind")
+    canReadWorkspace = serializers.SerializerMethodField()
+    lastUsedAt = serializers.DateTimeField(source="last_used_at")
+
+    def get_canReadWorkspace(self, obj) -> bool:
+        return obj.credential_kind == WorkspaceSession.CREDENTIAL_PUBLIC_API

@@ -28,6 +28,9 @@ import {
   columnCount,
   insertColumn,
   insertRow,
+  moveColumn,
+  moveRow,
+  tableToCsv,
   newTable,
   nextCell,
   normalizeTable,
@@ -328,5 +331,32 @@ describe('nextCell', () => {
   it('stops at both ends', () => {
     expect(nextCell(table, { row: 1, column: 1 })).toBe(null)
     expect(nextCell(table, { row: 0, column: 0 }, -1)).toBe(null)
+  })
+})
+
+describe('reorder and csv', () => {
+  const t = () => {
+    let table = newTable({ rows: 2, columns: 3 })
+    table = setCell(table, 0, 0, { text: 'a' })
+    table = setCell(table, 0, 1, { text: 'b,"x"' })
+    table = setCell(table, 0, 2, { text: '=SUM(1)' })
+    return setCell(table, 1, 0, { text: 'd' })
+  }
+  it('moves columns and rows with their cells', () => {
+    expect(cellText(moveColumn(t(), 0, 2), 0, 2)).toBe('a')
+    expect(cellText(moveRow(t(), 1, 0), 0, 0)).toBe('d')
+  })
+  it('exports quoted, formula-safe CSV', () => {
+    expect(tableToCsv(t())).toBe('a,"b,""x""",\'=SUM(1)\r\nd,,')
+  })
+})
+
+describe('csv links', () => {
+  it('writes the address after a linked stretch', () => {
+    const rich = { blocks: [{ list: null, runs: [
+      { text: 'See ' }, { text: 'Adobe ', link: 'https://a.com/x' }, { text: 'Target', b: true, link: 'https://a.com/x' },
+    ] }] }
+    const table = setCell(newTable({ rows: 1, columns: 1 }), 0, 0, { rich })
+    expect(tableToCsv(table)).toBe('See Adobe Target (https://a.com/x)')
   })
 })

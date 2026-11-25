@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
+import { trustGraphCode } from '../functions/trust.js'
 import { ApiError, diagrams as diagramsApi, templates as templatesApi } from '../services/api.js'
 import { graphFingerprint } from './serialize.js'
 
@@ -65,40 +66,54 @@ export function useDiagrams() {
    * a new diagram rather than editing the template. Templates are read-only in v1
    * and shared by every workspace, so writing back into one would edit everyone's.
    */
-  const openTemplate = useCallback(async (key) => {
+  const openTemplate = useCallback(async (key, { nameFor } = {}) => {
     setBusy('open')
     try {
       const template = await templatesApi.get(key)
+      const templateName = template.name ?? UNTITLED
       setCurrent({
         id: null,
-        name: template.name ?? UNTITLED,
+        /* `nameFor` lets the caller date-stamp and version the instance: it knows which names are
+           already taken by other tabs, which this hook cannot see. */
+        name: nameFor ? nameFor(templateName) : templateName,
         description: template.description ?? '',
         sourceTemplate: template.key ?? key,
         updatedAt: null,
       })
       setSavedPrint(null)
+      /* Built in, or this person's own. A template somebody else shared carries code somebody else
+         wrote, which is exactly what the trust gate exists to hold back. */
+      if (template.is_builtin || template.owner === 'me') trustGraphCode(template.graph)
       return template.graph ?? { nodes: [], edges: [] }
     } finally {
       setBusy(null)
     }
   }, [])
 
-  const openDiagram = useCallback(async (id) => {
+  const openDiagram = useCallback(async (id, { copyAs } = {}) => {
     setBusy('open')
     try {
       const diagram = await diagramsApi.get(id)
+      /* `copyAs` is passed when another tab already holds this saved diagram. Opening it a second
+         time as the same record would let either tab's Save overwrite the other's, so this one is
+         detached (`id: null`, like a fork) and given a name of its own: its first Save creates a
+         second diagram. */
+      const copyName = copyAs ? copyAs(diagram.name ?? UNTITLED) : null
       setCurrent({
-        id: diagram.id,
-        name: diagram.name ?? UNTITLED,
+        id: copyName ? null : diagram.id,
+        name: copyName ?? diagram.name ?? UNTITLED,
         description: diagram.description ?? '',
         sourceTemplate: diagram.source_template ?? '',
-        updatedAt: diagram.updated_at ?? null,
+        updatedAt: copyName ? null : (diagram.updated_at ?? null),
       })
       /* Which workspace its bound components came from, and whether this account can get
          back there. Held apart from `current` -- it is a fact about the server's copy, not
          part of the document a tab carries -- and read by the shell to resume the
          connection. */
       setOpenedWorkspace(diagram.workspace ?? null)
+      /* Only a diagram the server says is this person's own carries code they wrote. One
+         shared with them, or predating accounts, is somebody else's -- see functions/trust.js. */
+      if (diagram.owner === 'me') trustGraphCode(diagram.graph)
       return diagram.graph ?? { nodes: [], edges: [] }
     } finally {
       setBusy(null)
@@ -158,12 +173,14 @@ export function useDiagrams() {
 
   /** Update an open diagram, or create one if this document has never been saved. */
   const save = useCallback(
-    async (graph, { name, description } = {}) => {
+    async (graph, { name, description, groupName } = {}) => {
       setBusy('save')
       try {
         const body = {
           name: name ?? current.name ?? UNTITLED,
           description: description ?? current.description ?? '',
+          /* The tab group it is saved from, so Open can list it under that group. */
+          group_name: groupName ?? '',
           graph,
         }
         const result = current.id
@@ -192,11 +209,12 @@ export function useDiagrams() {
 
   /** Fork: always creates, and carries the template lineage forward. */
   const saveAs = useCallback(
-    async (name, graph, { description } = {}) => {
+    async (name, graph, { description, groupName } = {}) => {
       setBusy('save')
       try {
         const result = await diagramsApi.create({
           name: name || UNTITLED,
+          group_name: groupName ?? '',
           description: description ?? current.description ?? '',
           source_template: current.sourceTemplate ?? '',
           graph,

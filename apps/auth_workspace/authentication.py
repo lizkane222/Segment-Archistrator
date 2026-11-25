@@ -137,6 +137,44 @@ class WorkspaceSessionAuthentication(authentication.BaseAuthentication):
         """
         return "Cookie"
 
+    # Routes that act on the session itself or the account, not on a workspace: they must see the
+    # real row, not a view of it scoped to whichever tab happened to call.
+    UNSCOPED_PREFIXES = ("/api/session", "/api/auth/", "/api/connections", "/api/invitations")
+
+    def _scope(self, request, session):
+        """
+        Narrow the session to the workspace the calling tab says it is about.
+
+        `X-Workspace-Id` names a workspace, or `none`. It is only ever a *choice among the
+        account's own remembered connections* -- the header selects, it never grants -- so a
+        guessed id from another account matches nothing and is refused rather than ignored:
+        silently falling back to the session's own workspace would answer a tab about one
+        workspace with another's data.
+
+        Absent, the session's own connection is used, which is what every caller that predates
+        tab groups sends.
+        """
+        raw = request.META.get("HTTP_X_WORKSPACE_ID")
+        if raw is None or request.path.startswith(self.UNSCOPED_PREFIXES):
+            return session
+        raw = raw.strip()
+        if not session.account_id:
+            return session
+        if raw.lower() == "none" or raw == "":
+            return session.scoped_to(None)
+        if session.has_token and raw == session.workspace_id:
+            return session
+        from .models import RememberedConnection
+
+        connection = RememberedConnection.objects.filter(
+            account_id=session.account_id, workspace_id=raw[:64]
+        ).first()
+        if connection is None:
+            raise exceptions.PermissionDenied(
+                "That workspace is not connected to this account. Connect it first."
+            )
+        return session.scoped_to(connection)
+
     def authenticate(self, request):
         raw = request.COOKIES.get(settings.WORKSPACE_SESSION_COOKIE)
         if not raw:
@@ -156,13 +194,22 @@ class WorkspaceSessionAuthentication(authentication.BaseAuthentication):
             session.delete()
             return None
 
+        # A closed app has no use for a session nobody has signed in to. Treated as no
+        # session at all -- not as a limited one -- so every permission class refuses it and
+        # no view has to remember to check. Sign-in itself needs no principal.
+        if settings.REQUIRE_ACCOUNT and session.account_id is None:
+            return None
+
         if request.method not in SAFE_METHODS:
             enforce_csrf(request)
 
         session.touch()
+        session = self._scope(request, session)
         # Ask the response layer to re-issue the cookie. The server-side clock slides on
         # every request via touch(), but `max_age` was fixed when the cookie was first
         # written -- so an active user was signed out at 12h from *issue* regardless of
         # having just used the app. See `SlidingSessionCookieMiddleware`.
-        request._workspace_session_to_refresh = session
+        # On the underlying Django request: DRF's `Request` keeps attributes assigned to it
+        # on itself, and the middleware downstream only ever sees the `HttpRequest`.
+        getattr(request, "_request", request)._workspace_session_to_refresh = session
         return (WorkspacePrincipal(session=session), None)

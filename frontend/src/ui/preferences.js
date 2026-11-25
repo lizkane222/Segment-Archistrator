@@ -138,4 +138,7 @@ export function preference(key, fallback, storage = safeStorage()) {
  */
 export const NOTES_LANE_OPEN = preference('notes-lane-open', true)
 export const PALETTE_OPEN = preference('palette-open', true)
+/* Admin mode: only ever consulted for an administrator -- see `useAdminMode`. A preference rather than
+   account state because it is the administrator's choice to look at the app this way, per browser. */
+export const ADMIN_MODE = preference('admin-mode', false)
 export const INSPECTOR_OPEN = preference('inspector-open', true)

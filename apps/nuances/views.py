@@ -14,7 +14,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.auth_workspace.permissions import AllowAny, HasSession
+from apps.auth_workspace.permissions import AllowAny, HasSession, SignedIn
 
 from .models import Nuance
 from .serializers import NuanceSerializer, NuanceSubmitSerializer
@@ -25,7 +25,7 @@ PAGE_SIZE = 50
 
 
 class NuanceListView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [SignedIn]
 
     def get(self, request):
         kind = request.query_params.get("kind")

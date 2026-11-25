@@ -56,8 +56,23 @@ class Account(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     last_login_at = models.DateTimeField(null=True, blank=True)
 
+    # A super-user: may publish and withdraw the built-in reference architectures and may make others
+    # administrators. Owners (`settings.ADMIN_EMAILS`) are administrators whatever this says.
+    is_admin = models.BooleanField(default=False)
+
     class Meta:
         ordering = ["email"]
+
+    @property
+    def is_owner(self) -> bool:
+        """Named in settings, so it cannot be granted or removed from inside the app."""
+        from django.conf import settings
+
+        return self.email.lower() in settings.ADMIN_EMAILS
+
+    @property
+    def has_admin_rights(self) -> bool:
+        return self.is_admin or self.is_owner
 
     def __str__(self):
         return self.email

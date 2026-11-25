@@ -33,7 +33,8 @@ def test_starting_an_anonymous_session_sets_the_cookie(client):
         "workspace": None,
         "connected": False,
         "anonymous": True,
-        "auth": {"google": False},
+        "auth": {"google": False, "required": False, "domains": [], "invitations": True},
+        "connections": [],
     }
 
     cookie = response.cookies["sab_session"]
@@ -86,7 +87,8 @@ def test_get_session_reports_the_anonymous_state(anon_client):
         "workspace": None,
         "connected": False,
         "anonymous": True,
-        "auth": {"google": False},
+        "auth": {"google": False, "required": False, "domains": [], "invitations": True},
+        "connections": [],
     }
 
 
@@ -156,6 +158,17 @@ def test_anonymous_session_can_save_and_read_its_own_diagrams(anon_client, anon_
 
     names = [item["name"] for item in anon_client.get("/api/diagrams").json()["items"]]
     assert names == ["Drawn before connecting"]
+
+
+def test_a_saved_diagram_remembers_its_tab_group(anon_client, anon_session):
+    anon_client.post(
+        "/api/diagrams",
+        {"name": "In a group", "group_name": "  Q4   pitch ", "graph": {"nodes": [], "edges": []}},
+        format="json",
+    )
+    anon_client.post("/api/diagrams", {"name": "Loose", "graph": {"nodes": []}}, format="json")
+    groups = {item["name"]: item["group_name"] for item in anon_client.get("/api/diagrams").json()["items"]}
+    assert groups == {"In a group": "Q4 pitch", "Loose": ""}
 
 
 def test_one_anonymous_scope_cannot_read_another(anon_client, db):

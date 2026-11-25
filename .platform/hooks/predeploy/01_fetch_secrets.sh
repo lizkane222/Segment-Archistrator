@@ -23,6 +23,7 @@ SECRET_NAMES=(
   SEGMENT_TOKEN_ENCRYPTION_KEYS
   SEGMENT_CATALOG_TOKEN
   AIRTABLE_API_KEY
+  GOOGLE_OAUTH_CLIENT_SECRET
 )
 
 for name in "${SECRET_NAMES[@]}"; do
@@ -34,6 +35,13 @@ for name in "${SECRET_NAMES[@]}"; do
     --output text 2>/dev/null) || continue
 
   if [ -n "$value" ]; then
-    echo "export ${name}=\"${value}\"" >> "$ENV_FILE"
+    # The file is sourced by a shell, so a value is escaped for a double-quoted string:
+    # an unescaped `$(...)`, backtick or quote in a parameter would otherwise run as code
+    # (or break every later source of the file) at the next deploy.
+    escaped=${value//\\/\\\\}
+    escaped=${escaped//\"/\\\"}
+    escaped=${escaped//\$/\\\$}
+    escaped=${escaped//\`/\\\`}
+    echo "export ${name}=\"${escaped}\"" >> "$ENV_FILE"
   fi
 done

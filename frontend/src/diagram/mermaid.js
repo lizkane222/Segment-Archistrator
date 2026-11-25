@@ -511,7 +511,7 @@ function edgeStyle(edge) {
 export function looksLikeMermaid(text) {
   const head = String(text ?? '').trimStart()
   if (head.startsWith('{') || head.startsWith('[')) return false
-  return /(^|\n)\s*(flowchart|graph)\b/i.test(head) || /```\s*mermaid/i.test(head)
+  return /(^|\n)\s*(flowchart|graph|sequenceDiagram)\b/i.test(head) || /```\s*mermaid/i.test(head)
 }
 
 /**
@@ -875,10 +875,9 @@ function recogniseZone(subgraph, topology) {
  * A component kind from a hand-written node, most specific evidence first:
  *   1. a class named after a kind (`:::destination`) -- what this file's own exports write
  *   2. its label naming a kind ("Reverse ETL Model", "Computed Trait")
- *   3. its label naming a product that is always one kind (Snowflake is a warehouse; Braze, wherever
- *      it sits, is a destination)
- *   4. the zone it sits in (anything in Sources is a source)
- * and otherwise a custom component, which is what a box nobody recognised honestly is.
+ * and otherwise a custom component, which is what a box nobody recognised honestly is. Product names
+ * (Snowflake, Braze) and the zone a box sits in are deliberately not evidence: guessing from them
+ * filed boxes under components the author never named. Right-click > Convert component changes one.
  */
 const KIND_WORDS = [
   [/\breverse etl\b/, 'reverse_etl_model'],
@@ -912,23 +911,6 @@ const KIND_WORDS = [
   [/\bsources?\b/, 'source'],
 ]
 
-const WAREHOUSE_PRODUCTS = /\b(snowflake|bigquery|big query|redshift|databricks|postgres|postgresql|azure synapse|synapse|s3)\b/
-const DESTINATION_PRODUCTS = /\b(braze|amplitude|mixpanel|google analytics|ga4|facebook|meta conversions|salesforce|hubspot|marketo|iterable|intercom|zendesk|slack|webhooks?|customer\.?io|optimizely|klaviyo|twilio engage|sendgrid|google ads|linkedin|tiktok|pinterest|snapchat|appsflyer|adjust|branch|heap|fullstory|hotjar|pendo|vwo|launchdarkly)\b/
-const SOURCE_PRODUCTS = /\b(javascript|analytics\.js|website|web site|web app|ios|android|react native|flutter|server|node\.?js|python|ruby|java|go|php|http api|mobile app|app)\b/
-
-const ZONE_DEFAULT_KIND = {
-  sources: 'source',
-  destinations: 'destination',
-  warehouses: 'warehouse',
-  linked_events: 'linked_event',
-  protocols: 'tracking_plan',
-  profile_sources: 'profile_source',
-  profiles: 'profile',
-  identity_settings: 'identity_setting',
-  computations: 'computed_trait',
-  linked_audiences: 'linked_audience',
-}
-
 function inferKind(node, zoneId, { topology }) {
   const kinds = topology?.kinds ?? KIND_STYLES
   for (const cls of node.classes) {
@@ -945,15 +927,9 @@ function inferKind(node, zoneId, { topology }) {
   if (!product && MERMAID_TO_DRAWN[node.shape]) return 'shape'
 
   for (const [pattern, kind] of KIND_WORDS) if (pattern.test(label)) return kind
-  if (WAREHOUSE_PRODUCTS.test(label) || node.shape === 'cylinder') {
-    return product === 'unify' ? 'sql_table' : 'warehouse'
-  }
-  if (DESTINATION_PRODUCTS.test(label)) return 'destination'
-  if (ZONE_DEFAULT_KIND[product]) return ZONE_DEFAULT_KIND[product]
-  if (SOURCE_PRODUCTS.test(label) && (product === 'connections' || product === 'segment')) return 'source'
-  if (product === 'connections') return node.shape === 'subroutine' ? 'source_function' : 'destination'
-  if (product === 'engage') return 'audience'
-  if (product === 'unify') return 'computed_trait'
+  /* Nothing else is guessed: not a product name, not the zone a box sits in, not its Mermaid shape. A
+     box that does not use a component's own terminology is a custom component, and the right-click
+     "Convert component" is how it becomes something else on purpose. */
   return 'custom'
 }
 

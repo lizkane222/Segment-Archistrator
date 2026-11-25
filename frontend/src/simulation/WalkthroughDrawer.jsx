@@ -16,7 +16,7 @@
  * and what the canvas shows cannot disagree.
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -24,6 +24,7 @@ import {
   ChevronUp,
   Copy,
   Pause,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
@@ -98,6 +99,10 @@ export default function WalkthroughDrawer({
      here: the app owns the document and the runs, and the report should be assembled when it is
      asked for rather than on every tick. */
   getDiagnostics,
+  /* `Map<nodeId, string[]>` of each component's zones, outermost first. */
+  zoneTrail = null,
+  /* The canvas's flash store, to light a component while it is pointed at in the Start at list. */
+  highlight = null,
 }) {
   const [expanded, setExpanded] = useState(true)
   /* A path with no start cannot run, and the editor is the only place to give it one -- so
@@ -137,6 +142,11 @@ export default function WalkthroughDrawer({
               selected={selectedIds.includes(scenario.id)}
               onSelect={() => onToggleSelected(scenario.id)}
               onEdit={() => setEditingId(scenario.id === editingId ? null : scenario.id)}
+              onDuplicate={() => onDuplicateScenario?.(scenario.id)}
+              onDelete={() => {
+                onRemoveScenario(scenario.id)
+                if (scenario.id === editingId) setEditingId(null)
+              }}
             />
           ))}
           <button
@@ -234,6 +244,8 @@ export default function WalkthroughDrawer({
               onDuplicate={() => onDuplicateScenario?.(editing.id)}
               onClose={() => setEditingId(null)}
               onFocusNode={onFocusNode}
+              zoneTrail={zoneTrail}
+              highlight={highlight}
             />
           )}
         </div>
@@ -242,7 +254,37 @@ export default function WalkthroughDrawer({
   )
 }
 
-function PathButton({ scenario, selected, onSelect, onEdit }) {
+function PathButton({ scenario, selected, onSelect, onEdit, onDuplicate, onDelete }) {
+  const [menu, setMenu] = useState(null) // the ⋯ button's rectangle while open, else null
+  const trigger = useRef(null)
+  const popover = useRef(null)
+
+  useEffect(() => {
+    if (!menu) return undefined
+    const dismiss = (event) => {
+      if (event.type === 'keydown' && event.key !== 'Escape') return
+      if (event.type === 'pointerdown' && (popover.current?.contains(event.target) || trigger.current?.contains(event.target))) return
+      setMenu(null)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', dismiss)
+    /* The strip scrolls sideways, so a menu fixed to a rectangle read before the scroll would be
+       left hanging where the button used to be. */
+    window.addEventListener('resize', dismiss)
+    document.addEventListener('scroll', dismiss, true)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', dismiss)
+      window.removeEventListener('resize', dismiss)
+      document.removeEventListener('scroll', dismiss, true)
+    }
+  }, [menu])
+
+  const choose = (action) => () => {
+    setMenu(null)
+    action()
+  }
+
   return (
     <span className="flex shrink-0 items-center">
       <button
@@ -263,9 +305,12 @@ function PathButton({ scenario, selected, onSelect, onEdit }) {
         {scenario.name}
       </button>
       <button
+        ref={trigger}
         type="button"
-        onClick={onEdit}
-        title={`Edit “${scenario.name}”`}
+        onClick={() => setMenu(menu ? null : trigger.current.getBoundingClientRect())}
+        title={`Options for “${scenario.name}”`}
+        aria-haspopup="menu"
+        aria-expanded={Boolean(menu)}
         className={`rounded-r-full border border-l-0 px-1.5 py-1 text-[11px] transition-colors ${
           selected
             ? 'border-transparent text-white/80 hover:text-white'
@@ -275,7 +320,37 @@ function PathButton({ scenario, selected, onSelect, onEdit }) {
       >
         ⋯
       </button>
+      {/* Fixed rather than absolute: the strip is `overflow-x: auto`, which clips anything that
+          hangs outside it -- and a menu opening upward from the bottom drawer would be exactly that. */}
+      {menu && (
+        <div
+          ref={popover}
+          role="menu"
+          className="fixed z-50 min-w-[120px] rounded-md border border-twilio-gray-20 bg-white py-1 text-[11px] shadow-lg"
+          style={{ left: menu.left, bottom: window.innerHeight - menu.top + 4 }}
+        >
+          <MenuItem icon={Pencil} label="Edit" onClick={choose(onEdit)} />
+          <MenuItem icon={Copy} label="Duplicate" onClick={choose(onDuplicate)} />
+          <MenuItem icon={Trash2} label="Delete" danger onClick={choose(onDelete)} />
+        </div>
+      )}
     </span>
+  )
+}
+
+function MenuItem({ icon: Icon, label, onClick, danger = false }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-twilio-gray-10 ${
+        danger ? 'text-twilio-error' : 'text-twilio-navy'
+      }`}
+    >
+      <Icon size={12} aria-hidden="true" />
+      {label}
+    </button>
   )
 }
 
@@ -484,6 +559,141 @@ function RunRow({ run, graph, topology, onFocusNode }) {
  * on. Functions keep three states for the same reason: "assume it drops" and "switch it off
  * entirely" are different claims, because a dropping insert function still ran.
  */
+/*
+ * The Start at list, as a real list rather than a native <select>.
+ *
+ * A native dropdown's options take no hover events, so there was no way to say "this one" back to the
+ * canvas. This one lights the component under the pointer (or under the arrow keys) on the diagram while
+ * the list is open, and each entry carries the zones the component sits in -- "Segment > Connections >
+ * Sources" -- because a diagram with three components called "Source" is otherwise a list of the same
+ * word three times.
+ *
+ * Opens upward: the drawer is the bottom edge of the window.
+ */
+function StartPicker({ value, groups, zoneTrail, highlight, onChange }) {
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(null)
+  const root = useRef(null)
+  const flat = useMemo(() => groups.flatMap((group) => group.nodes), [groups])
+  const nameOf = (node) => node.data?.name ?? node.name ?? node.id
+  const trailOf = (node) => (zoneTrail?.get(node.id) ?? []).join(' > ')
+  const selected = flat.find((node) => node.id === value) ?? null
+
+  const light = (id) => (id ? highlight?.hold?.([id]) : highlight?.release?.())
+  const close = () => {
+    setOpen(false)
+    setActive(null)
+    highlight?.release?.()
+  }
+
+  useEffect(() => {
+    if (!open) return undefined
+    const away = (event) => !root.current?.contains(event.target) && close()
+    document.addEventListener('mousedown', away)
+    return () => document.removeEventListener('mousedown', away)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+  /* Never leave a component lit behind a picker that has gone. */
+  useEffect(() => () => highlight?.release?.(), [highlight])
+
+  const move = (delta) => {
+    if (!flat.length) return
+    const at = flat.findIndex((node) => node.id === active)
+    const next = flat[(at + delta + flat.length) % flat.length]
+    setActive(next.id)
+    light(next.id)
+    document.getElementById(`start-option-${next.id}`)?.scrollIntoView?.({ block: 'nearest' })
+  }
+
+  return (
+    <div ref={root} className="relative">
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => (open ? close() : setOpen(true))}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault()
+            if (!open) setOpen(true)
+            move(event.key === 'ArrowDown' ? 1 : -1)
+          } else if (event.key === 'Enter' && open && active) {
+            event.preventDefault()
+            onChange(active)
+            close()
+          } else if (event.key === 'Escape' && open) {
+            event.preventDefault()
+            close()
+          }
+        }}
+        className={`mt-0.5 flex w-full items-center justify-between gap-1 rounded border px-1.5 py-1 text-left text-[11px] ${
+          value
+            ? 'border-twilio-gray-20'
+            : /* Ringed until it is answered: an unanswered start is the one thing stopping the path from
+                 running, and a plain field looks filled in. */
+              'border-twilio-warning bg-orange-50'
+        }`}
+      >
+        <span className="min-w-0 flex-1 truncate">
+          {selected ? (
+            <>
+              {nameOf(selected)}
+              {trailOf(selected) && <span className="ml-1 text-twilio-gray-60">({trailOf(selected)})</span>}
+            </>
+          ) : (
+            'Choose a component…'
+          )}
+        </span>
+        <ChevronUp size={11} className="shrink-0 text-twilio-gray-40" aria-hidden="true" />
+      </button>
+
+      {open && (
+        <ul
+          role="listbox"
+          aria-label="Start at"
+          className="absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[26rem] max-w-[90vw] overflow-y-auto rounded-md border border-twilio-gray-20 bg-white py-1 shadow-lg"
+          onMouseLeave={() => {
+            setActive(null)
+            highlight?.release?.()
+          }}
+        >
+          {groups.map((group) => (
+            <li key={group.label} role="presentation">
+              <p className="px-2 pb-0.5 pt-1.5 text-[9px] font-bold uppercase tracking-widest text-twilio-gray-40">
+                {group.label}
+              </p>
+              <ul role="presentation">
+                {group.nodes.map((node) => (
+                  <li
+                    key={node.id}
+                    id={`start-option-${node.id}`}
+                    role="option"
+                    aria-selected={node.id === value}
+                    onMouseEnter={() => {
+                      setActive(node.id)
+                      light(node.id)
+                    }}
+                    onClick={() => {
+                      onChange(node.id)
+                      close()
+                    }}
+                    className={`cursor-pointer px-2 py-1 text-[11px] ${
+                      node.id === active ? 'bg-twilio-blue-light' : ''
+                    } ${node.id === value ? 'font-semibold' : ''}`}
+                  >
+                    <span className="text-twilio-navy">{nameOf(node)}</span>
+                    {trailOf(node) && <span className="ml-1 text-twilio-gray-60">({trailOf(node)})</span>}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function ScenarioEditor({
   scenario,
   graph,
@@ -494,6 +704,8 @@ function ScenarioEditor({
   onDuplicate,
   onClose,
   onFocusNode,
+  zoneTrail = null,
+  highlight = null,
 }) {
   /* Sources first and labelled, so widening the picker to every component did not
      bury the one kind that is usually the answer. */
@@ -804,35 +1016,13 @@ function ScenarioEditor({
           <span className="text-[10px] font-semibold uppercase tracking-wide text-twilio-gray-60">
             Start at
           </span>
-          <select
-            value={scenario.sourceId ?? ''}
-            onChange={(event) => onChange({ sourceId: event.target.value || null })}
-            className={`mt-0.5 w-full rounded border px-1.5 py-1 text-[11px] ${
-              scenario.sourceId
-                ? 'border-twilio-gray-20'
-                : /* Ringed until it is answered. An unanswered start is the one thing stopping the
-                     path from running, and a plain select looks like a filled-in field. */
-                  'border-twilio-warning bg-orange-50'
-            }`}
-          >
-            {/* Not a default. This used to read "First source on the diagram" and silently pick
-                one, which made a path run from a component the reader never chose -- see
-                `runnable`. Disabled so it cannot be chosen back. */}
-            <option value="" disabled>
-              Choose a component…
-            </option>
-            {/* Grouped rather than one flat list: a source is still the usual answer, and
-                on a large diagram a flat list of every component buries them. */}
-            {startGroups.map((group) => (
-              <optgroup key={group.label} label={group.label}>
-                {group.nodes.map((node) => (
-                  <option key={node.id} value={node.id}>
-                    {node.data?.name ?? node.name ?? node.id}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+          <StartPicker
+            value={scenario.sourceId}
+            groups={startGroups}
+            zoneTrail={zoneTrail}
+            highlight={highlight}
+            onChange={(id) => onChange({ sourceId: id || null })}
+          />
         </label>
 
         <label className="block">

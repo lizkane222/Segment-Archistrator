@@ -30,6 +30,10 @@ export const CODE = 'code'
    and query, a Data Graph's entity model. Its own tab rather than more of Overview, because a textarea
    holding forty lines of CSV alongside a name field is a panel with two different jobs. */
 export const DATA = 'data'
+/* An event card: which of its fields it shows. See EventTab.jsx. */
+export const EVENT = 'event'
+/* Filling a table from pasted CSV, JSON or text. See TablePasteTab.jsx. */
+export const PASTE = 'paste'
 
 export const TAB_LABELS = {
   [BIND]: 'Bind',
@@ -41,6 +45,8 @@ export const TAB_LABELS = {
   [ZONE]: 'Zone',
   [DATA]: 'Data',
   [CODE]: 'Code',
+  [EVENT]: 'Event',
+  [PASTE]: 'Paste data',
   [EDGE_STYLE]: 'Style',
 }
 
@@ -165,6 +171,8 @@ export function tabsFor(node) {
   if (node.type === 'flow') return [EDGE_STYLE]
 
   const kind = node.data?.kind
+  /* An event card is a note about an event, not a component: its fields, then how it looks. */
+  if (kind === 'event') return [EVENT, STYLE]
   const tabs = []
   /* First, and therefore the default tab for a placeholder: a dashed unbound node
      is a question, and this is where it gets answered. */
@@ -186,6 +194,8 @@ export function tabsFor(node) {
      config and a SQL Table with no CSV are both empty boxes, so this is the first thing anyone does
      after dropping one. */
   if (DATA_KINDS.has(kind)) tabs.push(DATA)
+  /* A table is a grid of cells nobody wants to type in one at a time. */
+  if (kind === 'table') tabs.push(PASTE)
   tabs.push(STYLE, LINKS)
   return tabs
 }

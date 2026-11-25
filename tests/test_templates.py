@@ -170,13 +170,15 @@ def test_a_hand_arranged_template_may_hold_an_edge_that_is_not_data_flow(seeded)
     """
     The off-table edges a hand-arranged template is allowed to contain, named individually.
 
-    Not a blanket exemption: the point of listing them is that adding a *fourth* has to be a
+    Not a blanket exemption: the point of listing them is that adding another has to be a
     deliberate edit to this test rather than something that slips in. Each of these is a
     drawing statement rather than a path an event takes --
 
       warehouse -> warehouse        "these two are usually the same warehouse"
       destination -> destination     a destination forwarding into the customer's own system
       source -> profile_sync        the debugger source drawn as the thing a walkthrough feeds
+      reverse_etl_model -> linked_audience
+                                     the warehouse model a Linked Audience's data graph reads from
 
     -- and each is the kind of claim `ALLOWED_EDGES` cannot express, because that table is
     about which components Segment connects, not about what a diagram may say.
@@ -185,6 +187,7 @@ def test_a_hand_arranged_template_may_hold_an_edge_that_is_not_data_flow(seeded)
         ("warehouse", "warehouse"),
         ("destination", "destination"),
         ("source", "profile_sync"),
+        ("reverse_etl_model", "linked_audience"),
     }
     for template in seeded:
         if not template.graph.get("zones"):

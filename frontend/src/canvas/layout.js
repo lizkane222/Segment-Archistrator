@@ -158,7 +158,15 @@ export const ROW_GAP = 26
 export const ZONE_PADDING_X = 32
 export const ZONE_PADDING_TOP = 52 // room for the zone's own label
 export const ZONE_PADDING_BOTTOM = 32
-export const ZONE_GAP = 48
+/*
+ * The default margin around a zone: between two sibling zones, and between a zone and the zone that holds it.
+ *
+ * 48px is room for two connectors to run side by side through the gap -- about 16px between the zone, the
+ * first line, the second line and the next zone -- without either hugging a border. It is only where a zone
+ * *starts*: a zone dragged elsewhere keeps wherever it was put, and nothing here pulls it back.
+ */
+export const ZONE_MARGIN = 48
+export const ZONE_GAP = ZONE_MARGIN
 
 /* The size an "empty" zone gets, wherever the canvas got there from: drawn from the
    palette, arrived from a template, or emptied out. Sized from its contents alone an
@@ -199,6 +207,8 @@ export const zoneNodeId = (zoneId) => `zone-${zoneId}`
 const NODE_TYPE_FOR_KIND = {
   shape: 'shape',
   table: 'table',
+  /* An event drawn as a card -- see simulation/eventCard.js. */
+  event: 'event',
 }
 
 function columnFor(kind) {
@@ -489,6 +499,7 @@ export function buildLayout(graph, { existingPositions, existingZones, minZoneSp
        captureZones reads them straight off a React Flow child node -- so nothing is
        translated here, and `offered` is only ever the fallback. */
     const live = existingZones?.[zone.id]
+    const hasOwnSize = (live?.width ?? zone.width) != null
     let zoneWidth = live?.width ?? zone.width ?? computed.width
     let zoneHeight = live?.height ?? zone.height ?? computed.height
     const placed = live?.position ?? zone.position ?? null
@@ -541,9 +552,12 @@ export function buildLayout(graph, { existingPositions, existingZones, minZoneSp
 
     for (const child of subZones[zone.id] ?? []) {
       if (placedZones.has(child.id)) continue
-      const box = placeZone(child, zone.id, { x: ZONE_PADDING_X, y: subZoneTop })
-      zoneWidth = Math.max(zoneWidth, box.position.x + box.width + ZONE_PADDING_X)
-      zoneHeight = Math.max(zoneHeight, box.position.y + box.height + ZONE_PADDING_BOTTOM)
+      const box = placeZone(child, zone.id, { x: ZONE_MARGIN, y: subZoneTop })
+      /* The default margin only for a zone that has no size of its own yet. One with stored geometry is
+         somebody's arrangement and is grown no further than its contents need. */
+      const edge = hasOwnSize ? ZONE_PADDING_X : ZONE_MARGIN
+      zoneWidth = Math.max(zoneWidth, box.position.x + box.width + edge)
+      zoneHeight = Math.max(zoneHeight, box.position.y + box.height + (hasOwnSize ? ZONE_PADDING_BOTTOM : ZONE_MARGIN))
       subZoneTop = Math.max(subZoneTop, box.position.y + box.height + ZONE_GAP)
     }
 
@@ -1003,6 +1017,12 @@ export function toFlowEdge(edge) {
       ...(edge.arrowStart ? { arrowStart: edge.arrowStart } : {}),
       ...(edge.arrowEnd === false ? { arrowEnd: false } : {}),
       ...(edge.label ? { label: edge.label } : {}),
+      ...(edge.labelT != null ? { labelT: edge.labelT } : {}),
+      ...(edge.labelOffset ? { labelOffset: edge.labelOffset } : {}),
+      ...(edge.labelSide ? { labelSide: edge.labelSide } : {}),
+      ...(edge.labelWrap ? { labelWrap: true } : {}),
+      ...(edge.labelAlign ? { labelAlign: edge.labelAlign } : {}),
+      ...(edge.labelColor ? { labelColor: edge.labelColor } : {}),
     },
   }
 }

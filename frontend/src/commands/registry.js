@@ -66,6 +66,15 @@ const alignTo = (id, label) => ({
   run: (ctx) => ctx.actions.align(alignTargets(ctx), id),
 })
 
+const matchSizeAs = (dimension, label) => ({
+  id: `match-size-${dimension}`,
+  label,
+  enabled: alignable,
+  /* Matched to the node the menu was opened on when it is part of the selection -- right-clicking one of
+     three selected boxes says "make the rest like this one" -- otherwise to the first selected. */
+  run: (ctx) => ctx.actions.matchSize(alignTargets(ctx), ctx.node?.id ?? null, dimension),
+})
+
 const distributeOn = (axis, label) => ({
   id: `distribute-${axis}`,
   label,
@@ -200,12 +209,18 @@ function alignable(ctx) {
     : 'Select two or more components or zones to align them.'
 }
 
-/* Three, because distributing two is the identity: one gap is already equal to itself.
-   See `distributeNodes`. */
+/* Spacing needs room to space them in. A zone is that room, so two components in the same zone can be
+   spread across it; with no zone the outermost two stay put and there must be a third between them. See
+   `distributeNodes`. */
 function distributable(ctx) {
-  const count = alignTargets(ctx).length
-  if (count >= 3) return true
-  return `Select three or more components or zones to space them out — ${count} cannot be distributed.`
+  const ids = alignTargets(ctx)
+  if (ids.length >= 3) return true
+  if (ids.length === 2) {
+    const byId = new Map((ctx?.nodes ?? []).map((node) => [node.id, node]))
+    const [a, b] = ids.map((id) => byId.get(id))
+    if (a?.parentId && a.parentId === b?.parentId) return true
+  }
+  return `Select three or more components or zones to space them out — ${ids.length} cannot be distributed. (Two in the same zone can be spread across it.)`
 }
 
 export const COMMANDS = [
@@ -248,6 +263,19 @@ export const COMMANDS = [
     group: 'edit',
     enabled: needsComponents('duplicate'),
     run: (ctx) => ctx.actions.duplicate(componentTargets(ctx)),
+  },
+  {
+    id: 'convert',
+    label: 'Convert component',
+    menus: [NODE_MENU],
+    group: 'edit',
+    enabled: (ctx) =>
+      ctx.stack
+        ? 'Expand the group to convert one of its components.'
+        : ctx.node && ctx.node.type !== 'zone'
+          ? true
+          : 'Right-click a component to convert it.',
+    run: (ctx) => ctx.actions.convert(ctx.node),
   },
   {
     id: 'copy',
@@ -333,6 +361,18 @@ export const COMMANDS = [
     ],
   },
   {
+    id: 'match-size',
+    label: 'Match Size',
+    menus: [NODE_MENU],
+    group: 'arrange',
+    enabled: alignable,
+    children: [
+      matchSizeAs('width', 'Match width'),
+      matchSizeAs('height', 'Match height'),
+      matchSizeAs('both', 'Match width & height'),
+    ],
+  },
+  {
     id: 'distribute',
     label: 'Distribute',
     menus: [NODE_MENU],
@@ -395,6 +435,23 @@ export const COMMANDS = [
          a double-click, but that one is only findable once you know it is there. */
       tableEdit('fit-row', 'Fit row to its text'),
     ],
+  },
+
+  /* Also at the top level of the menu, not only inside Table: deleting a row or column is the thing
+     people come to a table's menu for, and it was easy to miss one level down. */
+  {
+    ...tableEdit('delete-row', 'Delete row', (ctx) => ctx.cell?.rows > 1 || 'A table needs at least one row.'),
+    id: 'table-row-delete',
+    menus: [NODE_MENU],
+    group: 'edit',
+    visible: (ctx) => Boolean(ctx.cell),
+  },
+  {
+    ...tableEdit('delete-column', 'Delete column', (ctx) => ctx.cell?.columns > 1 || 'A table needs at least one column.'),
+    id: 'table-column-delete',
+    menus: [NODE_MENU],
+    group: 'edit',
+    visible: (ctx) => Boolean(ctx.cell),
   },
 
   {
@@ -480,7 +537,10 @@ export const COMMANDS = [
        noise on every right-click. */
     visible: (ctx) => Boolean(ctx.edge?.data?.waypoints?.length),
     enabled: () => true,
-    run: (ctx) => ctx.actions.route(ctx.edge.id, []),
+    run: (ctx) =>
+      ctx.actions.straighten
+        ? ctx.actions.straighten(ctx.edge.id)
+        : ctx.actions.route(ctx.edge.id, []),
   },
   {
     id: 'flow',
@@ -533,6 +593,32 @@ export const COMMANDS = [
           'This menu lists the first six paths. Open the walkthrough drawer to reach the rest.',
       },
     ],
+  },
+  {
+    id: 'reassign-zone',
+    label: (ctx) => (ctx.node?.type === 'zone' ? 'Move into another zone…' : 'Reassign to a zone…'),
+    menus: [NODE_MENU],
+    group: 'arrange',
+    /* Components and zones alike: a zone sits inside another one too. A layout divider does not -- it is
+       the canvas's own furniture, and moving it is a matter of dragging. */
+    visible: (ctx) => Boolean(ctx.node) && !ctx.node.data?.frame && !isGroupStackId(ctx.node.id),
+    enabled: (ctx) => !ctx.node?.data?.locked || 'Unlock it first — a locked component stays where it is.',
+    run: (ctx) => ctx.actions.reassignZone(ctx.node.id),
+  },
+  {
+    id: 'add-event-preview',
+    label: 'Add event preview',
+    menus: [NODE_MENU, EDGE_MENU],
+    group: 'route',
+    /* Not on a zone, which the event passes through no more than it passes through a label. */
+    visible: (ctx) => Boolean(ctx.edge) || (Boolean(ctx.node) && ctx.node.type !== 'zone'),
+    enabled: (ctx) =>
+      (ctx.scenarios?.length ?? 0) > 0 ||
+      'Add a path first — a preview shows the event as it stands on one.',
+    run: (ctx) =>
+      ctx.actions.addEventPreview(
+        ctx.edge ? { type: 'edge', id: ctx.edge.id } : { type: 'node', id: ctx.node.id },
+      ),
   },
   {
     id: 'flow-all',

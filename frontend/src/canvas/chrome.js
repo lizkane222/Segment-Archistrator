@@ -252,6 +252,9 @@ const NO_CHROME = {
      fields at once (`nameRich` and the plain `name` derived from it), which is the shape every
      later edit has too. */
   updateData: null,
+  /* Opens the screenshot import for an identity resolution rule or its zone: `({type, id})`. Null where
+     there is nowhere to open it, which hides the button. */
+  importRules: null,
   onWaypoints: null,
   /* How a connector moves one of its own ends, and how it works out where a release would
      land -- see `onEndpointMove` and `endpointDropTarget` in canvas/Canvas.jsx. Null for the
@@ -282,3 +285,6 @@ export function useHandlesRevealed(nodeId) {
   const { handleReveal: reveal } = useChrome()
   return useSyncExternalStore(reveal.subscribe, () => reveal.revealed(nodeId))
 }
+
+/* Said by an editor on Cmd/Ctrl-K, heard by the text toolbar, which owns the address field. */
+export const LINK_SHORTCUT_EVENT = 'segment:link-shortcut'

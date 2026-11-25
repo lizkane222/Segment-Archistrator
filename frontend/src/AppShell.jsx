@@ -11,14 +11,19 @@
  * the provider.
  */
 
+import BrandTitle from './BrandTitle.jsx'
+import { looseEnds } from './canvas/edges/looseEnds.js'
+import { editTargets } from './inspector/multiEdit.js'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { ReactFlowProvider, useOnViewportChange, useReactFlow } from '@xyflow/react'
-import { KeyRound, LogOut, MessageSquarePlus, RefreshCw, TriangleAlert, Workflow } from 'lucide-react'
+import { CircleCheck, KeyRound, Presentation, LogOut, MessageSquarePlus, RefreshCw, TriangleAlert, Workflow } from 'lucide-react'
 
 import AccountMenu from './auth/AccountMenu.jsx'
-import Canvas from './canvas/Canvas.jsx'
+import Canvas, { planStraighten } from './canvas/Canvas.jsx'
+import { refocusSelection } from './canvas/refocus.js'
 import ConnectDialog from './auth/ConnectDialog.jsx'
+import AdminUsersDialog from './auth/AdminUsersDialog.jsx'
 import InviteDialog from './auth/InviteDialog.jsx'
 import ConsoleDrawer from './console/ConsoleDrawer.jsx'
 import ContextMenu from './commands/ContextMenu.jsx'
@@ -26,6 +31,7 @@ import DiagramBar from './diagram/DiagramBar.jsx'
 import ErrorBoundary from './ui/ErrorBoundary.jsx'
 import Inspector from './inspector/Inspector.jsx'
 import ProfilePreview from './inspector/ProfilePreview.jsx'
+import { BASE_URL } from './baseUrl.js'
 import NuancesDialog from './commands/NuancesDialog.jsx'
 import OpenDialog from './diagram/OpenDialog.jsx'
 import Palette from './palette/Palette.jsx'
@@ -43,6 +49,7 @@ import {
   clearPaletteFromNodes,
   paletteByKey,
 } from './canvas/palettes.js'
+import { canConvertTo, convertNode } from './canvas/convert.js'
 import { runCommand } from './commands/registry.js'
 import {
   insertColumn,
@@ -63,12 +70,16 @@ import {
 } from './commands/clipboard.js'
 import SplitView from './ui/SplitView.jsx'
 import TabStrip from './diagram/TabStrip.jsx'
-import { restoreTabs, useTabs } from './diagram/tabs.js'
+import { openedAgainName, templateInstanceName } from './diagram/naming.js'
+import TemplatizeDialog from './diagram/TemplatizeDialog.jsx'
+import { canMoveToGroup, forkTab, groupForSaved, restoreTabs, useTabs } from './diagram/tabs.js'
 import { readSession, writeSession } from './diagram/session.js'
 import { centreOf, toZoneLocal, zoneAtPosition } from './canvas/rules.js'
 import { internalBox, resolveReleasedHandles } from './canvas/handles.js'
 import { autoAlignNodes } from './canvas/autoAlign.js'
 import { growZones, toFlowEdge, toFlowNode, zoneSize } from './canvas/layout.js'
+import { cascadeEdges, cascadeNodes } from './canvas/zoneColour.js'
+import { payloadAtAnchor, previewCardData } from './simulation/eventCard.js'
 import { shiftSections } from './canvas/frames.js'
 import { orientAlong, reverseEdge, reversible, routeToReach } from './canvas/direction.js'
 import {
@@ -77,6 +88,7 @@ import {
   anyLocked,
   arrangeNodes,
   distributeNodes,
+  matchSizeTo,
   groupNodes,
   patched,
   setLocked,
@@ -101,8 +113,13 @@ import {
   tickDurations,
 } from './simulation/scenarios.js'
 import { createAnchorFocus } from './canvas/anchors.js'
-import { INSPECTOR_OPEN, NOTES_LANE_OPEN, PALETTE_OPEN } from './ui/preferences.js'
+import { ADMIN_MODE, INSPECTOR_OPEN, NOTES_LANE_OPEN, PALETTE_OPEN } from './ui/preferences.js'
 import SidebarToggle from './ui/SidebarToggle.jsx'
+import PresenterBar from './ui/PresenterBar.jsx'
+import IdentityImportDialog from './inspector/IdentityImportDialog.jsx'
+import { PRESENTER } from './ui/presenter.js'
+import { useCodeTrustVersion } from './functions/trust.js'
+import { safeHttpUrl } from './ui/safeUrl.js'
 import { choreograph } from './simulation/choreography.js'
 import { notesInView, notesSoFar } from './simulation/notes.js'
 import NotesLane from './simulation/NotesLane.jsx'
@@ -129,7 +146,7 @@ import {
 } from './auth/recover.js'
 import { useSessionKeepAlive } from './auth/useSessionKeepAlive.js'
 import { exportPdf, exportPng, waitForRender } from './diagram/exportImage.js'
-import { feedback as feedbackApi, meta, session as sessionApi } from './services/api.js'
+import { feedback as feedbackApi, meta, setWorkspaceScope, templates as templatesApi } from './services/api.js'
 
 /*
  * How fast the event travels along a connector, in flow pixels per second.
@@ -172,12 +189,13 @@ export function editTable(table, verb, cell) {
 }
 
 export default function AppShell({
-  workspace,
+  connections = [],
   onConnected,
-  onSignOut,
+  onDisconnect,
   onLogOut,
   onRefreshSession,
   signInNotice,
+  accountEmail = null,
 }) {
   const [topology, setTopology] = useState(null)
   const [topologyError, setTopologyError] = useState(null)
@@ -219,14 +237,60 @@ export default function AppShell({
    * See diagram/session.js for why this is needed at all (sign-in is a full-page navigation) and
    * for what a restored tab does and does not carry.
    */
+  const { required: accountRequired } = useSession()
   const restored = useRef(null)
   if (restored.current === null) {
     /* Ids made unique here rather than only inside `useTabs`, so the dirty seed below is keyed on
        the same ids the tabs end up with. See `restoreTabs`. */
-    const session = readSession()
+    /* Only this account's own workbench: browser storage is not per-account, so what is on disk
+       may belong to whoever used this machine before. */
+    /* Signed out in an app that requires sign-in: the modal is up over this, and what is stored is
+       kept untouched for whoever signs in -- see `ownerMayRead`. */
+    const session = readSession(undefined, {
+      owner: accountEmail ?? (accountRequired ? undefined : ''),
+    })
     restored.current = session ? { ...session, tabs: restoreTabs(session.tabs) } : false
   }
   const tabs = useTabs(restored.current?.tabs, restored.current || {})
+
+  /*
+   * Tab groups: each tab is about one workspace, and the workspace is looked up from the account's
+   * own connections. Signed in, a tab whose workspace is not among them is simply about none.
+   * Without an account (local development) a session holds one connection and every tab shares it.
+   */
+  const workspaceById = useMemo(
+    () => Object.fromEntries(connections.map((entry) => [entry.id, entry])),
+    [connections],
+  )
+  const soloWorkspace = accountEmail ? null : connections[0] ?? null
+  const workspaceOf = useCallback(
+    (tab) => soloWorkspace ?? (tab?.workspaceId ? workspaceById[tab.workspaceId] ?? null : null),
+    [soloWorkspace, workspaceById],
+  )
+  const workspace = workspaceOf(tabs.active)
+
+  /* Every request from here on is about this workspace. Set while rendering, before any pane's
+     effects run, so the request a switch triggers is sent under the new scope and not the last. */
+  setWorkspaceScope(soloWorkspace ? null : workspace?.id ?? 'none')
+
+  useEffect(() => {
+    if (accountEmail) tabs.pruneGroups(connections.map((entry) => entry.id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections, accountEmail, tabs.pruneGroups])
+
+  /* The schema cache is module-level and holds one workspace's event and trait names, so
+     switching groups must not show one workspace's names under another's tab. */
+  useEffect(() => {
+    clearSchemaCache()
+  }, [workspace?.id])
+
+  const workspaceNames = useMemo(
+    () =>
+      Object.fromEntries(
+        connections.map((entry) => [entry.id, { name: entry.name, slug: entry.slug }]),
+      ),
+    [connections],
+  )
 
   /* Read once for every tab, and only ever listed -- see hooks/useWorkspaceResources.js. */
   const resources = useWorkspaceResources(workspace)
@@ -332,6 +396,12 @@ export default function AppShell({
     [tabs.tabs],
   )
 
+  /* Whose workbench this is, remembered across a session lapsing under an open page: signed out
+     the shell stays mounted behind the sign-in modal, and what it writes must still carry the
+     owner it had, or the stored work would turn into nobody's and be handed to anyone. */
+  const ownerRef = useRef(restored.current?.owner || null)
+  if (accountEmail) ownerRef.current = accountEmail
+
   const saveSession = useCallback(() => {
     writeSession(
       {
@@ -339,10 +409,11 @@ export default function AppShell({
         activeId: tabs.activeId,
         split: tabs.split,
         orientation: tabs.orientation,
+        owner: ownerRef.current ?? '',
       },
       dirtyIds,
     )
-  }, [currentTabs, tabs.activeId, tabs.split, tabs.orientation, dirtyIds])
+  }, [currentTabs, tabs.activeId, tabs.split, tabs.orientation, dirtyIds, accountEmail])
 
   /* On the arrangement changing: open, close, fork, switch, split, save. Not per drag frame. */
   useEffect(() => {
@@ -406,6 +477,68 @@ export default function AppShell({
    * the render *after* the container does. A callback ref into state is the standard way to have the
    * child re-render once its target is available.
    */
+  /* Dragging a tab into another group. The live graph is asked for, not the stored one: a pane
+     hands its graph up only when it unmounts, so the stored copy of the tab in front of you is
+     stale. Returns the verdict so the pane that has a toast can say why not. */
+  const moveTab = useCallback(
+    (tabId, workspaceId, groupName = null) => {
+      const tab = tabs.tabs.find((entry) => entry.id === tabId)
+      if (!tab) return { ok: false, reason: 'That tab is gone.' }
+      let graph = tab.graph
+      try {
+        graph = liveGraphs.current.get(tabId)?.() ?? tab.graph
+      } catch {
+        /* A pane mid-teardown: its stored graph is the best there is. */
+      }
+      const verdict = canMoveToGroup(tab, graph, workspaceId)
+      if (verdict.ok) tabs.setGroup(tabId, workspaceId, groupName)
+      return verdict
+    },
+    [tabs.tabs, tabs.setGroup],
+  )
+
+  /* Copy a diagram into another workspace's group, as a new unsaved tab. The same rule as moving:
+     what has nothing bound from a workspace can go anywhere, and what has cannot be copied under
+     another workspace's requests. */
+  const duplicateTo = useCallback(
+    (tabId, workspaceId, groupName = null) => {
+      const tab = tabs.tabs.find((entry) => entry.id === tabId)
+      if (!tab) return { ok: false, reason: 'That tab is gone.' }
+      let graph = tab.graph
+      try {
+        graph = liveGraphs.current.get(tabId)?.() ?? tab.graph
+      } catch {
+        /* A pane mid-teardown: its stored graph is the best there is. */
+      }
+      const verdict = canMoveToGroup({ ...tab, workspaceId: tab.workspaceId }, graph, workspaceId)
+      if (!verdict.ok) return verdict
+      const copy = forkTab({ ...tab, graph })
+      tabs.open({ doc: copy.doc, graph: copy.graph, workspaceId, groupName })
+      return { ok: true }
+    },
+    [tabs.tabs, tabs.open],
+  )
+
+  /* A newly connected workspace takes the tab you were in when that tab was about nothing, and
+     otherwise gets a tab of its own -- the one you were in belongs to another workspace's group
+     and must not be quietly handed to this one. */
+  /* The workspace whose Workspace tab should be glowing, until someone clicks it. Held here rather
+     than in the pane: when connecting opens a tab of its own, the pane that raised the dialog is
+     not the one the reader ends up in. */
+  const [guideWorkspaceId, setGuideWorkspaceId] = useState(null)
+  const dismissGuide = useCallback(() => setGuideWorkspaceId(null), [])
+
+  const handleConnected = useCallback(
+    (next) => {
+      onConnected(next)
+      setGuideWorkspaceId(next.id)
+      const current = tabs.active
+      if (!current?.workspaceId) tabs.setGroup(current.id, next.id)
+      else if (current.workspaceId !== next.id) tabs.open({ workspaceId: next.id })
+    },
+    [onConnected, tabs.active, tabs.setGroup, tabs.open],
+  )
+
   const [topSlot, setTopSlot] = useState(null)
   const [leftSlot, setLeftSlot] = useState(null)
   const [rightSlot, setRightSlot] = useState(null)
@@ -429,11 +562,17 @@ export default function AppShell({
         {tabs.visible.map((tab, index) => (
           <ReactFlowProvider key={tab.id}>
             <Workbench
-              workspace={workspace}
+              workspace={workspaceOf(tab)}
               resources={resources}
               onVisualizeAll={visualizeAll}
-              onConnected={onConnected}
-              onSignOut={onSignOut}
+              onConnected={handleConnected}
+              guideWorkspaceTab={Boolean(workspaceOf(tab)) && workspaceOf(tab).id === guideWorkspaceId}
+              onGuideDone={dismissGuide}
+              onSignOut={() => onDisconnect?.(workspaceOf(tab)?.id)}
+              onMoveTab={moveTab}
+              onDuplicateTo={duplicateTo}
+              onSetGroup={(workspaceId) => tabs.setGroup(tab.id, workspaceId)}
+              accountEmail={accountEmail}
               onLogOut={onLogOut}
               onRefreshSession={onRefreshSession}
               /* Only the focused pane announces it, or a split view would raise the same
@@ -442,6 +581,14 @@ export default function AppShell({
               topology={topology}
               topologyError={topologyError}
               tab={tab}
+              allTabs={tabs.tabs}
+              onOpenInNewTab={(opening, entry) =>
+                tabs.open({
+                  opening,
+                  doc: { id: null, name: 'Opening…', description: '', sourceTemplate: '', updatedAt: null },
+                  ...groupForSaved(entry, connections, Boolean(accountEmail)),
+                })
+              }
               onCaptureTab={tabs.capture}
               onPublishLiveGraph={publishLiveGraph}
               /* Clicking anywhere in a pane makes it the one the tab strip is about. */
@@ -461,6 +608,11 @@ export default function AppShell({
                   ? (pane) => (
                       <TabStrip
                         tabs={tabs.tabs}
+                        workspaces={workspaceNames}
+                        onMoveTab={pane.onMoveTab}
+                        onDuplicateTo={pane.onDuplicateTo}
+                        onNewInGroup={(workspaceId, groupName) => tabs.open({ workspaceId, groupName })}
+                        onAddWorkspace={pane.onConnect}
                         activeId={tab.id}
                         dirtyIds={dirtyIds}
                         split={tabs.split}
@@ -519,7 +671,13 @@ function Workbench({
   resources,
   onVisualizeAll,
   onConnected,
+  guideWorkspaceTab = false,
+  onGuideDone,
   onSignOut,
+  onMoveTab,
+  onDuplicateTo,
+  onSetGroup,
+  accountEmail = null,
   onLogOut,
   onRefreshSession,
   signInNotice = null,
@@ -527,6 +685,8 @@ function Workbench({
   topologyError,
   tab = null,
   onCaptureTab,
+  allTabs,
+  onOpenInNewTab,
   onPublishLiveGraph,
   onFocusPane,
   onDirtyChange,
@@ -591,7 +751,63 @@ function Workbench({
      it pre-filled (a converted Lucid export), or null when it is closed. */
   const [mermaidOpen, setMermaidOpen] = useState(null)
   const [connectOpen, setConnectOpen] = useState(false)
+
+  /*
+   * Importing identity rules from a screenshot: `{type, id}` of the component or the zone it was started
+   * from. A zone means "the rule in this zone" -- the first one there, or a new one if there is none.
+   */
+  const [rulesImport, setRulesImport] = useState(null)
+  /* A component being carried to another zone -- see `reassigningId` in canvas/Canvas.jsx. */
+  const [reassignId, setReassignId] = useState(null)
+  const rulesTarget = useMemo(() => {
+    if (!rulesImport) return null
+    const all = graphState.nodes
+    if (rulesImport.type === 'node') {
+      const node = all.find((entry) => entry.id === rulesImport.id)
+      return node ? { node, name: node.data?.name ?? 'this rule', count: node.data?.rules?.length ?? 0 } : null
+    }
+    const zone = all.find((entry) => entry.id === rulesImport.id)
+    const inside = all.find(
+      (entry) =>
+        entry.type !== 'zone' &&
+        entry.data?.kind === 'identity_setting' &&
+        (entry.parentId === rulesImport.id || (zone && entry.data?.zone === zone.data?.id)),
+    )
+    return inside
+      ? { node: inside, zone, name: inside.data?.name ?? 'the rule in this zone', count: inside.data?.rules?.length ?? 0 }
+      : { node: null, zone, name: null, count: 0 }
+  }, [rulesImport, graphState.nodes])
+  const applyImportedRules = (rules) => {
+    if (!rulesTarget) return setRulesImport(null)
+    if (rulesTarget.node) {
+      updateNode(rulesTarget.node.id, { rules })
+    } else if (rulesTarget.zone) {
+      const zoneId = rulesTarget.zone.data?.id
+      const created = toFlowNode(
+        {
+          id: `manual:identity_setting:${crypto.randomUUID().slice(0, 8)}`,
+          kind: 'identity_setting',
+          zone: zoneId,
+          name: 'Identity Resolution Rule',
+          description: '',
+          bound: true,
+          bindable: false,
+          rules,
+        },
+        zoneId,
+        { x: 24, y: 64 },
+      )
+      setNodes((current) => growZones([...current, created]))
+    }
+    notify({ tone: 'success', message: `Imported ${rules.length} identity rule${rules.length === 1 ? '' : 's'} from the screenshot.` })
+    setRulesImport(null)
+  }
   const [inviteOpen, setInviteOpen] = useState(false)
+  const [usersOpen, setUsersOpen] = useState(false)
+  /* The graph being turned into a template, snapshotted when the dialog opens so what is chosen
+     from is what was on the canvas then, not whatever it becomes while the dialog is up. */
+  const [templatizing, setTemplatizing] = useState(null)
+  const [templatizeBusy, setTemplatizeBusy] = useState(false)
   /*
    * Whether the inspector is widened for the Code tab.
    *
@@ -606,6 +822,11 @@ function Workbench({
      threading it through Workbench alongside `workspace`, which is the pattern the four
      canvas contexts exist to avoid. */
   const sessionState = useSession()
+  /* Admin mode is a switch only an administrator is offered; the server re-checks every request it
+     leads to, so this is about what is drawn, not what is allowed. After `sessionState`, which it
+     reads. */
+  const adminPreference = useSyncExternalStore(ADMIN_MODE.subscribe, ADMIN_MODE.get)
+  const adminMode = Boolean(adminPreference && sessionState.account?.isAdmin)
   /* The file input backing "Import" everywhere it appears (DiagramBar, the Open
      dialog, the empty-canvas overlay) -- one hidden element, clicked by ref, rather
      than one per button. */
@@ -641,38 +862,33 @@ function Workbench({
   }, [signInNotice])
 
   /*
-   * Put back the workspace a reopened diagram is about.
+   * Move this tab into the group of the workspace a reopened diagram is about.
    *
-   * A saved diagram records the workspace its bound components came from, and the server
-   * says whether this account has a remembered connection for it. When it does and this
-   * session is holding nothing, reconnect quietly -- that is the whole of "come back days
-   * later and it still works". When something *else* is connected it is left alone: which
-   * workspace someone is looking at is their choice, and swapping it out from under them
-   * because they opened a file would be a surprise.
+   * A saved diagram records the workspace its bound components came from, and the server says
+   * whether this account holds a connection for it. When it does, the tab joins that group --
+   * which is what loads that workspace's token for it, server-side, on the next request. Nothing
+   * is swapped out from under any *other* tab: groups are independent, so opening a diagram about
+   * Globex while Acme tabs are open just puts this tab with Globex.
    */
   const reopened = docs.openedWorkspace
   useEffect(() => {
-    if (!reopened || reopened.connected || !reopened.remembered || workspace) return
-    let cancelled = false
-    sessionApi
-      .resume(reopened.id)
-      .then(() => {
-        if (cancelled) return
-        onRefreshSession?.()
-        notify({
-          tone: 'info',
-          message: `Reconnected to ${reopened.name || reopened.slug || 'the workspace'} — this diagram's components came from it.`,
-        })
-      })
-      .catch(() => {
-        /* Forgotten since, or the credential was revoked. The diagram still opened; the
-           Connect button is where to go next, and saying so here would be noise. */
-      })
-    return () => {
-      cancelled = true
-    }
+    if (!reopened || !(reopened.connected || reopened.remembered)) return
+    if (tab && (tab.workspaceId ?? null) === reopened.id) return
+    onSetGroup?.(reopened.id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reopened])
+
+  /* What a pane lists depends on which workspace it is in -- shared diagrams are per workspace --
+     so a change of group re-reads the list, under the new scope. Not on mount: the hook does that. */
+  const firstWorkspace = useRef(true)
+  useEffect(() => {
+    if (firstWorkspace.current) {
+      firstWorkspace.current = false
+      return
+    }
+    docs.refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.id])
 
   const [drawing, setDrawing] = useState(false)
   /* Culling has to be off while the canvas is captured -- see exportImage.js. */
@@ -788,11 +1004,41 @@ function Workbench({
    * and is styled alone: a panel headed with one component's name must not quietly repaint four others.
    * So this is only a multi-write when the inspected node is genuinely *part of* the selection.
    */
-  const styleTargets = useMemo(() => {
-    const selected = graphState.nodes.filter((node) => node.selected).map((node) => node.id)
-    if (!inspectedId) return selected
-    return selected.includes(inspectedId) && selected.length > 1 ? selected : [inspectedId]
-  }, [graphState.nodes, inspectedId])
+  const styleTargets = useMemo(
+    () => editTargets(graphState.nodes.filter((node) => node.selected).map((node) => node.id), inspectedId),
+    [graphState.nodes, inspectedId],
+  )
+
+  /* The same rule for connectors: when the inspected connector is one of several selected, the
+     panel's Style, Route and Ends controls write to all of them. `edgeGroup` is the edges themselves,
+     which the panel reads to show what they share and where they differ. */
+  const edgeTargets = useMemo(
+    () => editTargets(graphState.edges.filter((edge) => edge.selected).map((edge) => edge.id), inspectedId),
+    [graphState.edges, inspectedId],
+  )
+  const edgeGroup = useMemo(() => {
+    const wanted = new Set(edgeTargets)
+    return graphState.edges.filter((edge) => wanted.has(edge.id))
+  }, [graphState.edges, edgeTargets])
+
+  /*
+   * Recolouring a zone hands the colour down: the components in it stop wearing a border of their own, the
+   * zones in it take the new one, and the connectors leaving them stop wearing a colour of their own -- see
+   * canvas/zoneColour.js. Only when the *border* changed, so a size or an outline width does not undo
+   * anyone's styling.
+   */
+  const cascadeZoneColour = useCallback(
+    (ids, patch) => {
+      const border = patch?.style?.border ?? patch?.color
+      if (!border) return
+      const zones = (ids ?? []).filter((id) => graphState.nodes.find((node) => node.id === id)?.type === 'zone')
+      if (!zones.length) return
+      const snapshot = graphState.nodes
+      setNodes((current) => cascadeNodes(current, zones, border))
+      graphState.setEdges((current) => cascadeEdges(current, snapshot, zones))
+    },
+    [graphState],
+  )
 
   const updateNodes = useCallback(
     (ids, patch) => {
@@ -800,12 +1046,14 @@ function Workbench({
       if (wanted.size === 0) return
       /* The merge itself is `patched` in canvas/selection.js -- pure, and tested there. */
       setNodes((current) => current.map((node) => (wanted.has(node.id) ? patched(node, patch) : node)))
+      cascadeZoneColour([...wanted], patch)
     },
-    [setNodes],
+    [setNodes, cascadeZoneColour],
   )
 
   const updateNode = useCallback(
     (id, patch) => {
+      cascadeZoneColour([id], patch)
       setNodes((current) => {
         const before = current.find((node) => node.id === id)
         const next = current.map((node) =>
@@ -837,7 +1085,7 @@ function Workbench({
         return next
       })
     },
-    [setNodes],
+    [setNodes, cascadeZoneColour],
   )
 
   /* "Make every warehouse grey." Merges into each node's existing override rather
@@ -882,7 +1130,7 @@ function Workbench({
 
   const resetPalette = useCallback(() => {
     setNodes((current) => clearPaletteFromNodes(current))
-    notify({ tone: 'info', message: 'Components are back to their default colours.' })
+    notify({ tone: 'info', message: 'Components are back to their default colors.' })
   }, [setNodes, notify])
 
   /* --- the document ------------------------------------------------------- */
@@ -912,6 +1160,28 @@ function Workbench({
    */
   const view = useMemo(() => collapseGraph(nodes, edges, collapsed), [nodes, edges, collapsed])
   const groups = useMemo(() => groupsOf(nodes, topology), [nodes, topology])
+  /*
+   * Every component's zones, outermost first -- "Segment > Connections > Sources". Read off the live
+   * canvas (a zone node's label and its parent), so a renamed zone or a component dragged into another
+   * reads correctly, and custom zones are named as their author named them.
+   */
+  const zoneTrail = useMemo(() => {
+    const byId = new Map(nodes.map((node) => [node.id, node]))
+    const trail = new Map()
+    for (const node of nodes) {
+      if (node.type === 'zone') continue
+      const names = []
+      const seen = new Set()
+      let at = node.parentId ? byId.get(node.parentId) : null
+      while (at && at.type === 'zone' && !seen.has(at.id)) {
+        seen.add(at.id)
+        names.unshift(at.data?.label ?? at.data?.id ?? '')
+        at = at.parentId ? byId.get(at.parentId) : null
+      }
+      if (names.length) trail.set(node.id, names.filter(Boolean))
+    }
+    return trail
+  }, [nodes])
   const dirty = Boolean(docs.current.id) && docs.isDirty(currentGraph)
   /* Reported up so the tab strip can put a dot on this tab. Only a mounted pane can answer it --
      the comparison is against a fingerprint `useDiagrams` holds -- so the strip cannot compute it
@@ -969,14 +1239,21 @@ function Workbench({
    * has no playback fields in it at all (see RUNTIME_NODE_KEYS), so its fingerprint
    * is the thing that genuinely changes only when the architecture does.
    */
+  /* Event cards are notes about an event, not components it passes through: kept out of the graph the
+     walkthrough runs over, so drawing one neither starts a path nor changes a trace. */
+  const withoutCards = (list) => list.filter((node) => node.kind !== 'event')
+  const withoutCardEdges = (nodeList, edgeList) => {
+    const cards = new Set(nodeList.filter((node) => node.kind === 'event').map((node) => node.id))
+    return cards.size ? edgeList.filter((edge) => !cards.has(edge.source) && !cards.has(edge.target)) : edgeList
+  }
   const simFingerprint = useMemo(
-    () => graphFingerprint({ nodes: currentGraph.nodes, edges: currentGraph.edges }),
+    () => graphFingerprint({ nodes: withoutCards(currentGraph.nodes), edges: withoutCardEdges(currentGraph.nodes, currentGraph.edges) }),
     [currentGraph],
   )
   /* Keyed on the fingerprint, not on `currentGraph` -- that is the whole point, and
      the reason `currentGraph` is read here but deliberately not a dependency. */
   const simGraph = useMemo(
-    () => ({ nodes: currentGraph.nodes, edges: currentGraph.edges }),
+    () => ({ nodes: withoutCards(currentGraph.nodes), edges: withoutCardEdges(currentGraph.nodes, currentGraph.edges) }),
     [simFingerprint],
   )
 
@@ -984,7 +1261,13 @@ function Workbench({
     () => runnable(simGraph, scenarios.filter((scenario) => selectedPaths.includes(scenario.id))),
     [simGraph, scenarios, selectedPaths],
   )
-  const runs = useMemo(() => runScenarios(simGraph, activeScenarios), [simGraph, activeScenarios])
+  /* Approving someone else's function code changes what a run *does* without changing the
+     document, so it has to be a dependency of everything memoised over a run. */
+  const codeTrust = useCodeTrustVersion()
+  const runs = useMemo(
+    () => runScenarios(simGraph, activeScenarios),
+    [simGraph, activeScenarios, codeTrust],
+  )
 
   /*
    * How long the event should take to cross each connector, so it moves at one speed everywhere.
@@ -1041,7 +1324,7 @@ function Workbench({
     const scenario = scenarios.find((entry) => entry.id === editingPathId)
     if (!scenario) return null
     return runScenarios(simGraph, runnable(simGraph, [scenario]))[0] ?? null
-  }, [simGraph, scenarios, editingPathId])
+  }, [simGraph, scenarios, editingPathId, codeTrust])
   const playbackTotal = useMemo(() => playbackLength(runs, playMode), [runs, playMode])
   /* Memoised because `usePlayback` rebuilds its timing table on a new array identity, and this feeds
      the running animation. */
@@ -1099,6 +1382,38 @@ function Workbench({
      diagram having broken rather than as a walkthrough being ready. `reset` puts the
      tick back to -1, so this is also what makes the transport's stop button actually
      clear the canvas. */
+  /*
+   * What each event preview card shows: the payload its path holds at the place it is attached to.
+   *
+   * Every runnable path is run, not only the selected ones -- a card names *its* path, and should not
+   * go blank because a different one is being played. Only while a card exists, and keyed on the
+   * serialized graph like the runs above, so it costs nothing on a diagram without one.
+   */
+  const previewSignature = nodes
+    .filter((node) => node.data?.preview)
+    .map((node) => `${node.id}:${node.data.preview.scenarioId}:${node.data.preview.anchor?.type}:${node.data.preview.anchor?.id}`)
+    .join('|')
+  const previewRuns = useMemo(
+    () => (previewSignature ? runScenarios(simGraph, runnable(simGraph, scenarios)) : []),
+    [previewSignature, simGraph, scenarios, codeTrust],
+  )
+  useEffect(() => {
+    if (!previewSignature) return
+    setNodes((current) => {
+      let changed = false
+      const next = current.map((node) => {
+        const preview = node.data?.preview
+        if (!preview) return node
+        const run = previewRuns.find((entry) => entry.scenario.id === preview.scenarioId)
+        const payload = run ? payloadAtAnchor(run.trace, preview.anchor) : undefined
+        if (JSON.stringify(node.data.eventNow) === JSON.stringify(payload)) return node
+        changed = true
+        return { ...node, data: { ...node.data, eventNow: payload } }
+      })
+      return changed ? next : current
+    })
+  }, [previewRuns, previewSignature, setNodes])
+
   const liveFrame = runs.length > 0 && playback.tick >= 0 ? frame : null
   useEffect(() => {
     setNodes((current) => applyPathsToNodes(current, liveFrame))
@@ -1172,6 +1487,8 @@ function Workbench({
      `useState` so collapsing the palette sticks across a diagram-tab switch and a reload. */
   const paletteOpen = useSyncExternalStore(PALETTE_OPEN.subscribe, PALETTE_OPEN.get)
   const inspectorOpen = useSyncExternalStore(INSPECTOR_OPEN.subscribe, INSPECTOR_OPEN.get)
+  /* Presenter view: only the diagram, and the walkthrough's paths along the bottom. */
+  const presenting = useSyncExternalStore(PRESENTER.subscribe, PRESENTER.get)
 
   /*
    * The notes for the lane above the diagram.
@@ -1385,6 +1702,7 @@ function Workbench({
    * when it was *opened*, silently discarding everything drawn since. The ref is reassigned on every
    * render, which is free; the serialize happens once.
    */
+  const initialDoc = useRef(docs.current)
   const snapshot = useRef(null)
   snapshot.current = { nodes, edges, scenarios, collapsed, doc: docs.current }
 
@@ -1405,6 +1723,15 @@ function Workbench({
      * comes back. A tab that was *dirty* carries its graph and took the branch above; this path is
      * only ever the recoverable case.
      */
+    /* A tab made by Open, still empty: fill it from the template or diagram it was made for. */
+    if (tab.opening?.template) {
+      loadTemplate(tab.opening.template)
+      return undefined
+    }
+    if (tab.opening?.diagram) {
+      loadDiagram(tab.opening.diagram)
+      return undefined
+    }
     if (!tab.doc?.id) return undefined
     let cancelled = false
     docs
@@ -1442,7 +1769,9 @@ function Workbench({
           scenarios: held.scenarios,
           collapsed: held.collapsed,
         }),
-        doc: held.doc,
+        /* Not the blank document a pane starts with: unmounting before it adopted its own (what
+           StrictMode does on every mount in development) would hand that back as the tab's. */
+        ...(held.doc === initialDoc.current ? {} : { doc: held.doc }),
       })
     },
     /* Unmount only, for the same reason as above -- and `tab.id` is stable for the life of this
@@ -1494,15 +1823,53 @@ function Workbench({
    */
   /* `tab.id`, not `tab`: storing the document replaces the tab *object*, so depending on the
      object would re-run this on its own result -- which is a render loop, and was one. */
+  /* Not before the document has been adopted: the first render's `docs.current` is the blank one,
+     and capturing it would overwrite the tab's own document -- which the mount effect, running
+     again under StrictMode, then adopts back as blank. */
   useEffect(() => {
-    if (!tab) return
+    if (!tab || docs.current === initialDoc.current) return
     onCaptureTab?.(tab.id, { doc: docs.current })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab?.id, docs.current, onCaptureTab])
 
-  const openTemplate = async (key) => {
+  /* Every name a new instance has to be told apart from: the other open tabs' (this pane's own
+     document is about to be replaced) and everything already saved. */
+  const takenNames = () => [
+    ...(allTabs ?? []).filter((entry) => entry.id !== tab?.id).map((entry) => entry.doc?.name),
+    ...docs.saved.map((entry) => entry.name),
+  ]
+
+  /* Open never replaces the canvas in front of you: it starts a new tab, whose pane then loads the
+     template or diagram on mount (see the mount effect above). Without a tab host -- a Workbench
+     mounted on its own -- it loads in place, as it always did. */
+  const openTemplate = (key) => {
+    if (!onOpenInNewTab) return loadTemplate(key)
+    setDialogOpen(false)
+    onOpenInNewTab({ template: key })
+  }
+
+  const openDiagram = (id) => {
+    if (!onOpenInNewTab) return loadDiagram(id)
+    setDialogOpen(false)
+    onOpenInNewTab({ diagram: id }, docs.saved.find((entry) => entry.id === id))
+  }
+
+  /* Every diagram of a group, each in a tab of its own in that group. One already open is left
+     alone: opening it again would make a detached copy, which is not what clicking a group means. */
+  const openGroup = (entries) => {
+    if (!onOpenInNewTab) return
+    setDialogOpen(false)
+    const open = new Set((allTabs ?? []).map((entry) => entry.doc?.id).filter(Boolean))
+    for (const entry of entries) {
+      if (!open.has(entry.id)) onOpenInNewTab({ diagram: entry.id }, entry)
+    }
+  }
+
+  const loadTemplate = async (key) => {
     try {
-      const graph = await docs.openTemplate(key)
+      const graph = await docs.openTemplate(key, {
+        nameFor: (name) => templateInstanceName(name, takenNames()),
+      })
       const layout = applyGraph(graph)
       setDialogOpen(false)
       const unbound = countPlaceholders(layout.nodes)
@@ -1517,9 +1884,12 @@ function Workbench({
     }
   }
 
-  const openDiagram = async (id) => {
+  const loadDiagram = async (id) => {
     try {
-      applyGraph(await docs.openDiagram(id))
+      const heldElsewhere = (allTabs ?? []).some((entry) => entry.id !== tab?.id && entry.doc?.id === id)
+      applyGraph(
+        await docs.openDiagram(id, heldElsewhere ? { copyAs: (name) => openedAgainName(name, takenNames()) } : {}),
+      )
       setDialogOpen(false)
     } catch (err) {
       notify({ tone: 'error', message: err.message })
@@ -1536,6 +1906,12 @@ function Workbench({
   }
 
   const triggerImport = () => importInputRef.current?.click()
+
+  /* The same dialog the Mermaid button in the document bar opens, on its Import tab. */
+  const openMermaidImport = () => {
+    setDialogOpen(false)
+    setMermaidOpen('import')
+  }
 
   /* The backup path for a diagram whose workspace scope became unreachable -- an
      anonymous session's cookie lost across a restart, with no other way back to it.
@@ -1602,6 +1978,35 @@ function Workbench({
     notify({ tone: unbound || parsed.warnings.length ? 'info' : 'success', message: `${how} ${extra.join(' ')}` })
   }
 
+  const saveTemplate = async (input) => {
+    setTemplatizeBusy(true)
+    try {
+      const saved = await templatesApi.create(input)
+      setTemplatizing(null)
+      docs.refresh()
+      notify({
+        tone: 'success',
+        message: saved.locked_workspace_id
+          ? `Saved “${saved.name}”. It still carries this workspace's data, so only people with it connected can use it.`
+          : `Saved “${saved.name}”. Any workspace can start from it.`,
+      })
+    } catch (err) {
+      notify({ tone: 'error', message: err.message })
+    } finally {
+      setTemplatizeBusy(false)
+    }
+  }
+
+  const removeTemplate = async (key) => {
+    try {
+      await templatesApi.remove(key)
+      docs.refresh()
+      notify({ tone: 'info', message: 'Template deleted.' })
+    } catch (err) {
+      notify({ tone: 'error', message: err.message })
+    }
+  }
+
   const exportDiagramFile = () => {
     try {
       downloadDiagramFile(docs.current, saveGraph())
@@ -1651,10 +2056,14 @@ function Workbench({
    * See auth/recover.js for why the recovery is "get a session, retry, then copy", and why
    * the copy is announced rather than made quietly.
    */
+  /* The group this tab sits in, by the name the strip shows for it -- recorded with a saved diagram
+     so Open can list it under that group and reopen the group together. */
+  const groupLabel = tab?.groupName || workspace?.name || ''
+
   const save = async () => {
     const graph = saveGraph()
     try {
-      const result = await docs.save(graph)
+      const result = await docs.save(graph, { groupName: groupLabel })
       notify({ tone: 'success', message: `Saved “${result.name}”.` })
       logAdvisories(result)
     } catch (err) {
@@ -1666,7 +2075,7 @@ function Workbench({
   const saveAs = async (name) => {
     const graph = saveGraph()
     try {
-      const result = await docs.saveAs(name, graph)
+      const result = await docs.saveAs(name, graph, { groupName: groupLabel })
       notify({ tone: 'success', message: `Saved a copy as “${result.name}”.` })
       logAdvisories(result)
     } catch (err) {
@@ -1695,8 +2104,8 @@ function Workbench({
       try {
         const result =
           step === 'retry'
-            ? await docs.save(graph)
-            : await docs.saveAs(name ?? docs.current.name, graph)
+            ? await docs.save(graph, { groupName: groupLabel })
+            : await docs.saveAs(name ?? docs.current.name, graph, { groupName: groupLabel })
         notify({
           tone: step === 'retry' ? 'success' : 'info',
           message: recoveryMessage({
@@ -1918,7 +2327,10 @@ function Workbench({
    * subtly different path that a later edit could make matter.
    */
   const transformNodes = useCallback(
-    (transform) => setNodes((current) => growZones(transform(current))),
+    (transform) => {
+      setNodes((current) => growZones(transform(current)))
+      refocusSelection()
+    },
     [setNodes],
   )
 
@@ -1952,11 +2364,78 @@ function Workbench({
     [setEdges, notify],
   )
 
+  /*
+   * Converting a component, in three steps: start (menu), preview (click tiles, as many as you like),
+   * confirm or cancel.
+   *
+   * Every preview is built from the *original* node, not from the previous preview, so clicking
+   * through options never compounds, and cancelling is exact. The undo stack is held for the duration
+   * (`history.pause`), so the whole exploration is one step if confirmed and none if not.
+   */
+  const [converting, setConverting] = useState(null) // { id, original, pending: label | null }
+
+  const endConvert = useCallback(
+    (restore) => {
+      setConverting((current) => {
+        if (current && restore) {
+          setNodes((nodes) => nodes.map((node) => (node.id === current.id ? current.original : node)))
+        }
+        return null
+      })
+      history.resume()
+    },
+    [setNodes, history.resume],
+  )
+
+  const startConvert = useCallback(
+    (node) => {
+      const live = getNodes().find((entry) => entry.id === node?.id)
+      if (!live) return
+      /* A second Convert while one is open: put the first back before starting the next. */
+      if (converting) endConvert(true)
+      history.pause()
+      setConverting({ id: live.id, original: converting?.id === live.id ? converting.original : live, pending: null })
+      PALETTE_OPEN.set(true)
+    },
+    [getNodes, converting, endConvert, history.pause],
+  )
+
+  const pickConversion = useCallback(
+    (payload, label) => {
+      if (!converting || !canConvertTo(payload)) return
+      const next = convertNode(converting.original, payload)
+      setNodes((nodes) => nodes.map((node) => (node.id === converting.id ? { ...next, selected: node.selected } : node)))
+      setConverting((current) => (current ? { ...current, pending: label } : current))
+    },
+    [converting, setNodes],
+  )
+
+  const confirmConvert = useCallback(() => {
+    if (!converting?.pending) return
+    const name = converting.original.data?.name ?? 'Component'
+    endConvert(false)
+    notify({ tone: 'success', message: `Converted “${name}” to ${converting.pending}.` })
+  }, [converting, endConvert, notify])
+
+  /* Escape cancels, and so does the component vanishing (deleted, or another document opened). */
+  useEffect(() => {
+    if (!converting) return undefined
+    const onKey = (event) => event.key === 'Escape' && endConvert(true)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [converting, endConvert])
+  useEffect(() => {
+    if (converting && !graphState.nodes.some((node) => node.id === converting.id)) endConvert(false)
+  }, [converting, graphState.nodes, endConvert])
+
   const actions = useMemo(
     () => ({
+      convert: startConvert,
       inspect: (node) => setInspectedId(node?.id ?? null),
       arrange: (ids, move) => transformNodes((current) => arrangeNodes(current, ids, move)),
       align: (ids, alignment) => transformNodes((current) => alignNodes(current, ids, alignment)),
+      matchSize: (ids, modelId, dimension) =>
+        transformNodes((current) => matchSizeTo(current, ids, modelId, dimension)),
       distribute: (ids, axis) => transformNodes((current) => distributeNodes(current, ids, axis)),
       /* Runs over the whole diagram rather than `ids` -- the command has no selection to
          hand back, on purpose, since "tidy this up" is not a per-selection request. */
@@ -2001,12 +2480,15 @@ function Workbench({
       /* The Edge Style tab's write path -- colour, dash pattern, either arrow. One merge
          rather than one setter per field, since the tab patches whichever of the four the
          user just touched and the other three have to survive it untouched. */
-      edgeStyle: (edgeId, patch) =>
+      edgeStyle: (edgeIds, patch) => {
+        /* One id or several: the panel writes to every selected connector at once. */
+        const wanted = new Set([].concat(edgeIds))
         setEdges((current) =>
           current.map((edge) =>
-            edge.id === edgeId ? { ...edge, data: { ...edge.data, ...patch } } : edge,
+            wanted.has(edge.id) ? { ...edge, data: { ...edge.data, ...patch } } : edge,
           ),
-        ),
+        )
+      },
       /*
        * Which side of each component a connector meets, set from the panel rather than by
        * dragging its end.
@@ -2021,10 +2503,14 @@ function Workbench({
        * component. The measured geometry that needs lives in the flow store, which is why this
        * action reads `getInternalNode` rather than being a pure patch.
        */
-      edgeEnds: (edgeId, { handle, anchor }) =>
+      edgeEnds: (edgeIds, { handle, anchor }) => {
+        const wanted = new Set([].concat(edgeIds))
+        /* Which end the patch is about, so a connector whose *other* end is the loose one is not
+           handed a side for an end it does not have. `endpointSidePatch` names exactly one. */
+        const end = 'sourceHandle' in (handle ?? {}) ? 'source' : 'target'
         setEdges((current) =>
           current.map((edge) =>
-            edge.id === edgeId
+            wanted.has(edge.id) && !looseEnds(edge)[end]
               ? {
                   ...edge,
                   ...resolveReleasedHandles(edge, handle, (id) =>
@@ -2034,7 +2520,8 @@ function Workbench({
                 }
               : edge,
           ),
-        ),
+        )
+      },
       /* `[]` clears rather than stores an empty array -- see the same reasoning in Canvas's
          `onWaypoints`: an edge with no bends must serialize like one that never had any. */
       route: (edgeId, waypoints) =>
@@ -2047,6 +2534,56 @@ function Workbench({
                 }
               : edge,
           ),
+        ),
+      /*
+       * Put an event card at a component or a connector, showing the event as it stands there on a path.
+       * Which path: the first one being played, else the first there is. Nothing to preview without one.
+       */
+      addEventPreview: (anchor) => {
+        if (!scenarios.length) {
+          notify({ tone: 'info', message: 'Add a path first — an event preview shows the event as it stands on one.' })
+          return
+        }
+        const scenario = scenarios.find((entry) => selectedPaths.includes(entry.id)) ?? scenarios[0]
+        const all = getNodes()
+        const nameOf = (id) => all.find((entry) => entry.id === id)?.data?.name ?? 'a component'
+        let name
+        let at
+        if (anchor.type === 'edge') {
+          const edge = edges.find((entry) => entry.id === anchor.id)
+          const from = all.find((entry) => entry.id === edge?.source)
+          const to = all.find((entry) => entry.id === edge?.target)
+          if (!from || !to) return
+          const a = centreOf(from, all)
+          const b = centreOf(to, all)
+          at = { x: (a.x + b.x) / 2 - 120, y: (a.y + b.y) / 2 - 90 }
+          name = `Event: ${nameOf(edge.source)} → ${nameOf(edge.target)}`
+        } else {
+          const target = all.find((entry) => entry.id === anchor.id)
+          if (!target) return
+          const c = centreOf(target, all)
+          at = { x: c.x + 130, y: c.y - 40 }
+          name = `Event at ${nameOf(anchor.id)}`
+        }
+        const id = `manual:event:${crypto.randomUUID().slice(0, 8)}`
+        const card = toFlowNode({ id, zone: null, ...previewCardData({ scenarioId: scenario.id, anchor }) , name }, null, at)
+        setNodes((current) => [...current, card])
+        setInspectedId(id)
+        notify({ tone: 'info', message: 'Event preview added. Open its Event tab and switch on the fields to show.' })
+      },
+      /* Pick a component up so it can be put down in another zone. */
+      reassignZone: (id) => setReassignId(id),
+      /* Straighten: the cleanest right-angle route between zones, or no bends when the default is it. */
+      straighten: (edgeId) =>
+        setEdges((current) =>
+          current.map((edge) => {
+            if (edge.id !== edgeId) return edge
+            const waypoints = planStraighten(edge, getNodes?.() ?? [], getInternalNode)
+            return {
+              ...edge,
+              data: { ...edge.data, waypoints: waypoints.length ? waypoints : undefined, routed: undefined },
+            }
+          }),
         ),
       /* Defined above, because "Add to path" reaches for it too. */
       reverseEdges,
@@ -2218,8 +2755,12 @@ function Workbench({
          and `window.open` returns null under `noopener` by spec, meaning a blocked open
          and a successful one are indistinguishable and cannot be reported. */
       openUrl: (url) => {
+        /* Only http(s). The URL can come out of a diagram somebody shared, and `javascript:` in a
+           link click runs as this page. */
+        const safe = safeHttpUrl(url)
+        if (!safe) return
         const link = document.createElement('a')
-        link.href = url
+        link.href = safe
         link.target = '_blank'
         link.rel = 'noopener noreferrer'
         /* In the document for the duration of the click. A detached anchor's `click()` opens
@@ -2253,6 +2794,7 @@ function Workbench({
       redo: history.redo,
     }),
     [
+      startConvert,
       copy,
       cut,
       paste,
@@ -2269,6 +2811,9 @@ function Workbench({
       getNodes,
       getInternalNode,
       reverseEdges,
+      edges,
+      selectedPaths,
+      setNodes,
       /* `includeInPath` reads the paths and the document to work out *why* something is off a
          path, and re-simulates the one path it was asked about. */
       scenarios,
@@ -2351,7 +2896,8 @@ function Workbench({
    * portalled somewhere else -- a second Inspector would mount a second copy of every per-kind
    * branch against the same node and race the first one's edits.
    */
-  const chrome = (slot, content) => {
+  const chrome = (slot, content, { hidden = false } = {}) => {
+    if (hidden) return null
     switch (chromePlacement({ chromeOwner, slots, slot })) {
       case 'inline':
         return content
@@ -2371,10 +2917,15 @@ function Workbench({
         slots?.top,
         <>
         <header className="flex shrink-0 items-center justify-between border-b border-twilio-gray-20 bg-white px-4 py-3">
-          <div className="flex items-baseline gap-3">
-            <span className="text-sm font-semibold text-twilio-navy">
-              Segment Archistrator
-            </span>
+          <div className="flex items-center gap-3">
+            {/* `BASE_URL` is `/` in dev and `/static/` in the build Django serves. */}
+            <img
+              src={`${BASE_URL}archistrator-a-96.png`}
+              alt=""
+              aria-hidden="true"
+              className="h-7 w-7"
+            />
+            <BrandTitle />
             {workspace ? (
               <span className="text-xs text-twilio-gray-60">
                 {workspace.name}
@@ -2390,6 +2941,13 @@ function Workbench({
           <div className="flex items-center gap-2">
             {workspace ? (
               <>
+                <span
+                  className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs font-medium text-twilio-navy"
+                  title={`${workspace.name || workspace.slug} is connected for this group of tabs.`}
+                >
+                  <CircleCheck size={13} className="text-twilio-success" aria-hidden="true" />
+                  Workspace connected
+                </span>
                 <button
                   type="button"
                   onClick={() => loadWorkspace({ refresh: resources?.status === 'ready' })}
@@ -2434,6 +2992,16 @@ function Workbench({
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={() => PRESENTER.set(true)}
+              title="Presenter view: just the diagram and its paths, with the panels folded away"
+              className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
+            >
+              <Presentation size={13} aria-hidden="true" />
+              Present
+            </button>
+
             {/* Reporting a problem.
                 Icon-only: it has to be reachable from anywhere without competing with the two
                 controls beside it, which are what someone actually came to the header for.
@@ -2457,6 +3025,9 @@ function Workbench({
                 separator floating at the end of the header would be the giveaway. */}
             <AccountMenu
               state={sessionState}
+              adminMode={adminMode}
+              onToggleAdmin={() => ADMIN_MODE.set(!adminMode)}
+              onManageUsers={() => setUsersOpen(true)}
               onInvite={() => setInviteOpen(true)}
               onLogOut={() => {
                 /* Everything, not one workspace: logging out means the next person at this
@@ -2470,7 +3041,18 @@ function Workbench({
         </header>
 
         <DiagramBar
-          tabStrip={tabStrip?.({ onRename: docs.rename })}
+          tabStrip={tabStrip?.({
+            onRename: docs.rename,
+            onConnect: () => setConnectOpen(true),
+            onDuplicateTo: (tabId, workspaceId, groupName) => {
+              const verdict = onDuplicateTo?.(tabId, workspaceId, groupName)
+              if (verdict && !verdict.ok) notify({ tone: 'info', message: verdict.reason })
+            },
+            onMoveTab: (tabId, workspaceId, groupName) => {
+              const verdict = onMoveTab?.(tabId, workspaceId, groupName)
+              if (verdict && !verdict.ok) notify({ tone: 'info', message: verdict.reason })
+            },
+          })}
           doc={docs.current}
           dirty={dirty}
           busy={docs.busy}
@@ -2484,6 +3066,7 @@ function Workbench({
           onExport={exportDiagram}
           onExportFile={exportDiagramFile}
           onExportMermaid={() => setMermaidOpen('export')}
+          onSaveTemplate={() => setTemplatizing(saveGraph())}
           onImportFile={triggerImport}
           onFocusPlaceholder={focusPlaceholder}
           onApplyPalette={applyPalette}
@@ -2500,6 +3083,7 @@ function Workbench({
           onChange={importDiagramFile}
         />
         </>,
+        { hidden: presenting },
       )}
 
       <div className="relative flex min-h-0 flex-1">
@@ -2556,7 +3140,20 @@ function Workbench({
                   onRetryWorkspace={() => loadWorkspace()}
                   onVisualizeAll={onVisualizeAll}
                   onConnect={() => setConnectOpen(true)}
+                  guideWorkspaceTab={guideWorkspaceTab}
+                  onGuideDone={onGuideDone}
                   onStartSimulation={startSimulation}
+                  convert={
+                    converting
+                      ? {
+                          name: converting.original.data?.name ?? 'component',
+                          pending: converting.pending,
+                          onPick: pickConversion,
+                          onConfirm: confirmConvert,
+                          onCancel: () => endConvert(true),
+                        }
+                      : null
+                  }
                 />
                 </div>
               </>
@@ -2657,6 +3254,9 @@ function Workbench({
                    `style.fontSize`, `style.textAlign` and the rest. The same function the
                    inspector's fields call, so all of it is one undo stack. */
                 onUpdateData={updateNode}
+                onImportRules={setRulesImport}
+                reassigningId={reassignId}
+                onReassignEnd={() => setReassignId(null)}
                 /* Whether the Unbound flags mean anything yet -- see canvas/chrome.js. */
                 connected={Boolean(workspace)}
                 /* So an untouched component and an untouched zone can tell they are being left out
@@ -2688,12 +3288,21 @@ function Workbench({
                   onOpen={() => setDialogOpen(true)}
                   onStartBlank={startBlank}
                   onImportFile={triggerImport}
+                  onImportMermaid={openMermaidImport}
                 />
               )}
             </>
           )}
           </div>
 
+          {rulesImport && (
+            <IdentityImportDialog
+              targetName={rulesTarget?.name ?? 'a new Identity Resolution Rule'}
+              existingCount={rulesTarget?.count ?? 0}
+              onClose={() => setRulesImport(null)}
+              onApply={applyImportedRules}
+            />
+          )}
           {connectOpen && (
             <ConnectDialog
               email={sessionState.account?.email}
@@ -2702,6 +3311,20 @@ function Workbench({
             />
           )}
           {inviteOpen && <InviteDialog onClose={() => setInviteOpen(false)} />}
+          {usersOpen && adminMode && (
+            <AdminUsersDialog selfEmail={sessionState.account?.email} onClose={() => setUsersOpen(false)} />
+          )}
+          {templatizing && (
+            <TemplatizeDialog
+              graph={templatizing}
+              topology={topology}
+              initialName={docs.current.name}
+              workspace={workspace}
+              busy={templatizeBusy}
+              onClose={() => setTemplatizing(null)}
+              onSave={saveTemplate}
+            />
+          )}
           {dialogOpen && (
             <OpenDialog
               templates={docs.templates}
@@ -2710,10 +3333,18 @@ function Workbench({
               error={docs.listError}
               busy={docs.busy}
               currentId={docs.current.id}
+              workspaceId={workspace?.id ?? null}
+              onDeleteTemplate={removeTemplate}
               onOpenTemplate={openTemplate}
               onOpenDiagram={openDiagram}
+              onOpenGroup={openGroup}
               onStartBlank={startBlank}
               onImportFile={triggerImport}
+              onImportMermaid={openMermaidImport}
+              adminMode={adminMode}
+              currentName={docs.current.name}
+              getCurrentGraph={saveGraph}
+              onTemplatesChanged={docs.refresh}
               onDelete={removeDiagram}
               onClose={() => setDialogOpen(false)}
             />
@@ -2749,12 +3380,16 @@ function Workbench({
 
           {/* Inside `main`, so it is positioned against the canvas and clears the
               minimap -- not against the window, where the inspector would cover it. */}
-          <ConsoleDrawer
-            entries={log.entries}
-            unread={log.unread}
-            onOpen={log.markRead}
-            onClear={log.clear}
-          />
+          {presenting ? (
+            <PresenterBar />
+          ) : (
+            <ConsoleDrawer
+              entries={log.entries}
+              unread={log.unread}
+              onOpen={log.markRead}
+              onClear={log.clear}
+            />
+          )}
         </main>
 
         {chrome(
@@ -2798,6 +3433,7 @@ function Workbench({
                 wide={inspectorWide}
                 onWide={setInspectorWide}
                 onConnect={() => setConnectOpen(true)}
+                onStartSimulation={startSimulation}
                 onUpdateNode={updateNode}
                 /* Style writes fan out to the whole selection; everything else on the panel is about
                    one component and keeps using `onUpdateNode`. */
@@ -2805,6 +3441,10 @@ function Workbench({
                 styleTargetCount={styleTargets.length}
                 onUpdateKind={updateKindStyle}
                 onUpdateEdge={actions.edgeStyle}
+                /* Every selected connector the inspected one belongs to, so the Edge Style tab can
+                   write to all of them and show where they differ. */
+                edgeTargets={edgeTargets}
+                edgeGroup={edgeGroup}
                 /* The two that are not `data` writes: which side each end meets, and which way
                    the connector points. Both already exist as actions -- the panel is being
                    given the same operations the right-click menu has, because the panel is
@@ -2859,6 +3499,10 @@ function Workbench({
              the whole canvas -- and keep doing so when it is not selected for playback. */
           editingRun={editingRun}
           getDiagnostics={getDiagnostics}
+          /* For the Start at picker: where each component sits, and the store that lights one on the canvas
+             while the pointer is on it in the list. */
+          zoneTrail={zoneTrail}
+          highlight={flash}
         />
       )}
 
@@ -2886,7 +3530,7 @@ const components = (count) => `${count} component${count === 1 ? '' : 's'}`
 /* The canvas is mounted with its zone backdrops and no components, so this sits
    on top rather than replacing it -- dragging from the palette works before any
    fetch, which is how you draw an architecture with no token at all. */
-function EmptyOverlay({ workspaceReason, canVisualize, onLoad, onOpen, onStartBlank, onImportFile }) {
+function EmptyOverlay({ workspaceReason, canVisualize, onLoad, onOpen, onStartBlank, onImportFile, onImportMermaid }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
       <div className="pointer-events-auto max-w-sm rounded-lg border border-twilio-gray-20 bg-white/95 p-5 text-center shadow-sm">
@@ -2928,6 +3572,14 @@ function EmptyOverlay({ workspaceReason, canVisualize, onLoad, onOpen, onStartBl
             className="rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
           >
             Import a diagram file
+          </button>
+          <button
+            type="button"
+            onClick={onImportMermaid}
+            title="Paste or drop Mermaid text -- a flowchart or a sequence diagram -- to draw it as a new diagram"
+            className="rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
+          >
+            Import Mermaid diagram
           </button>
         </div>
         {workspaceReason && (

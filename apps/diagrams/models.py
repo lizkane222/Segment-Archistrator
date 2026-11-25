@@ -16,12 +16,55 @@ from django.db import models
 
 # Anything matching these keys is stripped before a graph is persisted. A client
 # bug should not be able to bake a live credential into stored JSON.
+#
+# Substring matches, so they are written to be specific: `auth` alone would also eat
+# `author`, which is why the short, ambiguous names live in the exact-match set below.
 SECRET_KEY_PATTERN = re.compile(
-    r"(write[_-]?key|writeKey|api[_-]?key|token|secret|password|credential)",
+    r"(write[_-]?key|writeKey|api[_-]?key|token|secret|passw(or)?d|passphrase|credential"
+    r"|private[_-]?key|access[_-]?key|authorization|bearer|cookie|connection[_-]?string)",
     re.IGNORECASE,
 )
+# Whole-key matches: names that are credentials only when they are the entire key.
+SECRET_EXACT_KEYS = frozenset({"auth", "pwd", "pass", "dsn", "jwt", "sig"})
 # The masked field the frontend is allowed to keep.
 ALLOWED_MASKED_KEYS = {"writeKeyMasked", "writeKeyLast4"}
+
+# Keys whose value is rendered as a link or an image. Only an http(s) URL may be stored
+# under them: a `javascript:` value in a diagram shared with a workspace is script that
+# runs in the origin of whoever clicks it.
+URL_KEY_PATTERN = re.compile(r"(^|[a-z])(url|href)$", re.IGNORECASE)
+SAFE_URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
+# `scheme://user:password@host` -- a connection string pasted into a field with an innocent
+# name. The userinfo is dropped; the host and path are what a diagram wants to show.
+URL_USERINFO_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]*:[^/\s@]*@")
+
+# Deeper than any diagram a person draws. Bounds the recursion below, so a hostile body of
+# nested arrays is a 400 rather than a RecursionError and a 500.
+MAX_GRAPH_DEPTH = 64
+
+
+def is_secret_key(key) -> bool:
+    key = str(key)
+    return key.lower() in SECRET_EXACT_KEYS or bool(SECRET_KEY_PATTERN.search(key))
+
+
+def graph_depth(value) -> int:
+    """Nesting depth of a JSON value, walked iteratively so it cannot itself overflow."""
+    deepest = 0
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        deepest = max(deepest, depth)
+        if deepest > MAX_GRAPH_DEPTH:
+            return deepest
+        stack.extend((child, depth + 1) for child in children)
+    return deepest
 
 
 def sanitize_graph(graph):
@@ -29,7 +72,8 @@ def sanitize_graph(graph):
     Recursively drop secret-shaped keys from a graph document.
 
     Keeps the explicitly masked fields, since those are the intended display
-    values and contain no usable secret.
+    values and contain no usable secret. Also drops a link/image URL that is not
+    http(s), and strips credentials embedded in a URL's userinfo.
     """
     if isinstance(graph, dict):
         cleaned = {}
@@ -37,12 +81,22 @@ def sanitize_graph(graph):
             if key in ALLOWED_MASKED_KEYS:
                 cleaned[key] = value
                 continue
-            if SECRET_KEY_PATTERN.search(key):
+            if is_secret_key(key):
+                continue
+            if (
+                isinstance(key, str)
+                and URL_KEY_PATTERN.search(key)
+                and isinstance(value, str)
+                and value.strip()
+                and not SAFE_URL_PATTERN.match(value.strip())
+            ):
                 continue
             cleaned[key] = sanitize_graph(value)
         return cleaned
     if isinstance(graph, list):
         return [sanitize_graph(item) for item in graph]
+    if isinstance(graph, str) and "://" in graph:
+        return URL_USERINFO_PATTERN.sub(r"\1", graph)
     return graph
 
 
@@ -78,28 +132,117 @@ def has_bound_nodes(graph: dict) -> bool:
     return False
 
 
+# What marks a component as being *this workspace's own*: its resource id, its link into the
+# workspace, and the masked write key. A template still carrying any of them describes one
+# workspace and may only be used by people who hold it -- see `Template.locked_workspace_id`.
+# Mirrors IDENTITY_KEYS in frontend/src/diagram/templatize.js.
+WORKSPACE_IDENTITY_KEYS = (
+    "segmentId",
+    "sourceId",
+    "destinationId",
+    "spaceId",
+    "workspaceUrl",
+    "previewWebhookUrl",
+    "writeKeyMasked",
+    "writeKeyLast4",
+)
+
+
+def carries_workspace_identity(graph) -> bool:
+    for node in (graph or {}).get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        fields = {**node, **(node.get("data") or {})}
+        if any(fields.get(key) for key in WORKSPACE_IDENTITY_KEYS):
+            return True
+    return False
+
+
+class TemplateQuerySet(models.QuerySet):
+    def visible_to(self, principal):
+        """
+        The authorization boundary for templates, as `DiagramQuerySet.visible_to` is for diagrams.
+
+        Four ways to see one, and the last is a restriction on the middle two rather than a
+        route in:
+
+          1. It is built in.
+          2. You made it.
+          3. Its author shared it with everyone at the company.
+          4. ...but a template that still carries one workspace's data is shown only to
+             someone who holds that workspace (its author always can, to manage it).
+        """
+        # A built-in an administrator has withdrawn is not offered to anyone -- see `Template.published`.
+        builtin = models.Q(is_builtin=True, published=True)
+        if principal is None:
+            return self.filter(builtin)
+
+        account_id = getattr(principal, "account_id", None)
+        workspaces = set(getattr(principal, "connected_workspace_ids", None) or [])
+        if account_id:
+            from apps.auth_workspace.models import RememberedConnection
+
+            workspaces |= set(
+                RememberedConnection.objects.filter(account_id=account_id).values_list(
+                    "workspace_id", flat=True
+                )
+            )
+
+        shared = models.Q(shared_with_company=True) & (
+            models.Q(locked_workspace_id="") | models.Q(locked_workspace_id__in=workspaces)
+        )
+        mine = models.Q(owner_id=account_id) if account_id else models.Q(pk__in=[])
+        return self.filter(builtin | mine | shared)
+
+
 class Template(models.Model):
     """
-    A reference architecture. v1 ships builtin templates only, seeded from
-    fixtures; user-authored templates are v2.
+    A reference architecture: built in (seeded from fixtures), or saved by a person from one of
+    their own diagrams.
 
     Nodes in a template graph carry `bound: false` plus a `binds` hint describing
     what real component may be bound to them.
     """
 
+    objects = TemplateQuerySet.as_manager()
+
     key = models.SlugField(max_length=64, primary_key=True)
+    # Null for a built-in. Cascades: a person's templates go with their account, like their diagrams.
+    owner = models.ForeignKey(
+        "accounts.Account",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="templates",
+    )
+    # Private unless the author says otherwise.
+    shared_with_company = models.BooleanField(default=False)
+    # Set when the graph still carries a workspace's own data -- ids, links -- and so only makes
+    # sense for that workspace. Blank means generic: usable from any workspace. Always computed
+    # from the graph on the server, never taken from the request.
+    locked_workspace_id = models.CharField(max_length=64, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     category = models.CharField(max_length=64, blank=True)
     graph = models.JSONField(default=dict)
     is_builtin = models.BooleanField(default=True)
     sort_order = models.IntegerField(default=0)
+    # Whether a built-in is offered in everyone's Reference architectures. An administrator's switch:
+    # re-seeding never touches it, so withdrawing a shipped template survives the next deploy.
+    published = models.BooleanField(default=True)
 
     class Meta:
         ordering = ["sort_order", "name"]
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        # A built-in is seeded from our own fixture; anything else came from a person's browser.
+        if not self.is_builtin:
+            self.graph = sanitize_graph(self.graph or {})
+        super().save(*args, **kwargs)
 
     @property
     def placeholder_count(self) -> int:
@@ -271,6 +414,10 @@ class Diagram(models.Model):
     description = models.TextField(blank=True)
     graph = models.JSONField(default=dict)
     source_template = models.CharField(max_length=64, blank=True)
+
+    # The label of the tab group it was saved from, so the Open dialog can list diagrams under
+    # their group and reopen the group together. A label, not a key: blank means ungrouped.
+    group_name = models.CharField(max_length=80, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

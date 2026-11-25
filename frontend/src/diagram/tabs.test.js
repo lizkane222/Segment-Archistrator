@@ -215,3 +215,23 @@ describe('the split settings', () => {
     expect(SPLIT_VERTICAL).toBe('vertical')
   })
 })
+
+describe('custom groups', () => {
+  it('groups tabs by the user\'s own label, apart from connected workspaces', async () => {
+    const { groupTabs, newTab, forkTab, canMoveToGroup, groupKeyOf } = await import('./tabs.js')
+    const a = newTab({ id: 'a', groupName: ' Acme ' })
+    const b = newTab({ id: 'b', groupName: 'Acme' })
+    const c = newTab({ id: 'c', workspaceId: 'ws1', groupName: 'Ignored' })
+    expect(a.groupName).toBe('Acme')
+    expect(c.groupName).toBeNull()
+    const groups = groupTabs([a, c, b])
+    expect(groups.map((group) => group.key)).toEqual(['name:Acme', 'ws1'])
+    expect(groups[0].tabs).toHaveLength(2)
+    expect(groupKeyOf(newTab({ id: 'd' }))).toBeNull()
+    expect(forkTab(a).groupName).toBe('Acme')
+    /* A label is not a workspace: relabelling a tab that has bound components is allowed. */
+    const bound = { ...a, graph: { nodes: [{ bound: true, segmentId: 'x' }] } }
+    expect(canMoveToGroup(bound, bound.graph, null).ok).toBe(true)
+    expect(canMoveToGroup(bound, bound.graph, 'ws1').ok).toBe(false)
+  })
+})

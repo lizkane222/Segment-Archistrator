@@ -13,11 +13,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { LogOut, Mail, ShieldCheck, UserRound } from 'lucide-react'
+import { LogOut, Mail, ShieldCheck, Users, UserRound } from 'lucide-react'
 
 import { accountInitials, accountLabel, canInvite, canSignIn, persistenceNote } from './session.js'
 
-export default function AccountMenu({ state, onLogOut, onInvite }) {
+export default function AccountMenu({ state, onLogOut, onInvite, adminMode = false, onToggleAdmin, onManageUsers }) {
   const [open, setOpen] = useState(false)
   const wrapper = useRef(null)
 
@@ -102,6 +102,48 @@ export default function AccountMenu({ state, onLogOut, onInvite }) {
               {persistenceNote(state)}
             </p>
           </div>
+
+          {state.account.isAdmin && onToggleAdmin && (
+            <>
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={adminMode}
+                onClick={onToggleAdmin}
+                title="Show the controls for choosing which reference architectures everyone sees, and for managing users"
+                className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-twilio-gray-60 transition-colors hover:bg-twilio-gray-10 hover:text-twilio-navy"
+              >
+                <ShieldCheck size={12} aria-hidden="true" />
+                <span className="flex-1">Admin mode</span>
+                <span
+                  className={`flex h-4 w-7 items-center rounded-full p-0.5 transition-colors ${
+                    adminMode ? 'bg-twilio-blue' : 'bg-twilio-gray-40'
+                  }`}
+                  aria-hidden="true"
+                >
+                  <span
+                    className={`h-3 w-3 rounded-full bg-white transition-transform ${
+                      adminMode ? 'translate-x-3' : ''
+                    }`}
+                  />
+                </span>
+              </button>
+              {adminMode && onManageUsers && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpen(false)
+                    onManageUsers()
+                  }}
+                  className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs text-twilio-gray-60 transition-colors hover:bg-twilio-gray-10 hover:text-twilio-navy"
+                >
+                  <Users size={12} aria-hidden="true" />
+                  Manage users…
+                </button>
+              )}
+            </>
+          )}
 
           {canInvite(state) && (
             <button

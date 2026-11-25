@@ -56,6 +56,7 @@ import {
   isDefaultCode,
 } from '../functions/defaults.js'
 import { OUTCOME, TEST_DEADLINE_MS, runFunction, summarizeChanges } from '../functions/runtime.js'
+import { isCodeTrusted, trustCode, useCodeTrustVersion } from '../functions/trust.js'
 import {
   anchor,
   anchoredLines,
@@ -85,6 +86,7 @@ const OUTCOMES = {
   [OUTCOME.unavailable]: { tone: 'unsettled', label: 'Not simulated locally' },
   [OUTCOME.error]: { tone: 'stopped', label: 'Threw an error' },
   [OUTCOME.notRunnable]: { tone: 'stopped', label: 'Did not compile' },
+  [OUTCOME.untrusted]: { tone: 'unsettled', label: 'Not run — code not allowed yet' },
 }
 
 const TONES = {
@@ -111,7 +113,7 @@ const LOG_TONE = {
   debug: 'text-twilio-gray-40',
 }
 
-export default function CodeTab({ node, scenarios, wide, onWide, onUpdate, onNotify }) {
+export default function CodeTab({ node, scenarios, wide, onWide, onUpdate: commitUpdate, onNotify }) {
   const data = node.data
   const kind = data.kind
 
@@ -127,8 +129,20 @@ export default function CodeTab({ node, scenarios, wide, onWide, onUpdate, onNot
    * typing. Tests below run against the draft, so the loop of edit-and-test stays tight
    * either way.
    */
+  /* Whatever this person types, resets or anchors is theirs, so it is trusted the moment it is
+     committed. Code that merely *arrived* in the diagram is not -- see ../functions/trust.js. */
+  const onUpdate = (patch) => {
+    if (typeof patch?.code === 'string') trustCode(patch.code)
+    commitUpdate(patch)
+  }
   const [draft, setDraft] = useState(data.code ?? '')
   const [result, setResult] = useState(null)
+  useCodeTrustVersion()
+  /* Empty or already-trusted code at the start means whatever is typed from here is the
+     person's own. Code that arrived in someone else's diagram stays untrusted -- edited or
+     not -- until they press Allow. */
+  const [vouched, setVouched] = useState(() => isCodeTrusted(data.code ?? ''))
+  const trusted = vouched || isCodeTrusted(draft)
   const [eventSource, setEventSource] = useState('track')
   const [payloadText, setPayloadText] = useState(() => pretty(skeleton('track')))
   const [payloadOpen, setPayloadOpen] = useState(false)
@@ -215,6 +229,9 @@ export default function CodeTab({ node, scenarios, wide, onWide, onUpdate, onNot
   }
 
   const test = () => {
+    if (!trusted) return
+    /* A draft the person typed has not been committed (and so trusted) yet. */
+    trustCode(draft)
     let event
     try {
       event = JSON.parse(payloadText)
@@ -330,6 +347,30 @@ export default function CodeTab({ node, scenarios, wide, onWide, onUpdate, onNot
           </p>
         )}
 
+        {!trusted && (
+          <div
+            role="alert"
+            className="mt-1 rounded-md border border-twilio-warning/40 bg-orange-50 px-2 py-1.5 text-[10px] leading-snug text-twilio-gray-80"
+          >
+            <p>
+              <strong>This code has not been run.</strong> It arrived in a diagram that is not
+              yours (shared with you, or opened from a file), and running it would execute it in
+              this tab, with your session. Read it first. The walkthrough treats this stage as
+              &ldquo;may reshape the event&rdquo; until you allow it.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                trustCode(draft)
+                setVouched(true)
+              }}
+              className="nodrag mt-1.5 rounded-md border border-twilio-warning/60 bg-white px-2 py-1 text-[10px] font-medium text-twilio-gray-90 hover:bg-orange-100"
+            >
+              I have read this — allow it to run
+            </button>
+          </div>
+        )}
+
         <EmptyNote>
           Run here, in this tab, synchronously — so there is no <span className="font-mono">fetch</span>,
           no <span className="font-mono">cache</span> that survives a call, and no waiting. Code that
@@ -402,7 +443,7 @@ export default function CodeTab({ node, scenarios, wide, onWide, onUpdate, onNot
           <button
             type="button"
             onClick={test}
-            disabled={!draft.trim()}
+            disabled={!draft.trim() || !trusted}
             className="nodrag flex shrink-0 items-center gap-1 rounded-md bg-twilio-blue px-2.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-twilio-blue-dark disabled:opacity-40"
           >
             <Play size={12} aria-hidden="true" />

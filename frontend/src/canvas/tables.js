@@ -326,3 +326,75 @@ function insertAt(list, index, value) {
   out.splice(index, 0, value)
   return out
 }
+
+/* --- reordering and exporting -------------------------------------------------- */
+
+const moved = (list, from, to) => {
+  const next = [...list]
+  const [item] = next.splice(from, 1)
+  next.splice(to, 0, item)
+  return next
+}
+
+/** A row taken from `from` and put at `to`, with its height and its cells. */
+export function moveRow(table, from, to) {
+  const shape = normalizeTable(table)
+  const last = shape.rows.length - 1
+  if (from === to || from < 0 || to < 0 || from > last || to > last) return shape
+  return { ...shape, rows: moved(shape.rows, from, to), cells: moved(shape.cells, from, to) }
+}
+
+/** A column taken from `from` and put at `to`, with its width and every cell in it. */
+export function moveColumn(table, from, to) {
+  const shape = normalizeTable(table)
+  const last = shape.columns.length - 1
+  if (from === to || from < 0 || to < 0 || from > last || to > last) return shape
+  return {
+    ...shape,
+    columns: moved(shape.columns, from, to),
+    cells: shape.cells.map((row) => moved(row, from, to)),
+  }
+}
+
+/**
+ * A cell's text for a file: the plain text, with each linked stretch followed by its address in
+ * brackets -- "Adobe Target (https://...)" -- since a CSV has nowhere to put a link and would
+ * otherwise lose it. Neighbouring runs sharing a link are one stretch, so formatting inside a linked
+ * phrase does not repeat the address; text that is itself the address is not repeated either.
+ */
+export function cellExportText(table, row, column) {
+  const cell = cellAt(table, row, column)
+  if (!cell?.rich) return cellText(table, row, column)
+  return (cell.rich.blocks ?? [])
+    .map((block) => {
+      const parts = []
+      for (const run of block.runs ?? []) {
+        const text = run.text ?? ''
+        const last = parts[parts.length - 1]
+        if (last && run.link && last.link === run.link) last.text += text
+        else parts.push({ text, link: run.link ?? null })
+      }
+      return parts
+        .map(({ text, link }) => (link && text && text.trim() !== link ? `${text} (${link})` : text))
+        .join('')
+    })
+    .join('\n')
+}
+
+/**
+ * The table as CSV (RFC 4180): fields containing a comma, quote or line break are quoted, quotes
+ * doubled. A field that a spreadsheet would run as a formula (`=`, `+`, `-`, `@` first) gets a
+ * leading apostrophe, so sharing a table does not hand the recipient something that executes --
+ * plain numbers are left alone.
+ */
+export function tableToCsv(table) {
+  const shape = normalizeTable(table)
+  const field = (value) => {
+    let text = String(value ?? '')
+    if (/^[=+\-@]/.test(text) && Number.isNaN(Number(text))) text = `'${text}`
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+  }
+  return shape.cells
+    .map((row, r) => row.map((_, c) => field(cellExportText(shape, r, c))).join(','))
+    .join('\r\n')
+}

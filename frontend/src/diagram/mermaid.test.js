@@ -76,7 +76,7 @@ describe('parseMermaid', () => {
   })
 
   it('refuses a diagram type that is not a flowchart, with a reason', () => {
-    expect(() => parseMermaid('sequenceDiagram\n  A->>B: hi')).toThrow(/sequenceDiagram.*Only flowcharts/)
+    expect(() => parseMermaid('gantt\n  title x')).toThrow(/gantt.*Only flowcharts/)
   })
 
   it('skips a line it cannot read without leaving a stray node behind', () => {
@@ -264,18 +264,16 @@ describe('a flowchart written by hand', () => {
     expect(zones['Growth team'].id).toMatch(/^custom:zone:/)
   })
 
-  it('infers component kinds from names, shapes and zones', () => {
-    expect(byName('Website').kind).toBe('source')
-    expect(byName('Enrich function').kind).toBe('source_function')
-    expect(byName('Braze').kind).toBe('destination')
-    expect(byName('Snowflake').kind).toBe('warehouse')
+  it('files a box as a component only when it uses that component\'s own terminology', () => {
     expect(byName('Profile').kind).toBe('profile')
     expect(byName('Computed Trait').kind).toBe('computed_trait')
-    expect(byName('Customer app').kind).toBe('custom')
+    /* Product names and the zone a box sits in are not evidence: these are all custom, to be converted
+       on purpose rather than guessed at. */
+    for (const name of ['Website', 'Enrich function', 'Braze', 'Snowflake', 'Customer app']) {
+      expect(byName(name).kind, name).toBe('custom')
+    }
     /* A decision diamond outside every zone is flowchart punctuation, not a component. */
     expect(byName('Approved?')).toMatchObject({ kind: 'shape', shape: 'diamond' })
-    /* A hand-drawn function starts with working code, like a palette drop. */
-    expect(byName('Enrich function').code).toBeTruthy()
   })
 
   it('carries link labels and dashes', () => {

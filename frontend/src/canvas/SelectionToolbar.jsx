@@ -13,6 +13,7 @@
  * whose size and style are about to be handed out. The logic is in canvas/selection.js.
  */
 
+import { useState } from 'react'
 import {
   AlignCenterHorizontal,
   AlignCenterVertical,
@@ -62,12 +63,7 @@ export default function SelectionToolbar({
       ))}
 
       <Divider />
-      <ToolButton
-        label={modelName ? `Match size to ${modelName}` : 'Match size'}
-        onClick={onMatchSize}
-      >
-        <Scaling size={14} aria-hidden="true" />
-      </ToolButton>
+      <MatchSizeMenu modelName={modelName} onMatchSize={onMatchSize} />
       <ToolButton
         label={modelName ? `Match style to ${modelName}` : 'Match style'}
         onClick={onMatchStyle}
@@ -90,6 +86,48 @@ export default function SelectionToolbar({
       >
         <Ungroup size={14} aria-hidden="true" />
       </ToolButton>
+    </div>
+  )
+}
+
+/* Match Size, with its three options. A small popover rather than three more buttons in a bar that is
+   already long: width, height, or both, all taken from the model named on the button. */
+function MatchSizeMenu({ modelName, onMatchSize }) {
+  const [open, setOpen] = useState(false)
+  const pick = (dimension) => {
+    setOpen(false)
+    onMatchSize(dimension)
+  }
+  return (
+    <div className="relative" onMouseLeave={() => setOpen(false)}>
+      <ToolButton
+        label={modelName ? `Match size to ${modelName}` : 'Match size'}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Scaling size={14} aria-hidden="true" />
+      </ToolButton>
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 top-full z-20 mt-1 min-w-[10rem] rounded-md border border-twilio-gray-20 bg-white py-1 shadow-md"
+        >
+          {[
+            ['width', 'Match width'],
+            ['height', 'Match height'],
+            ['both', 'Match width & height'],
+          ].map(([dimension, label]) => (
+            <button
+              key={dimension}
+              type="button"
+              role="menuitem"
+              onClick={() => pick(dimension)}
+              className="block w-full px-3 py-1.5 text-left text-xs text-twilio-navy hover:bg-twilio-gray-10"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

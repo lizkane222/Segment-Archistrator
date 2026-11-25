@@ -1520,6 +1520,11 @@ function visitFunction({ node, payload, assumed }) {
     case OUTCOME.notRunnable:
       return unread(`its code could not be run here (${result.error.message})`)
 
+    case OUTCOME.untrusted:
+      return unread(
+        'its code came from a diagram that is not yours and has not been allowed to run — open its Code tab to read it and allow it',
+      )
+
     default:
       return {
         status: STATUS.notEvaluated,

@@ -172,3 +172,13 @@ describe('catalogQuery', () => {
     expect(catalogQuery(state)).toEqual({ q: 'braze', category: ['CRM', 'Email'] })
   })
 })
+
+describe('pipeline sub-zones', () => {
+  it('matches a destination to the Destinations chip even though it is stored in connections', async () => {
+    const { inPipelineZone } = await import('./filters.js')
+    const topology = { zones: [{ id: 'connections', parent: 'segment' }, { id: 'segment', parent: null }] }
+    expect(inPipelineZone({ zone: 'connections', kind: 'destination' }, 'destinations', topology)).toBe(true)
+    expect(inPipelineZone({ zone: 'connections', kind: 'source' }, 'destinations', topology)).toBe(false)
+    expect(inPipelineZone({ zone: 'connections', kind: 'source' }, 'segment', topology)).toBe(true)
+  })
+})

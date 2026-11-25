@@ -22,6 +22,7 @@ import {
   groupKey,
   groupLabel,
   groupSections,
+  groupTree,
   groupStackSize,
   groupsOf,
   internalSections,
@@ -633,6 +634,58 @@ describe('internalSections', () => {
     expect(sections[1].rows).toEqual([{ id: 'plan', label: 'plan: pro' }])
   })
 
+  describe('a pasted profileSnapshot', () => {
+    const snapshot = {
+      identifiers: [
+        { type: 'user_id', id: 'test_user_b' },
+        { type: 'email', id: 'b@example.com' },
+      ],
+      traits: { plan: 'pro', seats: 3 },
+      events: [],
+    }
+    const rowsOf = (data, id) =>
+      internalSections({ kind: 'profile', ...data }, TOPOLOGY).find((s) => s.id === id).rows
+
+    it('supplies every identifier as type: id', () => {
+      const rows = rowsOf({ profileSnapshot: snapshot }, 'identifiers')
+      expect(rows.map((r) => r.label)).toEqual(['user_id: test_user_b', 'email: b@example.com'])
+      expect(new Set(rows.map((r) => r.id)).size).toBe(2)
+    })
+
+    it('supplies traits as key: value', () => {
+      const rows = rowsOf({ profileSnapshot: snapshot }, 'traits')
+      expect(rows.map((r) => r.label)).toEqual(['plan: pro', 'seats: 3'])
+    })
+
+    it('lists event names only, newest first, at most ten', () => {
+      const events = Array.from({ length: 12 }, (_, i) => ({
+        event: `E${i}`,
+        message_id: `m${i}`,
+        timestamp: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+        properties: { secret: 'x' },
+      }))
+      const rows = rowsOf({ profileSnapshot: { ...snapshot, events } }, 'events')
+      expect(rows.map((r) => r.label)).toEqual(
+        ['E11', 'E10', 'E9', 'E8', 'E7', 'E6', 'E5', 'E4', 'E3', 'E2'],
+      )
+    })
+
+    it('sorts an event with no timestamp last rather than dropping it', () => {
+      const events = [
+        { event: 'Undated' },
+        { event: 'Old', timestamp: '2026-01-01T00:00:00Z' },
+        { event: 'New', timestamp: '2026-02-01T00:00:00Z' },
+      ]
+      const rows = rowsOf({ profileSnapshot: { ...snapshot, events } }, 'events')
+      expect(rows.map((r) => r.label)).toEqual(['New', 'Old', 'Undated'])
+    })
+
+    it('falls back to the node own fields for a section not pasted', () => {
+      const rows = rowsOf({ profileSnapshot: snapshot, events: ['Signed Up'] }, 'events')
+      expect(rows.map((r) => r.label)).toEqual(['Signed Up'])
+    })
+  })
+
   it('reads a row written as an object as readily as a bare string', () => {
     /* Nothing populates these yet, so a template author hand-writes them and both
        shapes turn up. */
@@ -720,5 +773,19 @@ describe('an aggregate edge and the member it came from', () => {
     )
     expect(aggregate.data.color).toBe('#ff0000')
     expect(aggregate.data.count).toBe(3)
+  })
+})
+
+describe('groupTree', () => {
+  it('nests types under a pluralised kind', () => {
+    const nodes = [
+      { id: 'a', kind: 'destination', name: 'HubSpot', categories: ['CRM'] },
+      { id: 'b', kind: 'destination', name: 'Braze', categories: ['Email Marketing'] },
+      { id: 'c', kind: 'source', name: 'App', sourceType: 'android' },
+    ]
+    const tree = groupTree(nodes, { kinds: { destination: { label: 'Destination' }, source: { label: 'Source' } } })
+    expect(tree.map((entry) => entry.label)).toEqual(['Destinations', 'Sources'])
+    expect(tree[0].subs.map((sub) => sub.label)).toEqual(['CRM', 'Email Marketing'])
+    expect(tree[1].subs[0].label).toBe('Android')
   })
 })

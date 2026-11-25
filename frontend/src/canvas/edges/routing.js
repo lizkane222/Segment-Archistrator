@@ -61,7 +61,7 @@ const LEAN = 26
  * above rather than horizontally into its handle -- every right-angle connector on every diagram
  * changed shape, which is what "the right angles were working better before" was reporting.
  */
-const STEP_OFFSET = 20
+export const STEP_OFFSET = 20
 
 /* The radius an orthogonal corner is rounded by. Matches React Flow's own `smoothstep` default,
    for the same reason `STEP_OFFSET` does. */
@@ -423,7 +423,82 @@ function orthogonalThrough(points, fromDirection, toDirection) {
     corners.push(to)
     heading = horizontalFirst ? { x: 0, y: Math.sign(dy) } : { x: Math.sign(dx), y: 0 }
   }
-  return corners
+  return collapseJogs(corners)
+}
+
+/*
+ * Remove the little steps a route picks up when two parallel legs miss each other by a few pixels.
+ *
+ * A waypoint saved against an older layout, a rounded coordinate against a fractional handle, a
+ * crossbar between two cards that are nearly level: each leaves a leg that runs along, steps a few
+ * pixels sideways and runs on, and each of those steps is a corner, a handle and a visible kink --
+ * which reads as a cluster of adjustment dots at the bend. The step is closed by sliding one of the
+ * two legs onto the other's line, whichever of them is not pinned to a handle.
+ *
+ * The first two points (source, its stub) and the last two (the stub, target) are pinned: moving them
+ * would detach the line from its component. A step between two pinned legs is a real misalignment of
+ * the endpoints and is left alone.
+ */
+const JOG = 12
+
+function collapseJogs(points) {
+  let out = points
+  for (let pass = 0; pass < points.length; pass += 1) {
+    let changed = false
+    for (let i = 1; i + 2 < out.length; i += 1) {
+      const a = out[i - 1]
+      const b = out[i]
+      const c = out[i + 1]
+      const d = out[i + 2]
+      const abHorizontal = Math.abs(a.y - b.y) < 0.5
+      const cdHorizontal = Math.abs(c.y - d.y) < 0.5
+      const abVertical = Math.abs(a.x - b.x) < 0.5
+      const cdVertical = Math.abs(c.x - d.x) < 0.5
+      const step = abHorizontal && cdHorizontal
+        ? { axis: 'y', size: Math.abs(b.y - c.y) }
+        : abVertical && cdVertical
+          ? { axis: 'x', size: Math.abs(b.x - c.x) }
+          : null
+      if (!step || step.size < 0.5 || step.size >= JOG) continue
+      const aPinned = i - 1 <= 1
+      const dPinned = i + 2 >= out.length - 2
+      if (aPinned && dPinned) continue
+      const axis = step.axis
+      const next = out.slice()
+      if (dPinned) {
+        /* d is fixed: bring the first leg onto the second's line. */
+        next.splice(i - 1, 3, { ...a, [axis]: c[axis] })
+      } else {
+        /* a is fixed (or neither is): bring the second leg onto the first's line. */
+        next.splice(i + 1, 2, { ...d, [axis]: b[axis] })
+      }
+      out = next
+      changed = true
+      break
+    }
+    if (!changed) break
+  }
+  if (out === points) return out
+  /* Closing a step leaves repeats and straight-through points behind; drop them, but never a stub. */
+  const tidy = []
+  out.forEach((point, index) => {
+    const last = tidy[tidy.length - 1]
+    if (last && Math.abs(last.x - point.x) < 0.5 && Math.abs(last.y - point.y) < 0.5) return
+    const before = tidy[tidy.length - 2]
+    const pinned = tidy.length <= 2 || index >= out.length - 2
+    if (
+      last &&
+      before &&
+      !pinned &&
+      ((Math.abs(before.x - last.x) < 0.5 && Math.abs(last.x - point.x) < 0.5) ||
+        (Math.abs(before.y - last.y) < 0.5 && Math.abs(last.y - point.y) < 0.5))
+    ) {
+      tidy[tidy.length - 1] = point
+      return
+    }
+    tidy.push(point)
+  })
+  return tidy
 }
 
 /* Is `point` in front of `origin`, along `direction` -- on the side the normal points to? */
@@ -474,6 +549,72 @@ function roundedPolyline(points) {
   return path
 }
 
+/**
+ * A dashed or dotted route as separate pieces, each with the dash offset that pins its pattern to the
+ * page rather than to where the line happens to start.
+ *
+ * One dashed path starts its pattern at its own first point, so two connectors that share a stretch of
+ * road -- the same row or the same column -- draw their dashes out of step and the overlap reads as a
+ * solid, smeared line. Here every straight piece is drawn from its lower end to its higher one and its
+ * pattern begins at the page coordinate it starts on (modulo the pattern's length), so any two
+ * connectors dashing the same stretch put their dashes, and their gaps, in exactly the same places.
+ * The rounded corners are pieces too, drawn in a fixed direction and phased by their own position.
+ *
+ * `period` is the pattern's length: dash plus gap.
+ */
+export function dashPieces(points, period) {
+  const phase = (value) => round(((value % period) + period) % period)
+  const pieces = []
+  const straight = (a, b) => {
+    if (Math.hypot(b.x - a.x, b.y - a.y) < 0.01) return
+    const horizontal = Math.abs(a.y - b.y) < 0.01
+    const vertical = Math.abs(a.x - b.x) < 0.01
+    const flip = horizontal ? a.x > b.x : vertical ? a.y > b.y : a.x > b.x || (a.x === b.x && a.y > b.y)
+    const from = flip ? b : a
+    const to = flip ? a : b
+    pieces.push({
+      d: `M ${round(from.x)},${round(from.y)} L ${round(to.x)},${round(to.y)}`,
+      offset: horizontal ? phase(from.x) : vertical ? phase(from.y) : 0,
+    })
+  }
+  if (!points || points.length < 2) return pieces
+  if (points.length === 2) {
+    straight(points[0], points[1])
+    return pieces
+  }
+  let cursor = points[0]
+  const towards = (a, b, distance) => {
+    const length = Math.hypot(b.x - a.x, b.y - a.y) || 1
+    return { x: a.x + ((b.x - a.x) / length) * distance, y: a.y + ((b.y - a.y) / length) * distance }
+  }
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = points[index - 1]
+    const corner = points[index]
+    const next = points[index + 1]
+    const inLength = Math.hypot(corner.x - previous.x, corner.y - previous.y)
+    const outLength = Math.hypot(next.x - corner.x, next.y - corner.y)
+    const radius = Math.min(CORNER, inLength / 2, outLength / 2)
+    if (radius < 0.5) {
+      straight(cursor, corner)
+      cursor = corner
+      continue
+    }
+    const start = towards(corner, previous, radius)
+    const end = towards(corner, next, radius)
+    straight(cursor, start)
+    const flip = start.x > end.x || (start.x === end.x && start.y > end.y)
+    const a = flip ? end : start
+    const b = flip ? start : end
+    pieces.push({
+      d: `M ${round(a.x)},${round(a.y)} Q ${round(corner.x)},${round(corner.y)} ${round(b.x)},${round(b.y)}`,
+      offset: phase(a.x + a.y),
+    })
+    cursor = end
+  }
+  straight(cursor, points[points.length - 1])
+  return pieces
+}
+
 /* --- the one entry point ---------------------------------------------------- */
 
 const NO_FREE_ENDS = Object.freeze({ source: false, target: false })
@@ -520,7 +661,7 @@ export function routeEdge({
   } else if (line === 'curved') {
     path = curvedPath(through, fromDirection, toDirection)
   } else if (middle.length === 0) {
-    points = [source, ...orthogonalCorners({ source, target, sourcePosition, targetPosition }), target]
+    points = collapseJogs([source, ...orthogonalCorners({ source, target, sourcePosition, targetPosition }), target])
     path = roundedPolyline(points)
   } else {
     points = orthogonalThrough(through, fromDirection, toDirection)
