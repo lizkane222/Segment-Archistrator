@@ -120,7 +120,12 @@ class WorkspaceSession(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["workspace_id", "token_fingerprint"],
+                fields=["workspace_id", "token_fingerprint", "anon_scope"],
+                # Per holder, not per credential: `anon_scope` is the browser's own scope, so
+                # two people who paste the same token each get a row of their own. Unique on
+                # (workspace, token) alone, the second paste *reassigned* the first person's
+                # row -- and with it their account, their scope and their cookie id.
+                #
                 # Only where there is a credential to be unique *about*.
                 #
                 # This condition is new and load-bearing. Anonymous sessions used to
@@ -175,24 +180,23 @@ class WorkspaceSession(models.Model):
             "credential_kind": credential_kind,
             "account": account,
         }
-        # Only when the caller has one to carry. Left out of the defaults otherwise, so
-        # re-pasting a credential does not blank the scope the row already holds --
-        # which would strand every diagram drawn under it before signing in.
+        lookup = {
+            "workspace_id": workspace["id"],
+            "token_fingerprint": fingerprint_token(token),
+        }
         if anon_scope:
-            defaults["anon_scope"] = anon_scope
-
-        obj, created = cls.objects.update_or_create(
-            workspace_id=workspace["id"],
-            token_fingerprint=fingerprint_token(token),
-            defaults=defaults,
-        )
-        if created and not obj.anon_scope:
-            # Every session gets a scope, connected or not. Generating it here rather
-            # than on first save means there is no "promote this session so it can save"
-            # step to forget, and a connected session that later signs out still has
-            # somewhere to put work.
-            obj.anon_scope = cls.new_anon_scope()
-            obj.save(update_fields=["anon_scope"])
+            # The same browser pasting again: reuse its row. A row is only ever reused by the
+            # holder of its scope -- anyone else pasting the same token gets a row of their
+            # own, because reusing it would hand them the first holder's cookie id, account
+            # and scope (and so their private diagrams).
+            obj, created = cls.objects.update_or_create(
+                **lookup, anon_scope=anon_scope, defaults=defaults
+            )
+        else:
+            # No scope to prove who is asking, so there is no row they may reuse.
+            obj = cls.objects.create(
+                **lookup, anon_scope=cls.new_anon_scope(), **defaults
+            )
         return obj
 
     @staticmethod
@@ -260,6 +264,62 @@ class WorkspaceSession(models.Model):
             anon_scope=anon_scope or cls.new_anon_scope(),
             **credential,
         )
+
+    # --- per-request workspace scope ----------------------------------------
+
+    def scoped_to(self, connection: "RememberedConnection | None") -> "WorkspaceSession":
+        """
+        An in-memory copy of this session acting as one specific workspace connection.
+
+        A browser tab group is a workspace, and two of them can be open at once in one
+        browser, sharing one cookie. So which credential a *request* uses cannot be state on
+        the session row -- flipping it would race every other tab's in-flight requests --
+        it is chosen per request and lives only on this copy. `None` is a copy holding no
+        credential at all, for a tab that is about no workspace.
+
+        The copy refuses to be saved or deleted: it is a view, and writing it back would put
+        one tab's workspace on the row every other tab shares.
+        """
+        import copy
+
+        view = copy.copy(self)
+        view._scoped = True
+        if connection is None:
+            view.workspace_id = ""
+            view.workspace_name = ""
+            view.workspace_slug = ""
+            view.encrypted_token = None
+            view.token_fingerprint = ""
+            view.credential_kind = ""
+        else:
+            view.workspace_id = connection.workspace_id
+            view.workspace_name = connection.workspace_name
+            view.workspace_slug = connection.workspace_slug
+            view.region = connection.region
+            view.credential_kind = connection.credential_kind
+            view.encrypted_token = connection.encrypted_token
+            view.token_fingerprint = connection.token_fingerprint
+        return view
+
+    def save(self, *args, **kwargs):
+        if getattr(self, "_scoped", False):
+            raise RuntimeError("A workspace-scoped view of a session is read-only.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if getattr(self, "_scoped", False):
+            raise RuntimeError("A workspace-scoped view of a session is read-only.")
+        return super().delete(*args, **kwargs)
+
+    def clear_credential(self):
+        """Let go of the workspace credential but keep the session (and its account)."""
+        self.workspace_id = ""
+        self.workspace_name = ""
+        self.workspace_slug = ""
+        self.encrypted_token = None
+        self.token_fingerprint = ""
+        self.credential_kind = ""
+        self.save()
 
     @property
     def has_token(self) -> bool:
@@ -426,13 +486,17 @@ class RememberedConnection(models.Model):
         """
         Put this credential on `session`, in place, and mark it used.
 
-        Any *other* row already holding the same credential is deleted first: the
-        uniqueness constraint is on (workspace, token) among rows that hold one, and
-        a lapsed session of the same person's is exactly where a duplicate would be.
+        Any *other* row of this session's own scope already holding the same credential is
+        deleted first: the uniqueness constraint is on (workspace, token, scope) among rows
+        that hold one, and a lapsed session of the same browser's is where a duplicate
+        would be.
         """
+        # Only rows in *this* session's scope: a different holder of the same token has a
+        # row of their own, and deleting it would disconnect them for no reason.
         WorkspaceSession.objects.filter(
             workspace_id=self.workspace_id,
             token_fingerprint=self.token_fingerprint,
+            anon_scope=session.anon_scope,
             encrypted_token__isnull=False,
         ).exclude(pk=session.pk).delete()
         session.workspace_id = self.workspace_id

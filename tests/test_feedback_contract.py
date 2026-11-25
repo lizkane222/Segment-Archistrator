@@ -62,7 +62,7 @@ def test_every_field_the_form_can_send_reaches_airtable():
         }
     )
     assert serializer.is_valid(), serializer.errors
-    fields = serializer.to_fields(app_name="Segment Archistrator")
+    fields = serializer.to_fields(app_name="Archistrator")
 
     assert fields[airtable.FIELD_PROPOSED_FIX] == "Clear it when the transport stops."
     assert fields[airtable.FIELD_REPORTER] == "someone@example.com"
@@ -90,10 +90,10 @@ def test_the_derived_fields_are_not_the_reporters_to_set():
         }
     )
     assert serializer.is_valid(), serializer.errors
-    fields = serializer.to_fields(app_name="Segment Archistrator")
+    fields = serializer.to_fields(app_name="Archistrator")
 
     assert fields[airtable.FIELD_STATUS] == airtable.STATUS_NEW
-    assert fields[airtable.FIELD_APP] == "Segment Archistrator"
+    assert fields[airtable.FIELD_APP] == "Archistrator"
     assert fields[airtable.FIELD_TITLE] == "Connectors overlap badly when three"
     assert not fields[airtable.FIELD_SUBMITTED_AT].startswith("1999")
 

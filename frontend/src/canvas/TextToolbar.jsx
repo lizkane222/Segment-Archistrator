@@ -36,7 +36,7 @@
  * palette lives in the inspector, and a 34-row list in a floating bar is a menu nobody reads.
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useNodesData } from '@xyflow/react'
 import {
   AlignCenter,
@@ -47,6 +47,7 @@ import {
   AlignCenterHorizontal,
   Bold,
   Italic,
+  Link2,
   List,
   ListOrdered,
   Minus,
@@ -56,8 +57,9 @@ import {
   Underline,
 } from 'lucide-react'
 
-import { useChrome } from './chrome.js'
+import { LINK_SHORTCUT_EVENT, useChrome } from './chrome.js'
 import { ZONE_SWATCHES } from './kinds.js'
+import { cleanLink } from './richText.js'
 
 /* The sizes the stepper walks. Not a free number field -- see the header on focus -- and not a
    continuous range either: these are the sizes a diagram is legible at, and the two ends are
@@ -108,6 +110,9 @@ export default function TextToolbar() {
    * Subscribed only while the bar is mounted, which is only while something is being edited.
    */
   const [, bumpSelection] = useState(0)
+  /* The address field, when it is open: the range it will apply to (read when the button was pressed,
+     since opening the field moves focus out of the text) and what is typed. */
+  const [linking, setLinking] = useState(null)
   useEffect(() => {
     if (!session) return undefined
     const onChange = () => bumpSelection((count) => count + 1)
@@ -121,7 +126,97 @@ export default function TextToolbar() {
   const data = useNodesData(session?.nodeId ?? null)?.data
   const style = data?.style ?? {}
 
+  /* Cmd/Ctrl-K from the editor. Through a ref because the handler it calls is defined below the early
+     return, and this effect has to be registered before it. */
+  const openLinkRef = useRef(null)
+  useEffect(() => {
+    if (!session) return undefined
+    const onShortcut = () => openLinkRef.current?.()
+    window.addEventListener(LINK_SHORTCUT_EVENT, onShortcut)
+    return () => window.removeEventListener(LINK_SHORTCUT_EVENT, onShortcut)
+  }, [session])
+
   if (!session) return null
+
+  const openLink = () => {
+    const range = session.selection?.()
+    const existing = session.linkAt?.()
+    const target = existing ?? range
+    if (!target || target.start === target.end) {
+      setLinking({ start: 0, end: 0, url: '', error: 'Select the text to link first.' })
+      return
+    }
+    setLinking({ start: target.start, end: target.end, url: existing?.url ?? '', existing: Boolean(existing), error: null })
+  }
+  openLinkRef.current = openLink
+  const applyLinkInput = (remove = false) => {
+    if (!linking) return
+    if (remove || !linking.url.trim()) {
+      session.link?.(null, { start: linking.start, end: linking.end })
+      setLinking(null)
+      return
+    }
+    if (!cleanLink(linking.url)) {
+      setLinking({ ...linking, error: 'Use a web address like https://example.com, or an email.' })
+      return
+    }
+    session.link?.(cleanLink(linking.url), { start: linking.start, end: linking.end })
+    setLinking(null)
+  }
+
+  /* The address field replaces the buttons while it is open: the bar is already the width of a screen. */
+  if (linking) {
+    return (
+      <div data-keep-editing className="nopan flex items-center gap-1 rounded-md border border-twilio-gray-20 bg-white px-2 py-1 shadow-md">
+        <Link2 size={14} className="shrink-0 text-twilio-gray-60" aria-hidden="true" />
+        {linking.start === linking.end ? (
+          <span className="px-1 text-xs text-twilio-gray-60">{linking.error}</span>
+        ) : (
+          <>
+            <input
+              autoFocus
+              value={linking.url}
+              onChange={(event) => setLinking({ ...linking, url: event.target.value, error: null })}
+              onKeyPress={(event) => event.key === 'Enter' && event.preventDefault()}
+              onKeyUp={(event) => event.key === 'Enter' && event.preventDefault()}
+              onKeyDown={(event) => {
+                event.stopPropagation()
+                /* preventDefault: applying moves focus back into the text mid-keystroke, and the Enter
+                   would otherwise be typed there, replacing the selection with a line break. */
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  /* After the keystroke has finished (keypress and keyup included), not during it:
+                     applying hands focus back to the text, and any part of the Enter still to come
+                     would be typed there. */
+                  setTimeout(() => applyLinkInput(), 0)
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  setLinking(null)
+                }
+              }}
+              placeholder="https://…"
+              aria-label="Link address"
+              spellCheck={false}
+              className="nodrag w-72 rounded border border-twilio-gray-20 px-2 py-1 font-mono text-xs text-twilio-navy focus:border-twilio-blue focus:outline-none"
+            />
+            <button type="button" onClick={() => applyLinkInput()} className="rounded bg-twilio-blue px-2 py-1 text-xs font-medium text-white hover:bg-twilio-blue-dark">
+              {linking.existing ? 'Update' : 'Link'}
+            </button>
+            {linking.existing && (
+              <button type="button" onClick={() => applyLinkInput(true)} className="rounded border border-twilio-gray-20 px-2 py-1 text-xs text-twilio-gray-60 hover:text-twilio-error">
+                Remove
+              </button>
+            )}
+            {linking.error && <span className="px-1 text-[11px] text-twilio-error">{linking.error}</span>}
+          </>
+        )}
+        <button type="button" onClick={() => setLinking(null)} className="rounded px-2 py-1 text-xs text-twilio-gray-60 hover:text-twilio-navy">
+          Cancel
+        </button>
+      </div>
+    )
+  }
 
   const setStyle = (patch) => updateData?.(session.nodeId, { style: { ...style, ...patch } })
 
@@ -139,7 +234,7 @@ export default function TextToolbar() {
   }
 
   return (
-    <div className="nopan flex items-center gap-1 rounded-md border border-twilio-gray-20 bg-white px-1.5 py-1 shadow-md">
+    <div data-keep-editing className="nopan flex items-center gap-1 rounded-md border border-twilio-gray-20 bg-white px-1.5 py-1 shadow-md">
       <ToolButton label="Smaller text" onClick={() => step(-1)}>
         <Minus size={13} aria-hidden="true" />
       </ToolButton>
@@ -166,6 +261,9 @@ export default function TextToolbar() {
       ))}
 
       <Divider />
+      <ToolButton label="Link (⌘K)" active={Boolean(session.linkAt?.())} onClick={openLink}>
+        <Link2 size={14} aria-hidden="true" />
+      </ToolButton>
       {LIST_BUTTONS.map(({ style: listStyle, label, Icon }) => (
         <ToolButton
           key={listStyle}
@@ -215,8 +313,8 @@ export default function TextToolbar() {
             type="button"
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => setStyle({ text: colour })}
-            title={`Text colour ${colour}`}
-            aria-label={`Text colour ${colour}`}
+            title={`Text color ${colour}`}
+            aria-label={`Text color ${colour}`}
             aria-pressed={style.text === colour}
             className={`h-4 w-4 rounded-sm border transition-transform hover:scale-110 ${
               style.text === colour ? 'border-twilio-blue ring-1 ring-twilio-blue' : 'border-twilio-gray-20'

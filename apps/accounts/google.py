@@ -86,7 +86,9 @@ def redirect_uri(request) -> str:
     return request.build_absolute_uri("/api/auth/google/callback")
 
 
-def consent_url(*, state: str, redirect_to: str, code_challenge: str = "") -> str:
+def consent_url(
+    *, state: str, redirect_to: str, code_challenge: str = "", hosted_domain: str = ""
+) -> str:
     """The URL to send the browser to."""
     from urllib.parse import urlencode
 
@@ -96,6 +98,9 @@ def consent_url(*, state: str, redirect_to: str, code_challenge: str = "") -> st
         "response_type": "code",
         "scope": SCOPES,
         "state": state,
+        # A hint that pre-selects the company's Workspace. Not a control -- anyone can edit a
+        # URL -- which is why `admit()` checks the `hd` claim in the token as well.
+        **({"hd": hosted_domain} if hosted_domain else {}),
         **(
             {"code_challenge": code_challenge, "code_challenge_method": "S256"}
             if code_challenge
@@ -199,6 +204,10 @@ def identity_from_id_token(id_token: str) -> dict:
         "email_verified": bool(verified),
         "name": claims.get("name") or "",
         "picture": claims.get("picture") or "",
+        # The Google Workspace domain the account belongs to. Present only for a managed
+        # Workspace account, which is what makes it proof of *membership* in a company and
+        # not just of an address someone once verified.
+        "hd": claims.get("hd") or "",
     }
 
 

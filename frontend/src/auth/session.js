@@ -27,6 +27,11 @@ export const NO_SESSION = {
   connected: false,
   anonymous: false,
   googleAvailable: false,
+  /* Whether the app is closed to anyone not signed in, and which domains may. */
+  required: false,
+  domains: [],
+  /* The workspaces this account has connected: the tab groups. */
+  connections: [],
 }
 
 export const SessionContext = createContext(NO_SESSION)
@@ -46,7 +51,13 @@ export function useSession() {
  */
 export function sessionStateFrom(payload) {
   if (!payload || !payload.hasSession) {
-    return { ...NO_SESSION, status: 'none', googleAvailable: Boolean(payload?.auth?.google) }
+    return {
+      ...NO_SESSION,
+      status: 'none',
+      googleAvailable: Boolean(payload?.auth?.google),
+      required: Boolean(payload?.auth?.required),
+      domains: payload?.auth?.domains ?? [],
+    }
   }
   return {
     status: 'ready',
@@ -55,6 +66,15 @@ export function sessionStateFrom(payload) {
     connected: Boolean(payload.connected),
     anonymous: Boolean(payload.anonymous),
     googleAvailable: Boolean(payload.auth?.google),
+    required: Boolean(payload.auth?.required),
+    domains: payload.auth?.domains ?? [],
+    /* Signed in, the tab groups are the account's remembered connections. With no account (local
+       development) the session's own connection is the only one there can be. */
+    connections: payload.account
+      ? (payload.connections ?? [])
+      : payload.workspace
+        ? [payload.workspace]
+        : [],
   }
 }
 
@@ -66,7 +86,15 @@ export function sessionStateFrom(payload) {
  * replaced.
  */
 export function needsBootstrap(payload) {
+  /* A closed app has no tokenless scope to mint: with no session, the answer is the sign-in
+     screen, and asking the server for one would only be refused. */
+  if (payload?.auth?.required) return false
   return !payload || !payload.hasSession
+}
+
+/** Nobody is signed in and the app is closed to anyone who is not: show only the sign-in screen. */
+export function needsSignIn(state) {
+  return Boolean(state?.required) && !state?.account
 }
 
 /** Signed in with an account, which is what inviting requires. */

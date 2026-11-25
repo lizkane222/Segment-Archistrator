@@ -20,6 +20,7 @@ import {
   groupNodes,
   setLocked,
   matchSize,
+  matchSizeTo,
   matchStyle,
   selectedComponents,
   ungroupNodes,
@@ -436,22 +437,65 @@ describe('distributeNodes', () => {
     expect(left(out, 'c')).toBe(10)
   })
 
-  it('works across zones, whose stored positions are in different frames', () => {
-    const nodes = [
-      zone('zone-connections', 0, 0),
-      zone('zone-unify', 400, 200),
-      card('a', 0, 0, { parentId: 'zone-connections', size: { width: 100, height: 60 } }),
-      card('b', -250, -200, { parentId: 'zone-unify', size: { width: 40, height: 60 } }),
-      card('c', 400, 0, { parentId: 'zone-connections', size: { width: 100, height: 60 } }),
-    ]
-    const out = distributeNodes(nodes, ['a', 'b', 'c'], 'horizontal')
-    expect(left(out, 'b')).toBe(230)
-    /* The stored position is a delta on the old one, in Unify's frame -- not the flow
-       coordinate, which would fling it 400px right. */
-    expect(out.find((node) => node.id === 'b').position.x).toBe(-170)
+  describe('inside a zone', () => {
+    /* A zone 800 wide with 32px of margin each side leaves 736 to spread across. */
+    const roomy = (width = 800, height = 600) => ({ ...zone('zone-z', 100, 50), width, height })
+    const inZone = (id, x, y, size) => card(id, x, y, { parentId: 'zone-z', size })
+
+    it('spreads the selection across the zone, equal gaps between the cards', () => {
+      const nodes = [
+        roomy(),
+        inZone('a', 40, 60, { width: 100, height: 60 }),
+        inZone('b', 200, 60, { width: 40, height: 60 }),
+        inZone('c', 300, 60, { width: 100, height: 60 }),
+      ]
+      const out = distributeNodes(nodes, ['a', 'b', 'c'], 'horizontal')
+      /* room 736, cards 240, two gaps of 248: a at 32, b at 32+100+248, c at 32+100+248+40+248. */
+      expect(left(out, 'a')).toBe(100 + 32)
+      expect(left(out, 'b') - (left(out, 'a') + 100)).toBe(248)
+      expect(left(out, 'c') - (left(out, 'b') + 40)).toBe(248)
+      expect(left(out, 'c') + 100).toBe(100 + 800 - 32)
+    })
+
+    it('moves the ends too, and so is idempotent', () => {
+      const nodes = [roomy(), inZone('a', 40, 60, { width: 100, height: 60 }), inZone('b', 300, 60, { width: 100, height: 60 })]
+      const once = distributeNodes(nodes, ['a', 'b'], 'horizontal')
+      expect(left(once, 'a')).toBe(132)
+      expect(distributeNodes(once, ['a', 'b'], 'horizontal').map((node) => node.position)).toEqual(
+        once.map((node) => node.position),
+      )
+    })
+
+    it('spreads down the zone below its label, and leaves x alone', () => {
+      const nodes = [roomy(800, 500), inZone('a', 10, 60, { width: 100, height: 60 }), inZone('b', 70, 200, { width: 100, height: 60 })]
+      const out = distributeNodes(nodes, ['a', 'b'], 'vertical')
+      /* top margin 52, bottom 32: room 416, cards 120, one gap of 296. */
+      expect(out.find((node) => node.id === 'a').position).toEqual({ x: 10, y: 52 })
+      expect(out.find((node) => node.id === 'b').position).toEqual({ x: 70, y: 52 + 60 + 296 })
+    })
+
+    it('holds a minimum gap when the cards do not fit, leaving the zone to grow', () => {
+      const nodes = [roomy(300, 300), inZone('a', 40, 60, { width: 150, height: 60 }), inZone('b', 60, 60, { width: 150, height: 60 })]
+      const out = distributeNodes(nodes, ['a', 'b'], 'horizontal')
+      expect(left(out, 'b') - (left(out, 'a') + 150)).toBe(16)
+    })
+
+    it('spreads each zone on its own, and leaves one alone in its zone', () => {
+      const nodes = [
+        roomy(),
+        { ...zone('zone-other', 1000, 50), width: 800, height: 600 },
+        inZone('a', 40, 60, { width: 100, height: 60 }),
+        inZone('c', 300, 60, { width: 100, height: 60 }),
+        card('b', 50, 60, { parentId: 'zone-other', size: { width: 40, height: 60 } }),
+      ]
+      const out = distributeNodes(nodes, ['a', 'b', 'c'], 'horizontal')
+      expect(left(out, 'a')).toBe(132)
+      expect(left(out, 'c') + 100).toBe(868)
+      expect(out.find((node) => node.id === 'b').position.x).toBe(50)
+    })
   })
 
-  it('refuses two, because one gap is already equal to itself', () => {
+  it('outside any zone, still needs three and keeps the ends', () => {
     const nodes = [card('a', 0, 0), card('b', 300, 0)]
     expect(distributeNodes(nodes, ['a', 'b'], 'horizontal')).toBe(nodes)
   })
@@ -685,5 +729,19 @@ describe('patched', () => {
 
   it('copes with a node that has no style yet', () => {
     expect(patched(node('a'), { style: { border: '#c00' } }).data.style).toEqual({ border: '#c00' })
+  })
+})
+
+describe('matchSizeTo', () => {
+  const box = (id, width, height, type = 'default') => ({
+    id, type, position: { x: 0, y: 0 }, width: type === 'zone' ? width : undefined, height: type === 'zone' ? height : undefined,
+    data: { size: type === 'zone' ? undefined : { width, height } },
+  })
+  it('copies only the named side, to components and zones', () => {
+    const nodes = [box('a', 300, 100), box('b', 200, 50), box('z1', 500, 400, 'zone'), box('z2', 600, 300, 'zone')]
+    const w = matchSizeTo(nodes, ['a', 'b'], 'a', 'width')
+    expect(w[1].data.size).toEqual({ width: 300, height: 50 })
+    const h = matchSizeTo(nodes, ['z1', 'z2'], 'z1', 'height')
+    expect([h[3].width, h[3].height]).toEqual([600, 400])
   })
 })

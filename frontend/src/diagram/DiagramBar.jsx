@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import {
+  LayoutTemplate,
   ChevronDown,
   ChevronUp,
   Download,
@@ -49,6 +50,7 @@ export default function DiagramBar({
   onExport,
   onExportFile,
   onExportMermaid,
+  onSaveTemplate,
   onImportFile,
   onFocusPlaceholder,
   onApplyPalette,
@@ -193,6 +195,17 @@ export default function DiagramBar({
             </Secondary>
           )}
 
+          {onSaveTemplate && (
+            <Secondary
+              onClick={onSaveTemplate}
+              disabled={Boolean(busy)}
+              icon={LayoutTemplate}
+              title="Keep this diagram as a template to start others from, choosing what of this workspace's data comes with it"
+            >
+              Save as template
+            </Secondary>
+          )}
+
           {/* Document-scoped rather than in the inspector, because a theme is a
               statement about the whole diagram and the inspector only exists while one
               node is selected. The per-component scope lives there instead. */}
@@ -204,8 +217,8 @@ export default function DiagramBar({
               aria-expanded={theming}
               title={
                 themeable
-                  ? 'Recolour every component from a palette'
-                  : 'There is nothing on the canvas to recolour yet'
+                  ? 'Recolor every component from a palette'
+                  : 'There is nothing on the canvas to recolor yet'
               }
               className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 px-2.5 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
             >
@@ -267,7 +280,7 @@ export default function DiagramBar({
                   className="flex w-full items-center gap-1.5 border-t border-twilio-gray-20 px-2.5 py-2 text-[11px] text-twilio-gray-60 transition-colors hover:text-twilio-blue"
                 >
                   <RotateCcw size={11} aria-hidden="true" />
-                  Back to the default colours
+                  Back to the default colors
                 </button>
               </div>
             )}

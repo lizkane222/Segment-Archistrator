@@ -25,11 +25,23 @@
 
 import { useMemo, useState } from 'react'
 
+import { GLOW_CLASS, GLOW_PENDING_CLASS, useConvert } from './convertContext.js'
+
 import { DRAG_MIME } from '../canvas/Canvas.jsx'
 import { newTable } from '../canvas/tables.js'
 import { SHAPES, shapePath } from '../canvas/shapes/geometry.js'
-import LUCID from '../canvas/shapes/lucid.json'
+import LUCID_ALL from '../canvas/shapes/lucid.json'
+
+/* A tile with nothing on it but the pale background every icon sits on is not an icon -- the export dropped
+   its artwork and nothing in `brandGlyphs.js` restores it. Still drawable if a saved diagram names it; just
+   not offered. A single *coloured* square is a real shape (the Twilio Shapes swatches), so only the pale
+   backgrounds count as blank. */
+const BLANK_FILLS = new Set(['#f4f4f6', '#efeff4'])
+const isBlankTile = (shape) =>
+  shape.paths.length <= 1 && BLANK_FILLS.has(String(shape.paths[0]?.fill ?? '').toLowerCase().slice(0, 7))
+const LUCID = LUCID_ALL.filter((shape) => !isBlankTile(shape) || BRAND_GLYPHS[shape.id])
 import { LucidArt } from '../canvas/shapes/LucidArt.jsx'
+import { BRAND_GLYPHS } from '../canvas/shapes/brandGlyphs.js'
 
 /* Default drop size. A shape has no text to size itself around, so unlike a component it needs one --
    and it comes from the shape's own `aspect` so a swimlane arrives wide and a cylinder does not. */
@@ -120,6 +132,37 @@ export default function ShapesTab({ search }) {
 }
 
 /*
+ * The small picture on a tile: the same outline the canvas draws, at the canvas's own colour and a
+ * hairline weight. It used to stroke at 5px with a viewBox that stopped exactly at the shape's edge,
+ * which at 28px wide was a heavy line with its outer half clipped off.
+ *
+ * The viewBox is padded so a stroke on the very edge of the shape is not cut, and the box takes the
+ * shape's aspect so a wide swimlane is not squeezed into a square.
+ */
+const OUTLINE = {
+  fill: 'none',
+  stroke: '#354052',
+  strokeWidth: 1.5,
+  strokeLinejoin: 'round',
+  strokeLinecap: 'round',
+  vectorEffect: 'non-scaling-stroke',
+}
+
+function PreviewSvg({ aspect = 1, children }) {
+  const height = 28
+  return (
+    <svg
+      viewBox="-4 -4 108 108"
+      preserveAspectRatio="none"
+      style={{ width: Math.min(Math.round(height * aspect), 44), height }}
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  )
+}
+
+/*
  * The things that are not outlines.
  *
  * A table is a `kind` of its own rather than a `shape`, because its content is a grid of editable
@@ -138,15 +181,9 @@ const OBJECTS = [
       data: { bound: true, bindable: false, table: newTable() },
     },
     preview: (
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-7 w-7">
-        <path
-          d="M 4 20 H 96 M 4 50 H 96 M 4 80 H 96 M 4 12 H 96 V 88 H 4 Z M 36 12 V 88 M 68 12 V 88"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={5}
-          vectorEffect="non-scaling-stroke"
-        />
-      </svg>
+      <PreviewSvg>
+        <path d="M 4 20 H 96 M 4 50 H 96 M 4 80 H 96 M 4 12 H 96 V 88 H 4 Z M 36 12 V 88 M 68 12 V 88" {...OUTLINE} />
+      </PreviewSvg>
     ),
   },
 ]
@@ -185,21 +222,9 @@ function dividerTile(divider) {
         },
       }}
       preview={
-        <svg viewBox="0 0 100 100" className="h-7 w-7">
-          <rect
-            x="6"
-            y="6"
-            width="88"
-            height="88"
-            rx="8"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={4}
-            strokeDasharray="10 8"
-            vectorEffect="non-scaling-stroke"
-          />
-          <path d={divider.d} fill="none" stroke="currentColor" strokeWidth={6} vectorEffect="non-scaling-stroke" />
-        </svg>
+        <PreviewSvg>
+          <path d={divider.d} {...OUTLINE} />
+        </PreviewSvg>
       }
     />
   )
@@ -234,16 +259,9 @@ function geometryTile(shape) {
         },
       }}
       preview={
-        <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-7 w-7">
-          <path
-            d={shapePath(shape.id, 0)}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={5}
-            strokeLinejoin="round"
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
+        <PreviewSvg aspect={shape.aspect}>
+          <path d={shapePath(shape.id, 0)} {...OUTLINE} />
+        </PreviewSvg>
       }
     />
   )
@@ -262,6 +280,9 @@ function lucidTile(shape) {
           bound: true,
           bindable: false,
           lucid: shape.id,
+          /* An icon is the picture; its name is for search and the inspector, not a caption over it.
+             Switched back on from the Style tab. */
+          labelHidden: true,
           /* The icon's own aspect ratio, so a wide illustration is not dropped into a square and
              squeezed. */
           size: {
@@ -294,15 +315,22 @@ function Grid({ title, children }) {
 }
 
 function Tile({ label, payload, preview }) {
+  const convert = useConvert()
+  const pending = convert?.pending === label
   return (
     <div
-      draggable
+      draggable={!convert}
+      onClick={convert ? () => convert.onPick(payload, label) : undefined}
       onDragStart={(event) => {
         event.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload))
         event.dataTransfer.effectAllowed = 'copy'
       }}
       title={label}
-      className="flex cursor-grab flex-col items-center gap-1 rounded border border-twilio-gray-20 p-1.5 text-twilio-gray-60 transition-colors hover:border-twilio-blue hover:text-twilio-navy active:cursor-grabbing"
+      className={`flex flex-col items-center gap-1 rounded border p-1.5 text-twilio-gray-60 transition-colors hover:border-twilio-blue hover:text-twilio-navy ${
+        convert
+          ? `cursor-pointer ${pending ? GLOW_PENDING_CLASS : GLOW_CLASS}`
+          : 'cursor-grab border-twilio-gray-20 active:cursor-grabbing'
+      }`}
     >
       {preview}
       <span className="w-full truncate text-center text-[9px] leading-tight">{label}</span>

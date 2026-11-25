@@ -19,6 +19,8 @@ import { fileNameFor } from './exportImage.js'
 import { convertIfLucid } from './lucid.js'
 import { graphToMermaid } from './mermaid.js'
 
+const MAX_FILE_BYTES = 2_000_000
+
 const DIRECTIONS = [
   ['auto', 'Auto'],
   ['LR', 'Left → right'],
@@ -97,10 +99,12 @@ export default function MermaidDialog({
     }
   }
 
-  const pickFile = async (event) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
+  const readFile = async (file) => {
     if (!file) return
+    if (file.size > MAX_FILE_BYTES) {
+      setError(`That file is ${(file.size / 1e6).toFixed(1)} MB — Mermaid and diagram files are far smaller. Pick a text file under 2 MB.`)
+      return
+    }
     const body = await file.text()
     setError(null)
     /* A Lucid JSON export is shown converted rather than imported straight away: it carries no layout,
@@ -116,6 +120,40 @@ export default function MermaidDialog({
     runImport(body)
   }
 
+  const pickFile = (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    return readFile(file)
+  }
+
+  /* Dropping a file anywhere on the dialog imports it, and brings the Import tab forward -- a drop on
+     the Export tab can only mean "import this". The counter is because `dragleave` fires for every
+     child the pointer crosses, which would flicker the highlight off mid-drag. */
+  const [dragging, setDragging] = useState(0)
+  const hasFile = (event) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+  const dragHandlers = {
+    onDragEnter: (event) => {
+      if (!hasFile(event)) return
+      event.preventDefault()
+      setDragging((count) => count + 1)
+    },
+    onDragOver: (event) => {
+      if (!hasFile(event)) return
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+    },
+    onDragLeave: (event) => {
+      if (hasFile(event)) setDragging((count) => Math.max(0, count - 1))
+    },
+    onDrop: (event) => {
+      if (!hasFile(event)) return
+      event.preventDefault()
+      setDragging(0)
+      setTab('import')
+      readFile(event.dataTransfer.files?.[0])
+    },
+  }
+
   const lines = text.split('\n').length
 
   return (
@@ -123,7 +161,19 @@ export default function MermaidDialog({
       className="absolute inset-0 z-40 flex items-center justify-center bg-twilio-navy/30 p-6"
       onClick={(event) => event.target === event.currentTarget && onClose()}
     >
-      <div className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-twilio-gray-20 bg-white shadow-lg">
+      <div
+        {...dragHandlers}
+        className="relative flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-twilio-gray-20 bg-white shadow-lg"
+      >
+        {dragging > 0 && (
+          <div
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-twilio-blue bg-twilio-blue-light/80 text-sm font-medium text-twilio-blue"
+            data-testid="mermaid-drop"
+          >
+            <FileUp size={18} className="mr-2" aria-hidden="true" />
+            Drop a file to import it
+          </div>
+        )}
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-twilio-gray-20 px-4 py-3">
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-twilio-navy">Mermaid</h2>
@@ -258,7 +308,7 @@ export default function MermaidDialog({
             )}
             <footer className="flex shrink-0 items-center justify-between gap-3 px-4 py-2.5">
               <p className="text-[11px] text-twilio-gray-60">
-                Paste Mermaid, or pick a .mmd file or a Lucid JSON export. Opens as a new, unsaved
+                Paste Mermaid (flowchart or sequence diagram), or drag a .mmd, .md or Lucid JSON file here. Opens as a new, unsaved
                 diagram; Segment products and components are recognised by name.
               </p>
               <div className="flex shrink-0 items-center gap-2">

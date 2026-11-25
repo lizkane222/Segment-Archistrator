@@ -56,6 +56,8 @@
       },
       {
         "id": "linked_events",
+        "label": "Linked Events",
+        "description": "Warehouse entities joined onto a live event on its way out, so a destination sees more than the event carried.",
         "position": {
           "x": 843,
           "y": 66
@@ -82,10 +84,10 @@
         "description": "The sources feeding profiles, and how identities are resolved.",
         "position": {
           "x": 33,
-          "y": 74
+          "y": 57
         },
         "width": 342,
-        "height": 541,
+        "height": 562,
         "parent": "unify"
       },
       {
@@ -94,9 +96,9 @@
         "description": "Identifiers, traits, and events per profile.",
         "position": {
           "x": 403,
-          "y": 287
+          "y": 301
         },
-        "width": 409,
+        "width": 382,
         "height": 321,
         "parent": "unify"
       },
@@ -118,10 +120,10 @@
         "description": "Events as they arrive. Populated by a walkthrough.",
         "position": {
           "x": 315,
-          "y": 61
+          "y": 53
         },
         "width": 280,
-        "height": 436,
+        "height": 556,
         "parent": "engage"
       },
       {
@@ -143,7 +145,7 @@
         "description": "Where data goes out, when the diagram wants them boxed off.",
         "position": {
           "x": 607,
-          "y": 60
+          "y": 53
         },
         "width": 280,
         "height": 558,
@@ -214,25 +216,6 @@
     ],
     "nodes": [
       {
-        "id": "ph:profiles-sync",
-        "kind": "profile_sync",
-        "name": "Profiles Sync",
-        "position": {
-          "x": 1645,
-          "y": 51
-        },
-        "zone": "warehouses~2",
-        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. Drawn in the warehouse it writes to, which is the half of its job a diagram can show.",
-        "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
-        },
-        "showFields": {
-          "description": false
-        }
-      },
-      {
         "id": "ph:source-web",
         "kind": "source",
         "name": "Source",
@@ -299,12 +282,31 @@
         }
       },
       {
+        "id": "ph:linked-event",
+        "kind": "linked_event",
+        "name": "Linked Event",
+        "position": {
+          "x": 17,
+          "y": 99
+        },
+        "zone": "linked_events",
+        "description": "A warehouse entity joined onto an outbound event, so the destination receives the whole row rather than the id the event carried. Reads from a cache on a schedule, not live.",
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "showFields": {
+          "description": false
+        }
+      },
+      {
         "id": "ph:identity-rule",
         "kind": "identity_setting",
         "name": "Identity Resolution Rule",
         "position": {
           "x": 413,
-          "y": 74
+          "y": 57
         },
         "zone": "unify",
         "description": "One identity resolution rule, which identifiers may collapse two events into one profile. Maintained by hand; Segment publishes no API for these.",
@@ -492,7 +494,7 @@
         "name": "Linked Audience",
         "position": {
           "x": 26,
-          "y": 82
+          "y": 81
         },
         "zone": "linked_audiences",
         "description": "Membership decided by walking warehouse entities through a Data Graph, not by matching event history -- so it is recomputed on its own schedule.",
@@ -510,8 +512,8 @@
         "kind": "destination",
         "name": "Destination",
         "position": {
-          "x": 38,
-          "y": 79
+          "x": 48,
+          "y": 81
         },
         "zone": "destinations~2",
         "description": "Where an audience is activated. Connected directly to the audience or computed trait, with its own mapping; the source behind it is abstracted and never configured.",
@@ -528,12 +530,31 @@
         }
       },
       {
+        "id": "ph:profiles-sync",
+        "kind": "profile_sync",
+        "name": "Profiles Sync",
+        "position": {
+          "x": 1643,
+          "y": 57
+        },
+        "zone": "warehouses~2",
+        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. Drawn in the warehouse it writes to, which is the half of its job a diagram can show.",
+        "style": {
+          "borderStyle": "solid",
+          "borderWidth": 1,
+          "shape": "rounded"
+        },
+        "showFields": {
+          "description": false
+        }
+      },
+      {
         "id": "ph:reverse-etl-model",
         "kind": "reverse_etl_model",
         "name": "Reverse ETL Model",
         "position": {
           "x": 16,
-          "y": 65
+          "y": 57
         },
         "zone": "warehouses~2",
         "description": "A query against the customer's own warehouse, on a schedule. The way data that was never an event gets into Segment.",
@@ -555,7 +576,7 @@
         "name": "Warehouse",
         "position": {
           "x": 37,
-          "y": 84
+          "y": 64
         },
         "zone": "warehouses",
         "description": "A warehouse the customer already had. Reverse ETL reads from it; Segment does not own it.",
@@ -577,7 +598,7 @@
         "name": "Warehouse",
         "position": {
           "x": 33,
-          "y": 68
+          "y": 64
         },
         "zone": "warehouses~3",
         "description": "The warehouse Profiles Sync writes into, and Linked Audiences reads back from.",
@@ -633,54 +654,87 @@
         "showFields": {
           "description": false
         }
-      },
-      {
-        "id": "ph:linked-event",
-        "kind": "linked_event",
-        "name": "Linked Event",
-        "position": {
-          "x": 17,
-          "y": 99
-        },
-        "zone": "linked_events",
-        "description": "A warehouse entity joined onto an outbound event, so the destination receives the whole row rather than the id the event carried. Reads from a cache on a schedule, not live.",
-        "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
-        },
-        "showFields": {
-          "description": false
-        }
       }
     ],
     "edges": [
       {
         "source": "ph:journey",
         "target": "ph:debugger-source",
-        "sourceHandle": "n",
+        "sourceHandle": "e",
         "targetHandle": "w",
-        "targetAnchor": "free:left:0.60"
+        "sourceAnchor": "free:right:0.58",
+        "targetAnchor": "free:left:0.60",
+        "waypoints": [
+          {
+            "x": 1206,
+            "y": 1028
+          },
+          {
+            "x": 1206,
+            "y": 782
+          },
+          {
+            "x": 1228,
+            "y": 782
+          }
+        ]
       },
       {
         "source": "ph:computed-trait",
         "target": "ph:debugger-source",
         "sourceHandle": "e",
         "targetHandle": "w",
-        "targetAnchor": "free:left:0.60"
+        "targetAnchor": "free:left:0.60",
+        "waypoints": [
+          {
+            "x": 1165,
+            "y": 991
+          },
+          {
+            "x": 1205,
+            "y": 991
+          },
+          {
+            "x": 1205,
+            "y": 782
+          },
+          {
+            "x": 1228,
+            "y": 782
+          }
+        ]
       },
       {
         "source": "ph:audience",
         "target": "ph:debugger-source",
         "sourceHandle": "e",
         "targetHandle": "w",
-        "targetAnchor": "free:left:0.61"
+        "targetAnchor": "free:left:0.61",
+        "waypoints": [
+          {
+            "x": 1165,
+            "y": 901
+          },
+          {
+            "x": 1206,
+            "y": 901
+          },
+          {
+            "x": 1206,
+            "y": 783
+          },
+          {
+            "x": 1228,
+            "y": 783
+          }
+        ]
       },
       {
         "source": "ph:profile",
         "target": "ph:journey",
         "sourceHandle": "e",
         "targetHandle": "w",
+        "sourceAnchor": "free:right:0.62",
         "targetAnchor": "free:left:0.55"
       },
       {
@@ -689,7 +743,25 @@
         "sourceHandle": "e",
         "targetHandle": "w",
         "sourceAnchor": "free:right:0.53",
-        "targetAnchor": "free:left:0.41"
+        "targetAnchor": "free:left:0.41",
+        "waypoints": [
+          {
+            "x": 772,
+            "y": 1065
+          },
+          {
+            "x": 859,
+            "y": 1065
+          },
+          {
+            "x": 859,
+            "y": 986
+          },
+          {
+            "x": 922,
+            "y": 986
+          }
+        ]
       },
       {
         "source": "ph:profile",
@@ -697,7 +769,25 @@
         "sourceHandle": "e",
         "targetHandle": "w",
         "sourceAnchor": "free:right:0.42",
-        "targetAnchor": "free:left:0.50"
+        "targetAnchor": "free:left:0.50",
+        "waypoints": [
+          {
+            "x": 772,
+            "y": 1057
+          },
+          {
+            "x": 847,
+            "y": 1057
+          },
+          {
+            "x": 847,
+            "y": 901
+          },
+          {
+            "x": 922,
+            "y": 901
+          }
+        ]
       },
       {
         "source": "ph:profile-source",
@@ -739,31 +829,57 @@
         "target": "ph:profiles-sync",
         "sourceHandle": "e",
         "targetHandle": "w",
-        "sourceAnchor": "free:right:0.53",
-        "targetAnchor": "free:left:0.52"
+        "sourceAnchor": "free:right:0.30",
+        "targetAnchor": "free:left:0.52",
+        "waypoints": [
+          {
+            "x": 1468,
+            "y": 764
+          },
+          {
+            "x": 1500,
+            "y": 764
+          },
+          {
+            "x": 1500,
+            "y": 529
+          },
+          {
+            "x": 1672,
+            "y": 529
+          }
+        ]
       },
       {
         "source": "ph:source-web",
         "target": "ph:profile-source",
         "sourceHandle": "s",
-        "targetHandle": "n",
-        "targetAnchor": "free:top:0.48",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.39",
         "waypoints": [
           {
-            "x": 211,
-            "y": 244
+            "x": 197,
+            "y": 256
           },
           {
-            "x": 268,
-            "y": 244
+            "x": 282,
+            "y": 256
           },
           {
-            "x": 268,
-            "y": 666
+            "x": 282,
+            "y": 604
           },
           {
-            "x": 204,
-            "y": 666
+            "x": 38,
+            "y": 604
+          },
+          {
+            "x": 38,
+            "y": 891
+          },
+          {
+            "x": 92,
+            "y": 891
           }
         ]
       },
@@ -772,6 +888,7 @@
         "target": "ph:debugger-source",
         "sourceHandle": "e",
         "targetHandle": "w",
+        "sourceAnchor": "free:right:0.49",
         "targetAnchor": "free:left:0.49"
       },
       {
@@ -797,11 +914,19 @@
         "waypoints": [
           {
             "x": 165,
-            "y": 871
+            "y": 589
           },
           {
-            "x": 113,
-            "y": 871
+            "x": 33,
+            "y": 589
+          },
+          {
+            "x": 33,
+            "y": 1044
+          },
+          {
+            "x": 92,
+            "y": 1044
           }
         ]
       },
@@ -810,7 +935,25 @@
         "target": "ph:reverse-etl-model",
         "sourceHandle": "e",
         "targetHandle": "w",
-        "targetAnchor": "free:left:0.59"
+        "targetAnchor": "free:left:0.59",
+        "waypoints": [
+          {
+            "x": -18,
+            "y": 528
+          },
+          {
+            "x": 13,
+            "y": 528
+          },
+          {
+            "x": 13,
+            "y": 534
+          },
+          {
+            "x": 45,
+            "y": 534
+          }
+        ]
       },
       {
         "source": "ph:warehouse-sync-target",
@@ -824,52 +967,97 @@
         "source": "ph:debugger-source",
         "target": "ph:profile",
         "sourceHandle": "s",
-        "targetHandle": "s"
+        "targetHandle": "s",
+        "strokeStyle": "dashed"
       },
       {
         "source": "ph:debugger-source",
         "target": "ph:engage-destination",
         "sourceHandle": "e",
         "targetHandle": "w",
-        "targetAnchor": "free:left:0.46"
+        "sourceAnchor": "free:right:0.45",
+        "targetAnchor": "free:left:0.46",
+        "waypoints": [
+          {
+            "x": 1468,
+            "y": 773
+          },
+          {
+            "x": 1501,
+            "y": 773
+          },
+          {
+            "x": 1534,
+            "y": 773
+          },
+          {
+            "x": 1534,
+            "y": 774
+          }
+        ]
+      },
+      {
+        "source": "ph:reverse-etl-model",
+        "target": "ph:linked-audience",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.46",
+        "waypoints": [
+          {
+            "x": 288,
+            "y": 536
+          },
+          {
+            "x": 892,
+            "y": 536
+          },
+          {
+            "x": 892,
+            "y": 774
+          },
+          {
+            "x": 929,
+            "y": 774
+          }
+        ]
       }
     ],
     "scenarios": [
       {
-        "id": "path:end-to-end",
-        "name": "Order Completed",
-        "color": "#0263e0",
+        "id": "path:3fcc2e8c",
+        "name": "Path 2",
+        "color": "#6f42c1",
+        "sourceId": "ph:custom-app",
         "event": {
           "type": "track",
           "event": "Order Completed",
           "userId": "user_1234",
-          "context": {
-            "ip": "198.51.100.24",
-            "page": {
-              "url": "https://example.com/pricing",
-              "path": "/pricing",
-              "title": "Pricing",
-              "referrer": "https://www.google.com"
-            },
-            "locale": "en-US",
-            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
-          },
-          "timestamp": "2026-01-15T10:30:00.000Z",
           "properties": {
+            "order_id": "ord_9876",
             "revenue": 42.5,
             "currency": "USD",
-            "order_id": "ord_9876",
             "quantity": 2
           },
-          "anonymousId": "anon_abcdef123456"
+          "anonymousId": "anon_abcdef123456",
+          "timestamp": "2026-01-15T10:30:00.000Z",
+          "context": {
+            "ip": "198.51.100.24",
+            "locale": "en-US",
+            "page": {
+              "path": "/pricing",
+              "referrer": "https://www.google.com",
+              "title": "Pricing",
+              "url": "https://example.com/pricing"
+            },
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+          }
         },
-        "revisit": [],
-        "branches": {},
+        "functionBehaviour": {},
         "disabled": [],
         "excluded": [],
-        "fallback": {},
-        "sourceId": "ph:source-web",
-        "functionBehaviour": {}
+        "branches": {},
+        "revisit": [],
+        "fallback": {}
       }
     ]
   },

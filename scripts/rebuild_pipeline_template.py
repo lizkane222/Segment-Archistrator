@@ -7,8 +7,10 @@ ids became which stable ones, which style fields were dropped, and which two edg
 Re-running it against the same export reproduces the fixture byte for byte, which is the only way
 to check the transcription by anything other than eye.
 
-The export it reads is the one attached to the request (2026-09-22), reproduced inline below so
-this does not depend on a file in somebody's Downloads folder.
+The export it reads is `end-to-end-export.json` beside it (2026-11-16), so this does not depend on a
+file in somebody's Downloads folder. That export is already in `ph:` ids, with the Linked Events and
+Warehouse sub-zones drawn, so most of the renaming below is a no-op against it and is kept only so
+an older export still rebuilds.
 """
 
 import json
@@ -189,6 +191,8 @@ BINDS = {
     "ph:reverse-etl-model": {"kind": "reverse_etl_model"},
 }
 
+MAIN_PATH = "path:3fcc2e8c"
+
 NAMES = {"ph:linked-event": "Linked Event", "ph:linked-audience": "Linked Audience"}
 
 # What `zoneStyleFor` resolves a zone's border to when the zone states no colour of its own --
@@ -248,10 +252,10 @@ def main() -> None:
     graph = export["graph"]
     rename = lambda node_id: RENAME.get(node_id, node_id)  # noqa: E731
     zones_by_id = {zone["id"]: zone for zone in graph["zones"]}
-    # The relabelled box becomes the real zone in place, so `linked_events` is the same geometry
-    # under a new id. Aliased here rather than special-cased at the translation site: to `_origin`
-    # the two names describe one box, which is exactly what makes the translation a no-op.
-    zones_by_id["linked_events"] = zones_by_id["linked_audiences~2"]
+    # An older export drew Linked Events as a relabelled copy of Linked Audiences. Aliased so
+    # `_origin` sees one box under either name, which is what makes the translation a no-op.
+    if "linked_audiences~2" in zones_by_id:
+        zones_by_id["linked_events"] = zones_by_id["linked_audiences~2"]
 
     zones = []
     for zone in graph["zones"]:
@@ -280,7 +284,7 @@ def main() -> None:
     # orange it was given by hand is dropped in favour of the palette's own. Done after the loop
     # because the colour test above has to judge it as the zone it *was*.
     for zone in zones:
-        if zone["id"] == "linked_audiences~2":
+        if zone["id"] == "linked_audiences~2":  # older exports only
             zone["id"] = "linked_events"
             zone["parent"] = "connections"
             zone.pop("label", None)
@@ -329,7 +333,14 @@ def main() -> None:
             "source": rename(change["source"] if change else edge["source"]),
             "target": rename(change["target"] if change else edge["target"]),
         }
-        for field in ("sourceHandle", "targetHandle", "sourceAnchor", "targetAnchor", "waypoints"):
+        for field in (
+            "sourceHandle",
+            "targetHandle",
+            "sourceAnchor",
+            "targetAnchor",
+            "waypoints",
+            "strokeStyle",
+        ):
             value = (change or {}).get(field, edge.get(field))
             if value and field not in (change or {}).get("drop", ()):
                 out[field] = value
@@ -349,7 +360,9 @@ def main() -> None:
         "zones": zones,
         "nodes": nodes,
         "edges": edges,
-        "scenarios": graph.get("scenarios", []),
+        # Only "Path 2", which starts at the customer's own app, is the walkthrough this template
+        # opens on. The export's other path ("Order Completed", from the web source) is dropped.
+        "scenarios": [s for s in graph.get("scenarios", []) if s["id"] == MAIN_PATH],
     }
 
     fixture = json.loads(FIXTURE.read_text())

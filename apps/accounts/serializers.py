@@ -15,10 +15,13 @@ from .models import Account, Invitation
 
 class AccountSerializer(serializers.ModelSerializer):
     avatarUrl = serializers.CharField(source="avatar_url", read_only=True)
+    # Only ever read to decide whether to *offer* admin mode. Every admin endpoint checks again on the
+    # server, so a browser that lies about this gains a button that answers 403.
+    isAdmin = serializers.BooleanField(source="has_admin_rights", read_only=True)
 
     class Meta:
         model = Account
-        fields = ["email", "name", "avatarUrl"]
+        fields = ["email", "name", "avatarUrl", "isAdmin"]
         read_only_fields = fields
 
 

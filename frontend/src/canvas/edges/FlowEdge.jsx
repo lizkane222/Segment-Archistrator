@@ -38,12 +38,14 @@ import {
 import { useChrome } from '../chrome.js'
 import { flowsAlong } from '../direction.js'
 import { parseFreeHandle, pointOnBorder } from '../handles.js'
-import { borderColorFor } from '../kinds.js'
+import { borderColorFor, zoneStyleFor } from '../kinds.js'
 import { COMPONENT_Z, EDGE_HANDLE_Z, zoneNodeId } from '../layout.js'
 import { looseEnds, loosePoint, looseSide } from './looseEnds.js'
+import { LABEL_WRAP_WIDTH, dragLabelTo, placeLabel, placementPatch } from './labelPlacement.js'
 import {
   cleanWaypoints,
   cornerHandles,
+  dashPieces,
   dragCorner,
   dragSegment,
   dragSplit,
@@ -167,6 +169,13 @@ const EDGE_LABEL_Z = COMPONENT_Z + 1
 /* The three patterns the Edge Style tab offers. `undefined` for solid, matching how
    every other "unstyled" property in this app resolves -- an absent dash array is
    what a plain line is, not a fourth case for the renderer to carry. */
+/* Dash plus gap, for pinning the pattern to the page -- see `dashPieces`. */
+function dashPeriodFor(strokeStyle) {
+  if (strokeStyle === 'dashed') return 16
+  if (strokeStyle === 'dotted') return 6
+  return null
+}
+
 function dashArrayFor(strokeStyle) {
   if (strokeStyle === 'dashed') return '10 6'
   if (strokeStyle === 'dotted') return '2 4'
@@ -190,6 +199,7 @@ export default function FlowEdge({
   const { screenToFlowPosition } = useReactFlow()
   const {
     onWaypoints,
+    onLabelPlacement,
     onEndpointMove,
     endpointDropTarget,
     adjustingEdgeId,
@@ -228,7 +238,11 @@ export default function FlowEdge({
   const colourFrom = free.source ? target : source
   const sourceData = useNodesData(colourFrom)?.data
   const sourceZoneData = useNodesData(sourceData?.zone ? zoneNodeId(sourceData.zone) : null)?.data
-  const color = data?.color ?? borderColorFor(sourceData, sourceZoneData)
+  /* A connector that starts at a zone (data with an id and no kind) wears that zone's colour -- it used to
+     fall through to the default grey, because a zone has no `zone` of its own to look up. */
+  const startsAtZone = Boolean(sourceData) && !sourceData.kind && sourceData.id !== undefined
+  const color =
+    data?.color ?? (startsAtZone ? zoneStyleFor(sourceData).border : borderColorFor(sourceData, sourceZoneData))
   const dashArray = dashArrayFor(data?.strokeStyle)
   const arrowEnd = data?.arrowEnd ?? true
   const arrowStart = data?.arrowStart ?? false
@@ -369,6 +383,47 @@ export default function FlowEdge({
     })
   const drawnPath = live ? live.path : path
   const drawnPoints = live ? live.points : points
+  /* A dashed or dotted line made of straight pieces is drawn piecewise, each piece's pattern pinned to
+     the page, so connectors sharing a row or column dash in step. A curve has no straight pieces. */
+  const dashPeriod = line === 'curved' ? null : dashPeriodFor(data?.strokeStyle)
+  const dashed = dashPeriod ? dashPieces(drawnPoints, dashPeriod) : null
+
+  /*
+   * The text on the line: where it sits, and the drag that moves it.
+   *
+   * `labelDrag` is held locally for the same reason `dragging` is -- the text follows the pointer at
+   * frame rate with no store write per mousemove, and one undo entry is committed on release. Only a
+   * *selected* connector's text can be grabbed; otherwise it stays pointer-transparent so it can never
+   * steal the click that selects or bends the line underneath it.
+   */
+  const [labelDrag, setLabelDrag] = useState(null)
+  const placedLabel = placeLabel(drawnPoints, data, labelDrag)
+  const pointsNow = useRef(drawnPoints)
+  pointsNow.current = drawnPoints
+  const startLabelDrag = (event) => {
+    if (!selected || !onLabelPlacement) return
+    event.stopPropagation()
+    event.preventDefault()
+    const at = (moveEvent) => screenToFlowPosition({ x: moveEvent.clientX, y: moveEvent.clientY })
+    const grab = at(event)
+    /* Keep the spot that was grabbed under the pointer, rather than snapping the text's anchor to it. */
+    const held = { x: grab.x - placedLabel.x, y: grab.y - placedLabel.y }
+    const resolve = (moveEvent) => {
+      const pointer = at(moveEvent)
+      return dragLabelTo(pointsNow.current, { x: pointer.x - held.x, y: pointer.y - held.y })
+    }
+    const onMove = (moveEvent) => setLabelDrag(resolve(moveEvent))
+    const onUp = (upEvent) => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      setLabelDrag(null)
+      onLabelPlacement(id, placementPatch(resolve(upEvent)))
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+  }
 
   /*
    * Publish where this connector runs, for the travelling event to follow.
@@ -628,7 +683,9 @@ export default function FlowEdge({
              edges it cannot see. */
           ...style,
           stroke: color,
-          strokeDasharray: dashArray,
+          strokeDasharray: dashed ? undefined : dashArray,
+          /* The pieces below carry the visible stroke; this path stays for its markers and its hit area. */
+          strokeOpacity: dashed ? 0 : undefined,
           /* Three cases. Under its own overlays it fades so the colours read against it; with a
              walkthrough running and no path on it, it recedes with the rest of the diagram the event
              never touched; otherwise it is left alone. */
@@ -636,6 +693,21 @@ export default function FlowEdge({
           strokeWidth: edgeStrokeWidth({ merged, selected, base: style?.strokeWidth }),
         }}
       />
+      {dashed && (
+        <g
+          fill="none"
+          stroke={color}
+          strokeWidth={edgeStrokeWidth({ merged, selected, base: style?.strokeWidth })}
+          strokeDasharray={dashArray}
+          opacity={paths ? 0.2 : walkthroughActive ? 0.3 : style?.opacity}
+          style={{ pointerEvents: 'none' }}
+          aria-hidden="true"
+        >
+          {dashed.map((piece, index) => (
+            <path key={index} d={piece.d} strokeDashoffset={piece.offset} />
+          ))}
+        </g>
+      )}
       </g>
 
       {/*
@@ -943,13 +1015,19 @@ export default function FlowEdge({
       {data?.label && (
         <EdgeLabelRenderer>
           <div
-            className="pointer-events-none absolute whitespace-pre rounded border border-twilio-gray-20 bg-white/95 px-1.5 py-px text-center text-[10px] leading-snug text-twilio-gray-90 shadow-sm"
+            className={`absolute rounded border bg-white/95 px-1.5 py-px text-[10px] leading-snug shadow-sm ${
+              data.labelWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'
+            } ${selected ? 'nodrag nopan cursor-grab border-twilio-blue active:cursor-grabbing' : 'pointer-events-none border-twilio-gray-20'}`}
             style={{
               zIndex: EDGE_LABEL_Z,
-              transform: `translate(-50%, -50%) translate(${live ? live.labelX : labelX}px, ${
-                (live ? live.labelY : labelY) + (merged ? 14 : 0)
-              }px)`,
+              /* The connector's own colour unless the text was given one. */
+              color: data.labelColor ?? color,
+              textAlign: data.labelAlign ?? 'center',
+              ...(data.labelWrap ? { width: 'max-content', maxWidth: LABEL_WRAP_WIDTH, overflowWrap: 'anywhere' } : {}),
+              transform: `translate(${placedLabel.x}px, ${placedLabel.y + (merged ? 14 : 0)}px) ${placedLabel.translate}`,
             }}
+            onPointerDown={startLabelDrag}
+            title={selected ? 'Drag to move the text along or off the line' : undefined}
             data-testid="edge-label"
           >
             {data.label}

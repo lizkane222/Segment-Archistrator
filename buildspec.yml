@@ -11,8 +11,14 @@ phases:
   build:
     commands:
       - pip install -r requirements.txt
-      - cd frontend && npm ci && npm run build && cd ..
+      # Tests before the build, so a red suite stops the artifact from shipping. Frontend only:
+      # the backend suite needs a Postgres, which this project does not provide here.
+      - cd frontend && npm ci && npm test -- --run && npm run build && cd ..
       - python manage.py collectstatic --noinput
+      # Zipping as a CodePipeline artifact doesn't reliably preserve git's
+      # executable bit, and EB silently fails to run a non-executable
+      # .platform hook -- force it explicitly so predeploy/postdeploy still run.
+      - chmod +x .platform/hooks/predeploy/*.sh .platform/hooks/postdeploy/*.sh
 artifacts:
   files:
     - '**/*'

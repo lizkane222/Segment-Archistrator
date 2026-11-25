@@ -221,6 +221,37 @@ describe('the source-only versus source-plus-insert-function pair', () => {
     expect(JSON.stringify(graph)).toBe(before)
   })
 
+  /* A component left out of a path is stepped over, which the trace counts as the event having passed. On
+     the canvas "arrived" is what draws the glow, so a left-out component must not carry it. */
+  it('does not light a component the path was told to step over', () => {
+    const scenario = { ...newScenario({ id: 'p', name: 'P', event: TRACK, sourceId: 'src' }), excluded: ['fn'] }
+    const runs = runScenarios(chain(), [scenario])
+    const frame = combinedFrameAt(runs, 99, { mode: PLAY_MODES.together })
+    const fn = frame.nodes.fn?.[0]
+    expect(fn?.status).toBe(STATUS.bypassed)
+    expect(fn?.arrived).toBe(false)
+    expect(fn?.current).toBe(false)
+    expect(frame.nodes.dest?.[0]?.arrived).toBe(true)
+  })
+
+  /* Components nothing connects to still get a verdict (so they are not left grey), at the end of the run.
+     That is explanation, not arrival, and they must not light up as where the event is. */
+  it('does not light components the path never reaches', () => {
+    const graph = {
+      nodes: [
+        { id: 'src', kind: 'source', name: 'Web' },
+        { id: 'profile', kind: 'profile', name: 'Unrelated profile' },
+        { id: 'rule', kind: 'identity_setting', name: 'Unrelated rule' },
+      ],
+      edges: [],
+    }
+    const scenario = newScenario({ id: 'p', name: 'P', event: TRACK, sourceId: 'src' })
+    const frame = combinedFrameAt(runScenarios(graph, [scenario]), 99, { mode: PLAY_MODES.together })
+    expect(frame.nodes.profile[0].current).toBe(false)
+    expect(frame.nodes.rule[0].current).toBe(false)
+    expect(frame.nodes.profile[0].arrived).toBe(false)
+  })
+
   it('reports the withheld destination in the run status, from the first tick', () => {
     const runs = runScenarios(chain(), pair)
     const early = combinedFrameAt(runs, 0, { mode: PLAY_MODES.together })

@@ -548,7 +548,7 @@ function SlugPrompt({ slug, onSlugChange, onSubmit, submitting, error, onBack })
         to read — once it resolves, it is added to your list for next time.
       </p>
 
-      <form onSubmit={onSubmit}>
+      <div>
         <label
           htmlFor="operator-slug"
           className="mt-4 block text-sm font-medium text-twilio-navy"
@@ -560,6 +560,8 @@ function SlugPrompt({ slug, onSlugChange, onSubmit, submitting, error, onBack })
           type="text"
           value={slug}
           onChange={(event) => onSlugChange(event.target.value)}
+          /* Not a second <form>: it sat inside the dialog's own, and a submit there ran both. */
+          onKeyDown={(event) => event.key === 'Enter' && onSubmit(event)}
           autoComplete="off"
           spellCheck={false}
           placeholder="acme-corp"
@@ -569,14 +571,15 @@ function SlugPrompt({ slug, onSlugChange, onSubmit, submitting, error, onBack })
         {error && <ErrorNote message={error} />}
 
         <button
-          type="submit"
+          type="button"
+          onClick={onSubmit}
           disabled={submitting || !slug.trim()}
           className="mt-4 flex w-full items-center justify-center gap-2 rounded-md bg-twilio-blue px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-twilio-blue-dark disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
           {submitting ? 'Looking it up…' : 'Find workspace'}
         </button>
-      </form>
+      </div>
 
       <button
         type="button"

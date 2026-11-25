@@ -9,6 +9,7 @@
  * the bulk behaviour a flat colour picker would otherwise be standing in for.
  */
 
+import ColorField from '../ui/ColorField.jsx'
 import { ArrowLeftRight, RotateCcw } from 'lucide-react'
 
 import { borderColorFor } from '../canvas/kinds.js'
@@ -16,6 +17,7 @@ import { SIDES, endpointSidePatch, parseFreeHandle } from '../canvas/handles.js'
 import { sideOf } from '../canvas/direction.js'
 import { looseEnds } from '../canvas/edges/looseEnds.js'
 import { edgeActionRows } from './edgeActions.js'
+import { shared } from './multiEdit.js'
 import { Row, Section } from './primitives.jsx'
 
 const LINE_STYLES = ['solid', 'dashed', 'dotted']
@@ -37,6 +39,9 @@ const DASH_FOR_PREVIEW = {
 
 export default function EdgeStyleTab({
   edge,
+  /* Every connector this tab writes to: just `edge`, or all of a multi-selection it belongs to. What
+     the controls show is what they agree on, and a control they disagree on shows nothing chosen. */
+  group = null,
   nodes,
   onUpdate,
   onUpdateEnds,
@@ -50,6 +55,9 @@ export default function EdgeStyleTab({
   onPreview = null,
 }) {
   const override = edge.data ?? {}
+  const members = group?.length ? group : [edge]
+  const count = members.length
+  const many = count > 1
   const free = looseEnds(edge)
   /* The same two-hop lookup FlowEdge does at render time: the source component's own
      override first, then the zone it sits in, then its kind's bare default. Read off
@@ -60,19 +68,39 @@ export default function EdgeStyleTab({
   const zoneNode = nodes?.find((node) => node.id === sourceNode?.parentId)
   const defaultColor = borderColorFor(sourceNode?.data, zoneNode?.data)
 
-  const color = override.color ?? defaultColor
-  const lineStyle = override.strokeStyle ?? 'solid'
-  const arrowStart = override.arrowStart ?? false
-  const arrowEnd = override.arrowEnd ?? true
+  /* What each connector would draw if nobody had touched this tab: its own source's color. */
+  const colorOf = (member) => {
+    const loose = looseEnds(member)
+    const from = nodes?.find((node) => node.id === (loose.source ? member.target : member.source))
+    const zone = nodes?.find((node) => node.id === from?.parentId)
+    return member.data?.color ?? borderColorFor(from?.data, zone?.data)
+  }
+  const sharedColor = shared(members, colorOf)
+  const sharedPattern = shared(members, (m) => m.data?.strokeStyle ?? 'solid')
+  const sharedArrowStart = shared(members, (m) => m.data?.arrowStart ?? false)
+  const sharedArrowEnd = shared(members, (m) => m.data?.arrowEnd ?? true)
+  const sharedLabel = shared(members, (m) => m.data?.label ?? '')
+  const sharedShape = shared(members, (m) => m.data?.line ?? 'orthogonal')
 
-  const hasOverride =
-    override.color != null ||
-    override.strokeStyle != null ||
-    override.arrowStart != null ||
-    override.arrowEnd != null
+  /* Shown when they agree; the inspected connector's own when they do not, so the swatch is never
+     blank -- the "mixed" tag beside it is what says it is only one of several. */
+  const color = sharedColor.mixed ? colorOf(edge) : sharedColor.value
+  const lineStyle = sharedPattern.value
+  const arrowStart = sharedArrowStart.value
+  const arrowEnd = sharedArrowEnd.value
 
-  const shape = override.line ?? 'orthogonal'
-  const bends = override.waypoints?.length ?? 0
+  const hasOverride = members.some(
+    (m) =>
+      m.data?.color != null ||
+      m.data?.strokeStyle != null ||
+      m.data?.arrowStart != null ||
+      m.data?.arrowEnd != null,
+  )
+
+  const shape = sharedShape.value
+  const bendCounts = members.map((m) => m.data?.waypoints?.length ?? 0)
+  const bends = bendCounts[0] ?? 0
+  const withBends = bendCounts.filter((n) => n > 0).length
   /* Absent means a hand placed them -- see `serializeEdge`. Read here only to word the note below,
      because "these will be recalculated" and "these are yours" are opposite promises. */
   const routedBy = bends > 0 ? (override.routed ?? 'hand') : null
@@ -82,7 +110,9 @@ export default function EdgeStyleTab({
   /* A connector read from the workspace cannot be turned round: its direction is a fact about the
      customer's setup rather than a drawing decision. The same rule the menu item states, said here
      because this is the other place the operation is offered. */
-  const discovered = (override.discovered ?? edge.discovered) === true
+  /* Every one of them, for a group: Reverse is offered while any can still be turned, and the ones
+     that cannot are reported and left alone. */
+  const discovered = members.every((m) => (m.data?.discovered ?? m.discovered) === true)
 
   /* Which side each end currently meets, and whether that was *chosen* or merely where the
      defaults landed. `sideOf` resolves the handle exactly as the canvas does -- including the
@@ -93,21 +123,22 @@ export default function EdgeStyleTab({
       end: 'source',
       label: 'Leaves from',
       name: sourceName,
-      side: sideOf(edge, edge.source)?.side ?? null,
-      chosen: Boolean(parseFreeHandle(override.sourceAnchor)),
+      side: shared(members, (m) => sideOf(m, m.source)?.side ?? null).value ?? null,
+      chosen: shared(members, (m) => Boolean(parseFreeHandle(m.data?.sourceAnchor))).value === true,
       loose: free.source,
     },
     {
       end: 'target',
       label: 'Arrives at',
       name: targetName,
-      side: sideOf(edge, edge.target)?.side ?? null,
-      chosen: Boolean(parseFreeHandle(override.targetAnchor)),
+      side: shared(members, (m) => sideOf(m, m.target)?.side ?? null).value ?? null,
+      chosen: shared(members, (m) => Boolean(parseFreeHandle(m.data?.targetAnchor))).value === true,
       loose: free.target,
     },
   ]
 
-  const actionRows = commandContext && onRunCommand ? edgeActionRows({ ...commandContext, edge }) : []
+  /* The Actions are the right-click menu, which is about one connector. */
+  const actionRows = !many && commandContext && onRunCommand ? edgeActionRows({ ...commandContext, edge }) : []
 
   return (
     <>
@@ -123,7 +154,7 @@ export default function EdgeStyleTab({
       <Section title="Ends">
         <Row label="Direction">
           <span className="min-w-0 flex-1 truncate pt-px text-twilio-navy" title={`${sourceName} → ${targetName}`}>
-            {sourceName} → {targetName}
+            {many ? `${count} connectors` : `${sourceName} → ${targetName}`}
           </span>
           <button
             type="button"
@@ -137,7 +168,7 @@ export default function EdgeStyleTab({
             className="nodrag ml-auto flex shrink-0 items-center gap-1 rounded border border-twilio-gray-20 px-2 py-0.5 text-[11px] text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ArrowLeftRight size={10} aria-hidden="true" />
-            Reverse
+            {many ? 'Reverse all' : 'Reverse'}
           </button>
         </Row>
 
@@ -200,7 +231,7 @@ export default function EdgeStyleTab({
       </Section>
 
       <Section
-        title="This connector"
+        title={many ? `These ${count} connectors` : 'This connector'}
         actions={
           hasOverride && (
             <button
@@ -228,8 +259,8 @@ export default function EdgeStyleTab({
           <span className="w-28 shrink-0 text-twilio-gray-60">Label</span>
           <input
             type="text"
-            value={override.label ?? ''}
-            placeholder="None"
+            value={sharedLabel.mixed ? '' : sharedLabel.value}
+            placeholder={sharedLabel.mixed ? 'Mixed' : 'None'}
             /* `undefined` rather than '' when cleared, so an unlabelled connector stores nothing. */
             onChange={(event) => set({ label: event.target.value || undefined })}
             className="nodrag min-w-0 flex-1 rounded border border-twilio-gray-20 px-1.5 py-0.5 text-xs text-twilio-navy placeholder:text-twilio-gray-40 focus:border-twilio-blue focus:outline-none"
@@ -237,23 +268,25 @@ export default function EdgeStyleTab({
           />
         </div>
 
+        {(sharedLabel.mixed || sharedLabel.value) && (
+          <LabelControls override={override} lineColor={color} set={set} />
+        )}
+
         <div className="flex items-center gap-2 py-1 text-xs">
-          <span className="w-28 shrink-0 text-twilio-gray-60">Colour</span>
-          <input
-            type="color"
-            value={color}
-            onChange={(event) => set({ color: event.target.value })}
-            className="nodrag h-6 w-10 shrink-0 cursor-pointer rounded border border-twilio-gray-20 bg-white"
-            title="Line colour"
-          />
+          <span className="w-28 shrink-0 text-twilio-gray-60">Color</span>
+          <ColorField value={color} onChange={(next) => set({ color: next })} label="Line color" />
           <span className="font-mono text-[10px] uppercase text-twilio-gray-60">{color}</span>
-          {override.color ? (
+          {sharedColor.mixed ? (
+            <span className="ml-auto text-[9px] uppercase tracking-wide text-twilio-gray-60">mixed</span>
+          ) : members.every((m) => m.data?.color) ? (
             <span
               className="ml-auto text-[9px] uppercase tracking-wide text-twilio-warning"
-              title="Overrides the source component's colour"
+              title="Overrides the source component's color"
             >
               custom
             </span>
+          ) : members.some((m) => m.data?.color) ? (
+            <span className="ml-auto text-[9px] uppercase tracking-wide text-twilio-gray-60">mixed</span>
           ) : (
             <span className="ml-auto text-[9px] italic text-twilio-gray-60">from source</span>
           )}
@@ -285,7 +318,7 @@ export default function EdgeStyleTab({
           <div className="flex flex-wrap gap-1">
             <button
               type="button"
-              onClick={() => set({ arrowStart: !arrowStart })}
+              onClick={() => set({ arrowStart: !(arrowStart === true) })}
               title="Arrow at the source end"
               className={`nodrag rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
                 arrowStart
@@ -297,7 +330,7 @@ export default function EdgeStyleTab({
             </button>
             <button
               type="button"
-              onClick={() => set({ arrowEnd: !arrowEnd })}
+              onClick={() => set({ arrowEnd: !(arrowEnd === true) })}
               title="Arrow at the target end"
               className={`nodrag rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
                 arrowEnd
@@ -348,9 +381,15 @@ export default function EdgeStyleTab({
             nullish, so a conditional child silently blanks the row instead of falling back. */}
         <Row label="Bends">
           <span className="pt-px text-twilio-navy">
-            {bends === 0 ? 'None' : `${bends}${routedBy === 'auto' ? ' (automatic)' : ''}`}
+            {many
+              ? withBends === 0
+                ? 'None'
+                : `${withBends} of ${count} have bends`
+              : bends === 0
+                ? 'None'
+                : `${bends}${routedBy === 'auto' ? ' (automatic)' : ''}`}
           </span>
-          {bends > 0 && (
+          {withBends > 0 && (
             <button
               type="button"
               /* Clears the router's marker along with the bends. A straightened connector is a
@@ -382,6 +421,15 @@ export default function EdgeStyleTab({
         * options; hovering a Flow option previews it on the canvas exactly as hovering the menu row
         * does.
         */}
+      {many && (
+        <Section title="Actions">
+          <p className="text-[11px] leading-relaxed text-twilio-gray-60">
+            Delete, line style and flow direction act on one connector at a time. Select a single
+            connector to use them; everything above applies to all {count} selected.
+          </p>
+        </Section>
+      )}
+
       {actionRows.length > 0 && (
         <Section title="Actions">
           {actionRows.map((row) =>
@@ -464,5 +512,141 @@ function ActionButton({ item, disabled, reason, onRun, onPreview, wide = false }
     >
       {item.label}
     </button>
+  )
+}
+
+const SIDE_OPTIONS = [
+  ['on', 'On line'],
+  ['above', 'Above'],
+  ['below', 'Below'],
+  ['left', 'Left'],
+  ['right', 'Right'],
+]
+const ALIGN_OPTIONS = [
+  ['left', 'Left'],
+  ['center', 'Center'],
+  ['right', 'Right'],
+]
+
+const chip = (active) =>
+  `nodrag rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+    active
+      ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+      : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+  }`
+
+/* Where the connector's text sits and how it is set. Dragging the text on the canvas (select the
+   connector first) writes the same fields -- these are the precise version of that. */
+function LabelControls({ override, lineColor, set }) {
+  const side = override.labelSide ?? 'on'
+  const align = override.labelAlign ?? 'center'
+  const offset = override.labelOffset ?? { x: 0, y: 0 }
+  const along = Math.round((override.labelT ?? 0.5) * 100)
+  const nudge = (axis, value) => {
+    const next = { ...offset, [axis]: Number.isFinite(value) ? Math.round(value) : 0 }
+    set({ labelOffset: next.x || next.y ? next : undefined })
+  }
+
+  return (
+    <div className="mb-1 ml-1 space-y-1 border-l-2 border-twilio-gray-20 pl-2">
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="w-24 shrink-0 text-twilio-gray-60">Position</span>
+        <div className="flex flex-wrap gap-1">
+          {SIDE_OPTIONS.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => set({ labelSide: value === 'on' ? undefined : value, labelOffset: undefined })}
+              className={chip(side === value)}
+              title={value === 'on' ? 'Centred over the line' : `To the ${value} of the line`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="w-24 shrink-0 text-twilio-gray-60">Along line</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={along}
+          onChange={(event) => {
+            const t = Number(event.target.value) / 100
+            set({ labelT: t === 0.5 ? undefined : t })
+          }}
+          className="nodrag min-w-0 flex-1"
+          title="How far along the connector the text sits"
+        />
+        <span className="w-8 text-right font-mono text-[10px] text-twilio-gray-60">{along}%</span>
+      </div>
+
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="w-24 shrink-0 text-twilio-gray-60">Nudge</span>
+        {['x', 'y'].map((axis) => (
+          <label key={axis} className="flex items-center gap-1 text-[10px] uppercase text-twilio-gray-60">
+            {axis === 'x' ? '←→' : '↑↓'}
+            <input
+              type="number"
+              value={offset[axis]}
+              onChange={(event) => nudge(axis, event.target.valueAsNumber)}
+              className="nodrag w-14 rounded border border-twilio-gray-20 px-1 py-0.5 text-xs text-twilio-navy"
+              title={axis === 'x' ? 'Pixels right (negative: left) of the line' : 'Pixels down (negative: up) from the line'}
+            />
+          </label>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="w-24 shrink-0 text-twilio-gray-60">Wrap text</span>
+        <button
+          type="button"
+          onClick={() => set({ labelWrap: override.labelWrap ? undefined : true })}
+          aria-pressed={Boolean(override.labelWrap)}
+          className={chip(Boolean(override.labelWrap))}
+          title="Wrap long text onto several lines instead of keeping it on one"
+        >
+          {override.labelWrap ? 'On' : 'Off'}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="w-24 shrink-0 text-twilio-gray-60">Align</span>
+        <div className="flex gap-1">
+          {ALIGN_OPTIONS.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => set({ labelAlign: value === 'center' ? undefined : value })}
+              className={chip(align === value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 py-1 text-xs">
+        <span className="w-24 shrink-0 text-twilio-gray-60">Text color</span>
+        <ColorField
+          value={override.labelColor ?? lineColor}
+          onChange={(next) => set({ labelColor: next })}
+          label="Text color"
+        />
+        {override.labelColor ? (
+          <button
+            type="button"
+            onClick={() => set({ labelColor: undefined })}
+            className="nodrag ml-auto text-[10px] text-twilio-gray-60 hover:text-twilio-blue"
+          >
+            Match line
+          </button>
+        ) : (
+          <span className="ml-auto text-[9px] italic text-twilio-gray-60">matches line</span>
+        )}
+      </div>
+    </div>
   )
 }

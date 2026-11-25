@@ -468,3 +468,71 @@ def test_scenarios_survive_a_save_and_reload_through_the_api(auth_client):
 
     reloaded = auth_client.get(f"/api/diagrams/{created.json()['id']}")
     assert reloaded.json()["graph"]["scenarios"] == scenarios
+
+
+def test_a_connector_may_end_at_a_zone_by_its_canvas_node_id():
+    """`zone-engage` is how the document names a zone as a connector end; it is not a missing node."""
+    from apps.diagrams.validators import validate_architecture
+
+    graph = {
+        "nodes": [{"id": "n1", "kind": "profile_sync", "name": "Sync"}],
+        "zones": [{"id": "engage", "label": "Engage"}, {"id": "destinations~2", "label": "Destinations (2)"}],
+        "edges": [
+            {"id": "e1", "source": "zone-engage", "target": "n1"},
+            {"id": "e2", "source": "n1", "target": "zone-destinations~2"},
+        ],
+    }
+    assert validate_architecture(graph) == []
+    # No stored zones: the topology's own are drawn, so they are legitimate ends too.
+    assert validate_architecture({**{k: v for k, v in graph.items() if k != "zones"}, "edges": graph["edges"][:1]}) == []
+    # A genuinely missing node is still a refusal.
+    broken = {**graph, "edges": [{"id": "e3", "source": "zone-nowhere", "target": "n1"}]}
+    assert validate_architecture(broken)
+
+
+# --- connection edges cache ---------------------------------------------------
+
+def _connection_calls():
+    return [c for c in responses.calls if "connected-" in c.request.url]
+
+
+@responses.activate
+def test_source_connections_are_cached_and_refresh_bypasses(session):
+    sources = [{"segmentId": "src_1", "name": "Web"}]
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/sources/src_1/connected-destinations",
+        json=_list_page("destinations", [{"id": "dst_1"}]),
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/sources/src_1/connected-warehouses",
+        json=_list_page("warehouses", []),
+    )
+
+    first, _ = resources._connections_for_sources(session, sources)
+    second, _ = resources._connections_for_sources(session, sources)
+    assert first == second == [
+        {"id": "source:src_1->destination:dst_1", "source": "source:src_1",
+         "target": "destination:dst_1", "kind": "flow"}
+    ]
+    assert len(_connection_calls()) == 2, "second read should come from the cache"
+
+    resources._connections_for_sources(session, sources, refresh=True)
+    assert len(_connection_calls()) == 4
+
+
+@responses.activate
+def test_a_new_source_is_fetched_alone(session):
+    for sid in ("src_1", "src_2"):
+        responses.add(responses.GET, f"{API_BASE}/sources/{sid}/connected-destinations",
+                      json=_list_page("destinations", []))
+        responses.add(responses.GET, f"{API_BASE}/sources/{sid}/connected-warehouses",
+                      json=_list_page("warehouses", []))
+
+    resources._connections_for_sources(session, [{"segmentId": "src_1", "name": "A"}])
+    before = len(_connection_calls())
+    resources._connections_for_sources(
+        session, [{"segmentId": "src_1", "name": "A"}, {"segmentId": "src_2", "name": "B"}]
+    )
+    assert len(_connection_calls()) - before == 2

@@ -26,6 +26,8 @@ import { looseEnds, loosePoint } from '../canvas/edges/looseEnds.js'
 /* Fields React Flow adds or manages. Persisting them is either meaningless or
    wrong on the next load, so they are dropped on the way out. */
 const RUNTIME_NODE_KEYS = new Set([
+  /* The payload an event preview card is showing right now, read off the walkthrough's trace. */
+  'eventNow',
   'type',
   'parentId',
   'extent',
@@ -53,12 +55,6 @@ const RUNTIME_NODE_KEYS = new Set([
   'anchor',
   'anchorStep',
   'paths',
-  /* A profile pasted in from the real Profile API -- see inspector/ProfilePreview.jsx.
-     Deliberately never saved: it is real customer traits and identifiers, and this is
-     the same rule `PROFILE_SECTIONS` in canvas/grouping.js was written under -- a
-     diagram that gets exported to PDF is not where that belongs. It survives a reload
-     no better than `paths` does, and for the same reason. */
-  'profileSnapshot',
 ])
 
 /* Mirrors apps/diagrams/models.py SECRET_KEY_PATTERN. The server strips these on
@@ -235,6 +231,14 @@ export function serializeEdge(edge) {
     /* Words on the line itself -- "track calls", "nightly", a Mermaid link's `|label|`. Omitted when
        empty, for the byte-identical reason above. */
     ...(edge.data?.label ? { label: edge.data.label } : {}),
+    /* How that text is placed and set -- see canvas/edges/labelPlacement.js. Each omitted at its
+       default, so a connector whose text was never touched serializes as before. */
+    ...(edge.data?.label && edge.data?.labelT != null ? { labelT: edge.data.labelT } : {}),
+    ...(edge.data?.label && edge.data?.labelOffset ? { labelOffset: edge.data.labelOffset } : {}),
+    ...(edge.data?.label && edge.data?.labelSide && edge.data.labelSide !== 'on' ? { labelSide: edge.data.labelSide } : {}),
+    ...(edge.data?.label && edge.data?.labelWrap ? { labelWrap: true } : {}),
+    ...(edge.data?.label && edge.data?.labelAlign && edge.data.labelAlign !== 'center' ? { labelAlign: edge.data.labelAlign } : {}),
+    ...(edge.data?.label && edge.data?.labelColor ? { labelColor: edge.data.labelColor } : {}),
     phase: edge.data?.phase ?? null,
     discovered: edge.data?.discovered ?? false,
   }

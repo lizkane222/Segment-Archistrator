@@ -231,6 +231,62 @@ export function linkedCollections(links) {
   return [...byCollection.entries()].map(([collection, entries]) => ({ collection, entries }))
 }
 
+/**
+ * One hand-typed field and value, folded into the section `kind` names.
+ *
+ * The small alternative to pasting a whole API response: someone sketching a profile wants to say
+ * "trait `plan` is `pro`" without composing the envelope. `value` is read as JSON where it parses
+ * (numbers, booleans, objects, lists) and kept as text where it does not. What `field` means follows
+ * the section: a trait or metadata key, an identifier's type, an event's name, a link's collection.
+ */
+export function addField(existing, kind, field, value) {
+  const name = String(field ?? '').trim()
+  if (!name) throw new Error('Give the field a name.')
+  const text = String(value ?? '').trim()
+  let parsed = text
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    /* Plain text. */
+  }
+  const base = { ...emptySnapshot(), ...existing }
+  const now = new Date().toISOString()
+  switch (kind) {
+    case 'traits':
+      return { ...base, traits: { ...base.traits, [name]: parsed }, importedAt: Date.now() }
+    case 'metadata':
+      return { ...base, metadata: { ...base.metadata, [name]: parsed }, importedAt: Date.now() }
+    case 'external_ids':
+      return {
+        ...base,
+        identifiers: [...base.identifiers, { id: text, type: name, collection: 'users', source_id: '', created_at: now }],
+        importedAt: Date.now(),
+      }
+    case 'events':
+      return {
+        ...base,
+        events: [
+          ...base.events,
+          {
+            event: name,
+            message_id: `manual-${Date.now()}`,
+            timestamp: now,
+            properties: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : text ? { value: parsed } : {},
+          },
+        ],
+        importedAt: Date.now(),
+      }
+    case 'links':
+      return {
+        ...base,
+        links: [...base.links, { to_collection: name, external_ids: [{ type: 'id', id: text }] }],
+        importedAt: Date.now(),
+      }
+    default:
+      throw new Error(`Unknown profile section: ${kind}`)
+  }
+}
+
 /** What each endpoint kind is called in the panel -- shared between the template
     picker and the "imported X" notification, so the two never drift apart. */
 export const PROFILE_KIND_LABELS = {
@@ -323,8 +379,7 @@ export const PROFILE_KIND_TEMPLATES = {
  * nodes on the same canvas, both named "Profile" by default, don't look identical.
  *
  * Never written to `data.name`: that field is persisted and exported to PDF, and an
- * email or user id landing there would be exactly the customer PII `profileSnapshot`
- * being session-only (see diagram/serialize.js) exists to keep out of the document.
+ * an email or user id landing there would leak into places that only expect a label.
  * This is read straight off the snapshot at render time instead, in the same
  * derived-and-never-stored spirit.
  *

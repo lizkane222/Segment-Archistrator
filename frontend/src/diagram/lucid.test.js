@@ -118,7 +118,8 @@ describe('Lucid -> Mermaid -> diagram', () => {
     expect(warnings).toEqual([])
     expect(graph.edges).toHaveLength(5)
     for (const node of graph.nodes) expect(node.position, node.name).toBeDefined()
-    expect(byName('inflight db').kind).toBe('warehouse')
+    /* A cylinder is not the word "warehouse", so it is custom until converted. */
+    expect(byName('inflight db').kind).toBe('custom')
     expect(byName('voice stack')).toMatchObject({ kind: 'shape', shape: 'cloud' })
     /* Annotations are sized to their words rather than to a default shape box. */
     expect(byName('Voice cell')).toMatchObject({ kind: 'shape', style: { border: 'transparent' } })

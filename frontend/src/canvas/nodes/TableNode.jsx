@@ -28,11 +28,12 @@
  * makes, and for the same reason.
  */
 
-import { memo, useCallback, useRef, useState } from 'react'
+import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow } from '@xyflow/react'
-import { Lock, Plus } from 'lucide-react'
+import { Download, GripHorizontal, GripVertical, Lock, Plus } from 'lucide-react'
 
 import ConnectionHandles from './ConnectionHandles.jsx'
+import TableAxisHandles from './TableAxisHandles.jsx'
 import RichEditor from './RichEditor.jsx'
 import RichLabel from './RichLabel.jsx'
 import { useChrome } from '../chrome.js'
@@ -44,6 +45,8 @@ import {
   cellRich,
   insertColumn,
   insertRow,
+  moveColumn,
+  moveRow,
   nextCell,
   normalizeTable,
   resizeColumn,
@@ -51,6 +54,7 @@ import {
   setCell,
   tableSize,
   tableText,
+  tableToCsv,
 } from '../tables.js'
 
 /* How wide a divider's hit area is, in screen pixels. Wider than the line it sits on, because the
@@ -138,6 +142,90 @@ function TableNode({ id, data, selected }) {
     [screenToFlowPosition, table, write],
   )
 
+  /*
+   * Where each row and column actually is, measured. A column's span is its width, but a row's height
+   * is its text (see tables.js), so the reorder grips and the drop line need the browser's answer.
+   */
+  const [spans, setSpans] = useState({ rows: [], columns: [] })
+  useLayoutEffect(() => {
+    const element = grid.current
+    if (!element) return undefined
+    const measure = () => {
+      const span = (cell, a, b) => (cell ? [cell[a], cell[a] + cell[b]] : [0, 0])
+      const next = {
+        rows: table.rows.map((_, r) => span(element.querySelector(`[data-cell="${r}:0"]`), 'offsetTop', 'offsetHeight')),
+        columns: table.columns.map((_, c) => span(element.querySelector(`[data-cell="0:${c}"]`), 'offsetLeft', 'offsetWidth')),
+      }
+      setSpans((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next))
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    for (const cell of element.children) observer.observe(cell)
+    return () => observer.disconnect()
+  }, [table.rows.length, table.columns.length, table.columns, table.rows])
+
+  /*
+   * Dragging a row or column by its grip to a new place. The pointer's position against the measured
+   * spans says which row or column it is over; that is where the dragged one lands. Nothing is
+   * written until release, so the table does not reshuffle under the pointer mid-drag -- a line shows
+   * where it will go instead.
+   */
+  const [reorder, setReorder] = useState(null)
+  const dragReorder = useCallback(
+    (event, axis, from) => {
+      if (event.button !== 0) return
+      event.stopPropagation()
+      event.preventDefault()
+      const element = event.currentTarget
+      element.setPointerCapture?.(event.pointerId)
+      const box = grid.current?.getBoundingClientRect()
+      if (!box) return
+      const origin = screenToFlowPosition({ x: box.left, y: box.top })
+      const list = axis === 'column' ? spans.columns : spans.rows
+      let to = from
+      setReorder({ axis, from, to })
+
+      const onMove = (moveEvent) => {
+        const at = screenToFlowPosition({ x: moveEvent.clientX, y: moveEvent.clientY })
+        const position = axis === 'column' ? at.x - origin.x : at.y - origin.y
+        let index = list.findIndex(([start, end]) => position >= start && position < end)
+        if (index < 0) index = position < (list[0]?.[0] ?? 0) ? 0 : list.length - 1
+        if (index !== to) {
+          to = index
+          setReorder({ axis, from, to })
+        }
+      }
+      const finish = (commit) => {
+        element.removeEventListener('pointermove', onMove)
+        element.removeEventListener('pointerup', onUp)
+        element.removeEventListener('pointercancel', onCancel)
+        setReorder(null)
+        if (commit && to !== from) write(axis === 'column' ? moveColumn(table, from, to) : moveRow(table, from, to))
+      }
+      const onUp = () => finish(true)
+      const onCancel = () => finish(false)
+      element.addEventListener('pointermove', onMove)
+      element.addEventListener('pointerup', onUp)
+      element.addEventListener('pointercancel', onCancel)
+    },
+    [screenToFlowPosition, spans, table, write],
+  )
+
+  /* The table as a CSV file, for sharing the data without rebuilding it by hand. The byte-order mark
+     is what makes Excel read non-ASCII text as UTF-8 rather than guessing. */
+  const exportCsv = () => {
+    const blob = new Blob(['\ufeff', tableToCsv(table)], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'table.csv'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
   const size = tableSize(table)
   /* Offsets of each boundary from the node's own top-left, which is what positions the grips.
      Recomputed on every render rather than stored: they are the running sums of the column widths
@@ -157,7 +245,7 @@ function TableNode({ id, data, selected }) {
       />
 
       <div
-        className={`group relative ${aside ? 'walkthrough-aside' : ''} ${
+        className={`nokey group relative ${aside ? 'walkthrough-aside' : ''} ${
           here ? 'walkthrough-here' : arrived ? 'walkthrough-trail' : ''
         }`}
         style={{
@@ -261,6 +349,11 @@ function TableNode({ id, data, selected }) {
           )}
         </div>
 
+        {/* After the grid, not before: it measures the grid on mount, and a ref is only attached once the
+            sibling it names has been laid out. */}
+        {/* A connector from this row, or this column -- see TableAxisHandles. */}
+        <TableAxisHandles nodeId={id} grid={grid} rows={table.rows.length} columns={table.columns.length} border={style.border} selected={selected} />
+
         {/* The dividers. Only while selected and unlocked: they sit over the cells, and a grid of
             invisible drag strips on an unselected table would swallow the double-click that opens
             a cell. */}
@@ -303,6 +396,34 @@ function TableNode({ id, data, selected }) {
               />
             ))}
 
+            {/* Grips to drag a column or row to a new place. Outside the grid, so they never sit over a cell;
+                they carry `data-cell` so a right-click on one opens the same Delete / Insert menu as the
+                cells do. */}
+            {spans.columns.map(([start, end], column) => (
+              <div
+                key={`grip-col:${column}`}
+                data-cell={`0:${column}`}
+                title="Drag to move this column. Right-click for more."
+                onPointerDown={(event) => dragReorder(event, 'column', column)}
+                className="nodrag nopan absolute z-[7] flex cursor-grab items-center justify-center rounded-t border border-b-0 border-twilio-gray-20 bg-white text-twilio-gray-60 hover:text-twilio-blue active:cursor-grabbing"
+                style={{ left: start + 2, width: Math.max(8, end - start - 4), top: -13, height: 12 }}
+              >
+                <GripHorizontal size={11} aria-hidden="true" />
+              </div>
+            ))}
+            {spans.rows.map(([start, end], row) => (
+              <div
+                key={`grip-row:${row}`}
+                data-cell={`${row}:0`}
+                title="Drag to move this row. Right-click for more."
+                onPointerDown={(event) => dragReorder(event, 'row', row)}
+                className="nodrag nopan absolute z-[7] flex cursor-grab items-center justify-center rounded-l border border-r-0 border-twilio-gray-20 bg-white text-twilio-gray-60 hover:text-twilio-blue active:cursor-grabbing"
+                style={{ top: start + 2, height: Math.max(8, end - start - 4), left: -13, width: 12 }}
+              >
+                <GripVertical size={11} aria-hidden="true" />
+              </div>
+            ))}
+
             {/* Add a column or a row. On the two outer edges, where Lucid and Google Docs both put
                 them, and only while selected -- so a table being read carries no furniture. */}
             <AddButton
@@ -318,6 +439,39 @@ function TableNode({ id, data, selected }) {
           </>
         )}
 
+        {reorder && (() => {
+          const list = reorder.axis === 'column' ? spans.columns : spans.rows
+          const lifted = list[reorder.from]
+          const target = list[reorder.to]
+          if (!lifted || !target) return null
+          const line = reorder.to > reorder.from ? target[1] : target[0]
+          const column = reorder.axis === 'column'
+          return (
+            <>
+              <div
+                className="pointer-events-none absolute z-[9] bg-twilio-blue/15"
+                style={column
+                  ? { left: lifted[0], width: lifted[1] - lifted[0], top: 0, bottom: 0 }
+                  : { top: lifted[0], height: lifted[1] - lifted[0], left: 0, right: 0 }}
+              />
+              <div
+                className="pointer-events-none absolute z-[9] rounded bg-twilio-blue"
+                style={column
+                  ? { left: line - 1.5, width: 3, top: -4, bottom: -4 }
+                  : { top: line - 1.5, height: 3, left: -4, right: -4 }}
+              />
+            </>
+          )
+        })()}
+
+        {/* Export. Always reachable, selected or not: sharing the data is not an edit. */}
+        <AddButton
+          label="Export as CSV"
+          icon={Download}
+          className="-right-2.5 -top-2.5 z-10"
+          onClick={exportCsv}
+        />
+
         {locked && (
           <span className="absolute right-1 top-1" title="Placement locked. Right-click to unlock.">
             <Lock size={11} className="opacity-50" aria-hidden="true" />
@@ -328,7 +482,7 @@ function TableNode({ id, data, selected }) {
   )
 }
 
-function AddButton({ label, className, onClick }) {
+function AddButton({ label, className, onClick, icon: Icon = Plus }) {
   return (
     <button
       type="button"
@@ -340,7 +494,7 @@ function AddButton({ label, className, onClick }) {
       }}
       className={`nodrag nopan absolute flex h-5 w-5 items-center justify-center rounded-full border border-twilio-gray-20 bg-white text-twilio-gray-60 opacity-0 shadow-sm transition-opacity hover:text-twilio-blue group-hover:opacity-100 ${className}`}
     >
-      <Plus size={12} aria-hidden="true" />
+      <Icon size={12} aria-hidden="true" />
     </button>
   )
 }

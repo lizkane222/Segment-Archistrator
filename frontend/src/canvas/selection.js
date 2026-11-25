@@ -23,8 +23,19 @@
  * take `selectedAny`; everything else here still takes `selectedComponents`.
  */
 
-import { NODE_HEIGHT, NODE_WIDTH, arrangeOf, componentSize, nodeArea } from './layout.js'
+import {
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  ZONE_PADDING_BOTTOM,
+  ZONE_PADDING_TOP,
+  ZONE_PADDING_X,
+  arrangeOf,
+  componentSize,
+  nodeArea,
+  zoneSize,
+} from './layout.js'
 import { absolutePositions } from './rules.js'
+import { minZoneSize } from './layout.js'
 
 /* The six the request names -- "align top/middle/right/left/bottom/center" -- under the
    axis each one actually works on, because `center` and `middle` are the same word twice
@@ -149,49 +160,90 @@ export function alignNodes(nodes, ids, alignment) {
 }
 
 /**
- * Space the selected components evenly along one axis.
+ * Space the selected components evenly along one axis, using the room their zone gives them.
  *
- * The outermost two do not move. That is what makes this a *distribution* rather than a
- * layout: the user has already decided where the run starts and ends by placing those two,
- * and everything between them is what they are asking to be tidied. Moving the ends as
- * well would mean the button could not be pressed twice without the group creeping.
+ * ## Inside a zone
  *
- * Needs three. With two selected there is exactly one gap, which is already equal to
- * itself -- so the action would mark the document dirty and change nothing, which reads as
- * broken. The caller greys it with that reason rather than letting it no-op.
+ * What there is to space them out *in* is the zone they sit in, so that is the span: from its inner left
+ * (or top) margin to its inner right (or bottom) margin, leaving the room a zone keeps for its own label and
+ * edges. The first selected component goes to the start of that span, the last to the end, and the gaps
+ * between all of them are equal -- the cards' own sizes taken out of the span first, so a wide card and a
+ * narrow one get the same space either side of them rather than the same centre-to-centre distance.
  *
- * Equal gaps can come out negative, when the cards between the two ends do not fit in the
- * span. That is left as it is: it spreads the overlap evenly instead of refusing, and an
- * evenly-overlapping row is a legible signal to widen the run, which a refusal is not.
+ * Selections are split by zone. Components in two different zones are each spread across their own zone;
+ * a component alone in its zone has nothing to be spaced from and stays put.
+ *
+ * Where they do not fit -- more card than zone -- the gap is held at a minimum and the cards run past the
+ * zone's edge, which `growZones` (called by every caller of this) then answers by growing the zone. The
+ * alternative, overlapping them to fit, would be a layout that looks worse than the one it replaced.
+ *
+ * ## Outside any zone
+ *
+ * With no zone there is no room to speak of, so the outermost two stay where they were put and the rest are
+ * spaced between them -- the user has already decided where the run starts and ends, and moving the ends as
+ * well would mean the button could not be pressed twice without the group creeping. That needs three: with
+ * two there is one gap, already equal to itself.
+ *
+ * Equal gaps can come out negative in that case, when the cards do not fit between the two ends. That is
+ * left as it is: it spreads the overlap evenly instead of refusing, and an evenly-overlapping row is a
+ * legible signal to widen the run.
  */
 export function distributeNodes(nodes, ids, axis) {
   const members = selectedAny(nodes, ids)
-  if (members.length < 3 || !DISTRIBUTIONS.includes(axis)) return nodes ?? []
+  if (members.length < 2 || !DISTRIBUTIONS.includes(axis)) return nodes ?? []
 
   const horizontal = axis === 'horizontal'
   const positions = absolutePositions(nodes)
+  const byId = new Map((nodes ?? []).map((node) => [node.id, node]))
   const start = (box) => (horizontal ? box.x : box.y)
   const extent = (box) => (horizontal ? box.width : box.height)
 
-  const boxes = members
-    .map((node) => ({ node, box: boxOf(node, positions) }))
-    .sort((a, b) => start(a.box) - start(b.box))
-
-  const first = boxes[0].box
-  const last = boxes[boxes.length - 1].box
-  const span = start(last) + extent(last) - start(first)
-  const occupied = boxes.reduce((total, entry) => total + extent(entry.box), 0)
-  const gap = (span - occupied) / (boxes.length - 1)
-
-  /* Walked as a running cursor rather than computed per index, because the cards have
-     different sizes -- an nth-position formula would only be right for a row of identical
-     boxes and would silently drift on any real diagram. */
-  const targets = new Map()
-  let cursor = start(first)
-  for (const entry of boxes) {
-    targets.set(entry.node.id, cursor)
-    cursor += extent(entry.box) + gap
+  /* Which zone each member is spread within: its direct parent, or none. */
+  const groups = new Map()
+  for (const node of members) {
+    const key = node.parentId && byId.get(node.parentId)?.type === 'zone' ? node.parentId : null
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(node)
   }
+
+  const targets = new Map()
+  for (const [zoneId, group] of groups) {
+    const boxes = group
+      .map((node) => ({ node, box: boxOf(node, positions) }))
+      .sort((a, b) => start(a.box) - start(b.box))
+    const occupied = boxes.reduce((total, entry) => total + extent(entry.box), 0)
+    let from
+    let gap
+
+    if (zoneId) {
+      if (boxes.length < 2) continue
+      const zone = byId.get(zoneId)
+      const at = positions.get(zoneId)
+      const size = zoneSize(zone)
+      const lead = horizontal ? ZONE_PADDING_X : ZONE_PADDING_TOP
+      const trail = horizontal ? ZONE_PADDING_X : ZONE_PADDING_BOTTOM
+      from = (horizontal ? at.x : at.y) + lead
+      const room = (horizontal ? size.width : size.height) - lead - trail
+      gap = Math.max(MIN_DISTRIBUTED_GAP, (room - occupied) / (boxes.length - 1))
+    } else {
+      if (boxes.length < 3) continue
+      const first = boxes[0].box
+      const last = boxes[boxes.length - 1].box
+      from = start(first)
+      gap = (start(last) + extent(last) - start(first) - occupied) / (boxes.length - 1)
+    }
+
+    /* Walked as a running cursor rather than computed per index, because the cards have different
+       sizes -- an nth-position formula would only be right for a row of identical boxes and would
+       silently drift on any real diagram. */
+    let cursor = from
+    for (const entry of boxes) {
+      targets.set(entry.node.id, cursor)
+      cursor += extent(entry.box) + gap
+    }
+  }
+
+  if (!targets.size) return nodes ?? []
 
   return (nodes ?? []).map((node) => {
     const target = targets.get(node.id)
@@ -210,6 +262,10 @@ export function distributeNodes(nodes, ids, axis) {
     }
   })
 }
+
+/* The least room left between two spread cards, so a zone too small for them is grown rather than the
+   cards being laid on top of each other. */
+const MIN_DISTRIBUTED_GAP = 16
 
 /* --- stacking order -------------------------------------------------------- */
 
@@ -402,6 +458,42 @@ export function matchSize(nodes, ids, modelId) {
       ? { ...node, data: { ...node.data, size } }
       : node,
   )
+}
+
+/**
+ * Make the selected components *and zones* the model's width, its height, or both.
+ *
+ * `dimension` is 'width', 'height' or 'both'. Only the named side is copied, so matching widths leaves
+ * every height as it was. The model is the one named by `modelId` -- the node the menu was opened on, or
+ * the last one clicked -- falling back to the first selected.
+ *
+ * A component's size is written where a resize handle writes it (`data.size`); a zone's is the node's own
+ * width and height. A zone is never made smaller than the box its contents occupy, so matching to a small
+ * model cannot push a child outside its backdrop.
+ */
+export function matchSizeTo(nodes, ids, modelId, dimension = 'both') {
+  const members = selectedAny(nodes, ids)
+  if (members.length < 2 || !['width', 'height', 'both'].includes(dimension)) return nodes ?? []
+  const model = members.find((node) => node.id === modelId) ?? members[0]
+  const positions = absolutePositions(nodes)
+  const sizeOf = (node) => (node.type === 'zone' ? zoneSize(node) : boxOf(node, positions))
+  const target = sizeOf(model)
+  const wantW = dimension !== 'height'
+  const wantH = dimension !== 'width'
+
+  return (nodes ?? []).map((node) => {
+    if (node.id === model.id || !members.some((member) => member.id === node.id)) return node
+    const own = sizeOf(node)
+    let width = wantW ? Math.round(target.width) : Math.round(own.width)
+    let height = wantH ? Math.round(target.height) : Math.round(own.height)
+    if (node.type === 'zone') {
+      const floor = minZoneSize(node.id, nodes)
+      width = Math.max(width, floor.width)
+      height = Math.max(height, floor.height)
+      return width === own.width && height === own.height ? node : { ...node, width, height }
+    }
+    return { ...node, data: { ...node.data, size: { width, height } } }
+  })
 }
 
 /**

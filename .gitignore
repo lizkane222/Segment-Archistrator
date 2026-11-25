@@ -45,3 +45,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+AWS_MIGRATION_HANDOFF.md
+SECURITY_REVIEW_HANDOFF.md
+aws_hosting.md
