@@ -12,6 +12,7 @@ PARAM_PREFIX="/segment-builder/prod"
 
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+echo "fetching secrets from SSM under ${PARAM_PREFIX}/* in region ${REGION}"
 
 # Secrets live in SSM, not here, by design -- only the parameter NAMES are
 # listed. Add a name here once you've created the matching SecureString
@@ -27,14 +28,16 @@ SECRET_NAMES=(
 )
 
 for name in "${SECRET_NAMES[@]}"; do
-  value=$(aws ssm get-parameter \
+  err_file=$(mktemp)
+  # The `if` guards this against `set -e`: a failing command substitution
+  # inside an `if` condition doesn't abort the script, so one missing
+  # optional secret doesn't take down every secret after it in the list.
+  if value=$(aws ssm get-parameter \
     --name "${PARAM_PREFIX}/${name}" \
     --with-decryption \
     --region "$REGION" \
     --query 'Parameter.Value' \
-    --output text 2>/dev/null) || continue
-
-  if [ -n "$value" ]; then
+    --output text 2>"$err_file"); then
     # The file is sourced by a shell, so a value is escaped for a double-quoted string:
     # an unescaped `$(...)`, backtick or quote in a parameter would otherwise run as code
     # (or break every later source of the file) at the next deploy.
@@ -43,5 +46,11 @@ for name in "${SECRET_NAMES[@]}"; do
     escaped=${escaped//\$/\\\$}
     escaped=${escaped//\`/\\\`}
     echo "export ${name}=\"${escaped}\"" >> "$ENV_FILE"
+    echo "fetched ${name}"
+  else
+    # Safe to log: on failure this is an AWS CLI/API error message
+    # (e.g. ParameterNotFound, AccessDenied), never the secret value itself.
+    echo "WARN: could not fetch ${PARAM_PREFIX}/${name}: $(cat "$err_file")" >&2
   fi
+  rm -f "$err_file"
 done
