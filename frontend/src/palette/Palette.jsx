@@ -50,6 +50,7 @@ import {
   TABS,
   activeFilterCount,
   applyWorkspaceFilters,
+  relatedNodeIds,
   catalogQuery,
   filtersReducer,
   initialFilters,
@@ -82,6 +83,8 @@ export default function Palette({
   guideWorkspaceTab = false,
   onGuideDone,
   onStartSimulation,
+  /* Graph ids of the workspace components selected on the canvas, for "connected to selection". */
+  selectedIds = [],
   /* While a component is being converted: `{ name, pending, onPick, onConfirm, onCancel }`. */
   convert = null,
 }) {
@@ -180,6 +183,7 @@ export default function Palette({
             error={workspaceError}
             onRetry={onRetryWorkspace}
             workspaceReason={workspaceReason}
+            selectedIds={selectedIds}
             onConnect={onConnect}
             filters={filters}
             dispatch={dispatch}
@@ -525,6 +529,7 @@ function WorkspaceTab({
   error,
   onRetry,
   workspaceReason,
+  selectedIds = [],
   onConnect,
   filters,
   dispatch,
@@ -569,12 +574,40 @@ function WorkspaceTab({
     )
   }
 
-  const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters, topology)
+  const selectedNodes = (graph.nodes ?? []).filter((node) => selectedIds.includes(node.id))
+  const following = filters.followSelection && selectedNodes.length > 0
+  const related = following ? relatedNodeIds(graph.edges, selectedIds) : null
+  const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters, topology, related)
   const onCanvas = boundSegmentIds(diagram?.nodes)
   const spaces = (graph.nodes ?? []).filter((node) => node.kind === 'space')
 
   return (
     <div className="space-y-3">
+      {selectedNodes.length > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-twilio-blue/30 bg-twilio-blue/5 px-2 py-1.5 text-[11px] text-twilio-navy">
+          <p className="min-w-0 flex-1">
+            {following ? 'Showing what is connected to ' : 'Connected components hidden for '}
+            <strong className="font-semibold">
+              {selectedNodes.length === 1 ? selectedNodes[0].name : `${selectedNodes.length} selected components`}
+            </strong>
+            {following && related.size === 0 && (
+              <span className="text-twilio-gray-60">
+                {' '}— the Public API reports no connections for {selectedNodes.length === 1 ? 'it' : 'them'}.
+                {selectedNodes.some((node) => node.kind === 'audience') &&
+                  ' It does not list an audience’s destinations; an audience relates to its space.'}
+              </span>
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'setFollowSelection', follow: !filters.followSelection })}
+            className="shrink-0 rounded border border-twilio-gray-20 bg-white px-1.5 py-0.5 text-[10px] text-twilio-gray-60 hover:text-twilio-navy"
+          >
+            {following ? 'Show all' : 'Show connected'}
+          </button>
+        </div>
+      )}
+
       <FacetChips
         label="Pipeline"
         options={(topology?.zones ?? []).map((zone) => zone.id)}
@@ -616,12 +649,6 @@ function WorkspaceTab({
   )
 }
 
-/* Above this many components, the sections arrive folded.
-   Below it, folding costs a click and saves no scrolling: a dozen sources fit in the
-   sidebar with every header open, and closing them would hide the tab's contents to
-   solve a problem that tab does not have. */
-const FOLD_ABOVE = 20
-
 /*
  * The workspace list, ordered by type with a header per type -- the same grouping the
  * canvas folds by, from the same `groupKey`, so "Destinations · Email Marketing" means
@@ -634,13 +661,9 @@ function WorkspaceSections({ nodes, topology, onCanvas }) {
   const tree = useMemo(() => groupTree(nodes, topology), [nodes, topology])
   const [closed, setClosed] = useState(null)
 
-  /* Categories inside a kind arrive folded once the list is long; the kinds themselves stay open, so
-     the sections are always visible. Which are shut is the reader's once they have touched one. */
-  const folded =
-    closed ??
-    new Set(
-      nodes.length > FOLD_ABOVE ? tree.flatMap((entry) => entry.subs.map((sub) => sub.key)) : [],
-    )
+  /* Everything arrives folded, so the tab opens as a short list of type headers with their counts
+     rather than hundreds of rows. Which are open is the reader's from the first click. */
+  const folded = closed ?? new Set(tree.flatMap((entry) => [entry.key, ...entry.subs.map((sub) => sub.key)]))
 
   const toggle = (key) => {
     const next = new Set(folded)

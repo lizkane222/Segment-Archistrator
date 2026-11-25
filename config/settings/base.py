@@ -191,6 +191,8 @@ AIRTABLE_APP_NAME = env("AIRTABLE_APP_NAME", default="Archistrator")
 # Cache TTLs, in seconds. Space Schema is capped at 25 req/min, so it gets a
 # much longer TTL than the general workspace resources.
 WORKSPACE_CACHE_TTL = 300
+# Source -> destination/warehouse edges cost two requests per source, so they are held longer.
+CONNECTIONS_CACHE_TTL = env.int("CONNECTIONS_CACHE_TTL", default=900)
 SPACE_SCHEMA_CACHE_TTL = 3600
 
 LOGGING = {
