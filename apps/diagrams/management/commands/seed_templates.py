@@ -98,7 +98,12 @@ class Command(BaseCommand):
             self.stdout.write(f"  {'new ' if created else 'updated'} {summary}")
 
         if options["prune"] and not options["check"]:
-            stale = Template.objects.filter(is_builtin=True).exclude(key__in=seen)
+            # Not the ones an administrator published from the app: those were never in the fixture.
+            stale = (
+                Template.objects.filter(is_builtin=True)
+                .exclude(key__in=seen)
+                .exclude(key__startswith="admin-")
+            )
             for template in stale:
                 self.stdout.write(self.style.WARNING(f"  removed {template.key}"))
             stale.delete()
@@ -399,7 +404,14 @@ class Command(BaseCommand):
         # a hand-arranged template with 19 anchored ends and 2 routed edges was added --
         # loses the arrangement silently, leaving a template that validates, seeds, opens,
         # and looks nothing like the diagram it was made from.
-        for field in ("sourceHandle", "targetHandle", "sourceAnchor", "targetAnchor", "waypoints"):
+        for field in (
+            "sourceHandle",
+            "targetHandle",
+            "sourceAnchor",
+            "targetAnchor",
+            "waypoints",
+            "strokeStyle",
+        ):
             if raw.get(field):
                 edge[field] = raw[field]
         return edge

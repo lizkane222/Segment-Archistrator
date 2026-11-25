@@ -17,7 +17,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.auth_workspace.permissions import AllowAny, HasSession
+from apps.auth_workspace.permissions import AllowAny, HasSession, SignedIn
 
 from .airtable import AirtableClient, AirtableError, AirtableNotConfigured
 from .serializers import MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, FeedbackSerializer
@@ -34,7 +34,7 @@ class FeedbackConfigView(APIView):
     than to offer one whose submit fails with a 500.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [SignedIn]
 
     def get(self, request):
         return Response(

@@ -22,6 +22,7 @@ import { useEffect, useMemo, useReducer, useState } from 'react'
 
 import EventsTab from './EventsTab.jsx'
 import ShapesTab from './ShapesTab.jsx'
+import { ConvertContext, GLOW_CLASS, GLOW_PENDING_CLASS, useConvert } from './convertContext.js'
 import {
   Box,
   Boxes,
@@ -39,7 +40,7 @@ import {
 
 import { catalog as catalogApi } from '../services/api.js'
 import { DRAG_MIME } from '../canvas/Canvas.jsx'
-import { groupSections } from '../canvas/grouping.js'
+import { groupTree } from '../canvas/grouping.js'
 import { boundSegmentIds } from '../binding/bindMatch.js'
 import { KIND_STYLES, iconFor, zoneStyleFor } from '../canvas/kinds.js'
 import {
@@ -77,13 +78,31 @@ export default function Palette({
   onRetryWorkspace,
   onVisualizeAll,
   onConnect,
+  /* Just connected: the Workspace tab glows until it is clicked, to say where binding starts. */
+  guideWorkspaceTab = false,
+  onGuideDone,
   onStartSimulation,
+  /* While a component is being converted: `{ name, pending, onPick, onConfirm, onCancel }`. */
+  convert = null,
 }) {
   const [filters, dispatch] = useReducer(filtersReducer, initialFilters)
   const activeCount = activeFilterCount(filters)
+  const converting = Boolean(convert)
+
+  /* Conversion picks from Segment components and Shapes, which both live under Components. */
+  useEffect(() => {
+    if (converting) dispatch({ type: 'setTab', tab: TABS.components })
+  }, [converting])
+
+  const convertValue = useMemo(
+    () => (convert ? { onPick: convert.onPick, pending: convert.pending } : null),
+    [convert],
+  )
 
   return (
+    <ConvertContext.Provider value={convertValue}>
     <div className="flex h-full flex-col">
+      {convert && <ConvertBar convert={convert} />}
       <div className="shrink-0 border-b border-twilio-gray-20 px-3 pt-3">
         {/* Four uppercase labels do not fit the 320px sidebar, so the strip
             scrolls rather than clipping the last tab mid-word. */}
@@ -99,8 +118,18 @@ export default function Palette({
               type="button"
               role="tab"
               aria-selected={filters.tab === tab}
-              onClick={() => dispatch({ type: 'setTab', tab })}
+              onClick={() => {
+                dispatch({ type: 'setTab', tab })
+                if (tab === TABS.workspace) onGuideDone?.()
+              }}
+              title={
+                tab === TABS.workspace && guideWorkspaceTab
+                  ? 'Open this, click a component on the canvas, then pick the workspace resources to bind it to.'
+                  : undefined
+              }
               className={`shrink-0 whitespace-nowrap rounded-t-md px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide transition-colors ${
+                tab === TABS.workspace && guideWorkspaceTab ? 'guide-glow ' : ''
+              }${
                 filters.tab === tab
                   ? 'bg-twilio-gray-10 text-twilio-navy'
                   : 'text-twilio-gray-60 hover:text-twilio-navy'
@@ -176,6 +205,38 @@ export default function Palette({
           </p>
         </div>
       )}
+    </div>
+    </ConvertContext.Provider>
+  )
+}
+
+/* The confirmation step: nothing is final until Confirm, so the reader can click through options. */
+function ConvertBar({ convert }) {
+  return (
+    <div className="shrink-0 space-y-2 border-b border-twilio-blue bg-twilio-blue-light px-3 py-2.5 text-[11px] text-twilio-navy">
+      <p className="font-semibold">Converting “{convert.name}”</p>
+      <p className="text-twilio-gray-60">
+        {convert.pending
+          ? `Previewing ${convert.pending}. Pick another to compare, or confirm.`
+          : 'Click a glowing component or shape to preview it on the canvas.'}
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={convert.onConfirm}
+          disabled={!convert.pending}
+          className="rounded bg-twilio-blue px-2.5 py-1 font-medium text-white hover:bg-twilio-blue-dark disabled:opacity-40"
+        >
+          Confirm
+        </button>
+        <button
+          type="button"
+          onClick={convert.onCancel}
+          className="rounded border border-twilio-gray-20 bg-white px-2.5 py-1 text-twilio-gray-60 hover:text-twilio-navy"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   )
 }
@@ -508,7 +569,7 @@ function WorkspaceTab({
     )
   }
 
-  const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters)
+  const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters, topology)
   const onCanvas = boundSegmentIds(diagram?.nodes)
   const spaces = (graph.nodes ?? []).filter((node) => node.kind === 'space')
 
@@ -570,15 +631,16 @@ const FOLD_ABOVE = 20
  * behind an early return is a hook that is sometimes called.
  */
 function WorkspaceSections({ nodes, topology, onCanvas }) {
-  const sections = useMemo(() => groupSections(nodes, topology), [nodes, topology])
+  const tree = useMemo(() => groupTree(nodes, topology), [nodes, topology])
   const [closed, setClosed] = useState(null)
 
-  /* Which sections are shut is the reader's, once they have touched one -- so the
-     length-based default only applies until then, and does not reassert itself when a
-     filter change makes the list short again. */
+  /* Categories inside a kind arrive folded once the list is long; the kinds themselves stay open, so
+     the sections are always visible. Which are shut is the reader's once they have touched one. */
   const folded =
     closed ??
-    new Set(nodes.length > FOLD_ABOVE ? sections.map((section) => section.key) : [])
+    new Set(
+      nodes.length > FOLD_ABOVE ? tree.flatMap((entry) => entry.subs.map((sub) => sub.key)) : [],
+    )
 
   const toggle = (key) => {
     const next = new Set(folded)
@@ -587,48 +649,64 @@ function WorkspaceSections({ nodes, topology, onCanvas }) {
     setClosed(next)
   }
 
-  return (
-    <div className="space-y-2">
-      {sections.map((section) => {
-        const shut = folded.has(section.key)
-        return (
-          <div key={section.key}>
-            <button
-              type="button"
-              onClick={() => toggle(section.key)}
-              aria-expanded={!shut}
-              className="flex w-full items-center gap-1 rounded px-0.5 py-1 text-left text-[10px] font-semibold uppercase tracking-wide text-twilio-gray-60 hover:text-twilio-navy"
-            >
-              {shut ? (
-                <ChevronRight size={11} aria-hidden="true" />
-              ) : (
-                <ChevronDown size={11} aria-hidden="true" />
-              )}
-              <span className="min-w-0 flex-1 truncate" title={section.label}>
-                {section.label}
-              </span>
-              <span className="shrink-0 tabular-nums normal-case tracking-normal">
-                {section.items.length}
-              </span>
-            </button>
+  const items = (list) => (
+    <div className="space-y-1">
+      {list.map((node) => (
+        <DraggableItem
+          key={node.id}
+          kind={node.kind}
+          label={node.name}
+          hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
+          placed={onCanvas?.has(node.segmentId)}
+          /* Dragging a real workspace component onto the canvas carries its
+             ids and links with it, so it lands already bound. */
+          payload={{ name: node.name, bound: true, data: node }}
+        />
+      ))}
+    </div>
+  )
 
+  const header = (key, label, count, shut, level) => (
+    <button
+      type="button"
+      onClick={() => toggle(key)}
+      aria-expanded={!shut}
+      className={
+        level === 0
+          ? 'flex w-full items-center gap-1 border-b border-twilio-gray-20 px-0.5 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-twilio-navy'
+          : 'flex w-full items-center gap-1 rounded px-0.5 py-1 pl-3 text-left text-[10px] font-semibold text-twilio-gray-60 hover:text-twilio-navy'
+      }
+    >
+      {shut ? <ChevronRight size={11} aria-hidden="true" /> : <ChevronDown size={11} aria-hidden="true" />}
+      <span className="min-w-0 flex-1 truncate" title={label}>
+        {label}
+      </span>
+      <span className="shrink-0 font-normal tabular-nums normal-case tracking-normal">{count}</span>
+    </button>
+  )
+
+  return (
+    <div className="space-y-3">
+      {tree.map((entry) => {
+        const shut = folded.has(entry.key)
+        return (
+          <section key={entry.key} aria-label={entry.label}>
+            {header(entry.key, entry.label, entry.count, shut, 0)}
             {!shut && (
-              <div className="space-y-1">
-                {section.items.map((node) => (
-                  <DraggableItem
-                    key={node.id}
-                    kind={node.kind}
-                    label={node.name}
-                    hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
-                    placed={onCanvas?.has(node.segmentId)}
-                    /* Dragging a real workspace component onto the canvas carries its
-                       ids and links with it, so it lands already bound. */
-                    payload={{ name: node.name, bound: true, data: node }}
-                  />
-                ))}
+              <div className="mt-1 space-y-1">
+                {entry.items.length > 0 && items(entry.items)}
+                {entry.subs.map((sub) => {
+                  const subShut = folded.has(sub.key)
+                  return (
+                    <div key={sub.key}>
+                      {header(sub.key, sub.label, sub.items.length, subShut, 1)}
+                      {!subShut && <div className="pl-3">{items(sub.items)}</div>}
+                    </div>
+                  )
+                })}
               </div>
             )}
-          </div>
+          </section>
         )
       })}
     </div>
@@ -639,16 +717,27 @@ function WorkspaceSections({ nodes, topology, onCanvas }) {
 
 function DraggableItem({ kind, label, hint, logo, icon, payload, disabled = false, placed = false }) {
   const Icon = icon ?? iconFor(kind)
+  const convert = useConvert()
+  /* A zone is a region, not a component, so it cannot be what a component becomes. */
+  const pickable = Boolean(convert) && !disabled && kind !== 'zone'
+  const pending = convert?.pending === label
 
   return (
     <div
-      draggable={!disabled}
+      draggable={!disabled && !convert}
+      onClick={pickable ? () => convert.onPick({ kind, ...payload }, label) : undefined}
       onDragStart={(event) => {
         event.dataTransfer.setData(DRAG_MIME, JSON.stringify({ kind, ...payload }))
         event.dataTransfer.effectAllowed = 'copy'
       }}
       className={
-        disabled
+        convert
+          ? `flex items-center gap-2 rounded-md border bg-white px-2.5 py-1.5 transition-colors ${
+              pickable
+                ? `cursor-pointer ${pending ? GLOW_PENDING_CLASS : GLOW_CLASS}`
+                : 'border-twilio-gray-20 opacity-40'
+            }`
+          : disabled
           ? 'flex items-center gap-2 rounded-md border border-dashed border-twilio-gray-20 bg-twilio-gray-10 px-2.5 py-1.5 opacity-60'
           : 'flex cursor-grab items-center gap-2 rounded-md border border-twilio-gray-20 bg-white px-2.5 py-1.5 transition-colors hover:border-twilio-blue hover:bg-twilio-blue-light active:cursor-grabbing'
       }

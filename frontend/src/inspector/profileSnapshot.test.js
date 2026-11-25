@@ -233,3 +233,21 @@ describe('profileIdentity', () => {
     expect(profileIdentity(emptySnapshot())).toBeNull()
   })
 })
+
+describe('addField', () => {
+  it('adds a trait, reading the value as JSON where it can', async () => {
+    const { addField, emptySnapshot } = await import('./profileSnapshot.js')
+    const next = addField(emptySnapshot(), 'traits', 'plan_seats', '5')
+    expect(next.traits.plan_seats).toBe(5)
+    expect(addField(next, 'traits', 'plan', 'pro').traits).toEqual({ plan_seats: 5, plan: 'pro' })
+  })
+  it('adds to each of the other sections', async () => {
+    const { addField, emptySnapshot } = await import('./profileSnapshot.js')
+    const base = emptySnapshot()
+    expect(addField(base, 'external_ids', 'user_id', 'u1').identifiers[0]).toMatchObject({ type: 'user_id', id: 'u1' })
+    expect(addField(base, 'metadata', 'region', 'us').metadata.region).toBe('us')
+    expect(addField(base, 'events', 'Order Completed', '{"total":5}').events[0].properties).toEqual({ total: 5 })
+    expect(addField(base, 'links', 'accounts', 'a1').links[0].to_collection).toBe('accounts')
+    expect(() => addField(base, 'traits', ' ', 'x')).toThrow()
+  })
+})

@@ -29,12 +29,13 @@
 
 import { memo, useState } from 'react'
 import { NodeResizer, useNodes } from '@xyflow/react'
-import { Lock } from 'lucide-react'
+import { ImageUp, Lock } from 'lucide-react'
 
 import ConnectionHandles from './ConnectionHandles.jsx'
 import RichEditor from './RichEditor.jsx'
 import RichLabel from './RichLabel.jsx'
 import { useChrome } from '../chrome.js'
+import { useHeld, useMarked } from '../flash.js'
 import { hasFormatting } from '../richText.js'
 import { MIN_ZONE_HEIGHT, MIN_ZONE_WIDTH } from '../layout.js'
 import { zoneStyleFor } from '../kinds.js'
@@ -56,9 +57,26 @@ const ZONE_SHAPES = {
 }
 
 function ZoneNode({ id, data, selected }) {
-  const style = zoneStyleFor(data)
-  const { updateData, walkthroughActive } = useChrome()
+  /* A zone with no colour of its own takes the nearest coloured zone above it, so children of a coloured
+     zone stack its hue automatically instead of falling back to the neutral custom-zone grey. */
+  const ancestors = useNodes()
+  let inherited = null
+  if (data.custom && !data.color && !data.style?.border) {
+    const byId = new Map(ancestors.map((node) => [node.id, node]))
+    const seen = new Set()
+    for (let at = byId.get(byId.get(id)?.parentId); at && !seen.has(at.id) && !inherited; at = byId.get(at.parentId)) {
+      seen.add(at.id)
+      inherited = at.data?.color ?? null
+    }
+  }
+  const style = zoneStyleFor(inherited ? { ...data, color: inherited } : data)
+  const { updateData, walkthroughActive, importRules } = useChrome()
   const [editing, setEditing] = useState(false)
+  /* Lifted off the page while a component inside it is selected (so which zone it is in is visible), and
+     while a component being reassigned is held over it. See canvas/flash.js. */
+  const marked = useMarked(id)
+  const held = useHeld(id)
+  const lifted = marked || held
 
   /* Both halves of the label, like a component's name: `label` stays the field the inspector, the
      save advisories and the deletion warning all read, and `labelRich` carries the formatting. */
@@ -77,7 +95,7 @@ function ZoneNode({ id, data, selected }) {
      below. Accepted: zones are a handful of divs, and the alternative is reading
      React Flow's internal node lookup, which is not a public API and has changed
      shape between minor versions. */
-  const nodes = useNodes()
+  const nodes = ancestors
 
   /* Any child counts, not just `kindCount`. The Segment zone holds no components of
      its own -- only the three product zones -- so counting components alone would
@@ -144,7 +162,7 @@ function ZoneNode({ id, data, selected }) {
       <div
         className={`pointer-events-none h-full w-full ${ZONE_SHAPES[style.shape] ?? ZONE_SHAPES.rounded} ${
           aside ? 'walkthrough-aside-zone' : ''
-        }`}
+        } ${lifted ? 'zone-lifted' : ''}`}
         style={{
           background: style.bg,
           borderColor: style.border,
@@ -189,6 +207,21 @@ function ZoneNode({ id, data, selected }) {
               >
                 <RichLabel value={data.labelRich} text={data.label} />
               </span>
+            )}
+            {String(data.id ?? '').split('~')[0] === 'identity_settings' && importRules && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  importRules({ type: 'zone', id })
+                }}
+                title="Import identity resolution rules from a screenshot"
+                aria-label="Import identity resolution rules from a screenshot"
+                className="nodrag ml-auto shrink-0 rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
+                style={{ color: style.border }}
+              >
+                <ImageUp size={14} aria-hidden="true" />
+              </button>
             )}
             {data.locked && (
               <span title="Placement locked. Right-click to unlock.">

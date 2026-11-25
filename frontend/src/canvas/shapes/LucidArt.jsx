@@ -25,6 +25,10 @@ import { memo } from 'react'
 
 import LUCID from './lucid.json'
 import { BRAND_COLORS } from './brandColors.js'
+import { BRAND_GLYPHS } from './brandGlyphs.js'
+
+/* How much of the tile a logo fills. */
+const GLYPH_SIZE = 0.66
 
 const BY_ID = new Map(LUCID.map((shape) => [shape.id, shape]))
 
@@ -40,6 +44,9 @@ export const LucidArt = memo(function LucidArt({ id, className, style }) {
   if (!shape) return null
 
   const overrides = BRAND_COLORS[shape.id]
+  const glyph = BRAND_GLYPHS[shape.id]
+  /* A logo from `brandGlyphs.js`: the tile's own background, then the logo scaled into the middle of it. */
+  const scale = glyph ? GLYPH_SIZE / Math.max(glyph.width, glyph.height) : 1
 
   return (
     <svg
@@ -50,7 +57,28 @@ export const LucidArt = memo(function LucidArt({ id, className, style }) {
       aria-label={shape.name}
       role="img"
     >
-      {shape.paths.map((path, index) => (
+      {glyph && shape.paths[0] && (
+        <path d={shape.paths[0].d} fill={shape.paths[0].fill ?? 'currentColor'} stroke="none" />
+      )}
+      {glyph && (
+        <g
+          transform={`translate(${(1 - glyph.width * scale) / 2} ${(1 - glyph.height * scale) / 2}) scale(${scale})`}
+        >
+          {glyph.paths.map((path, index) => (
+            <path
+              key={index}
+              d={path.d}
+              fill={path.fill}
+              fillRule={path.rule}
+              stroke={path.stroke}
+              strokeWidth={path.strokeWidth}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          ))}
+        </g>
+      )}
+      {(glyph ? [] : shape.paths).map((path, index) => (
         <path
           key={index}
           d={path.d}

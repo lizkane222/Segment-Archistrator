@@ -14,7 +14,7 @@
 
 import { memo } from 'react'
 
-import { isEmptyRich } from '../richText.js'
+import { cleanLink, isEmptyRich } from '../richText.js'
 
 /**
  * @param value  the rich value, or null
@@ -105,6 +105,26 @@ function Run({ run }) {
   if (run.u) content = <u>{content}</u>
   if (run.i) content = <em>{content}</em>
   if (run.b) content = <strong>{content}</strong>
+  /* Outermost, so the whole styled run is the link. Only an address `cleanLink` accepts is drawn as one;
+     `rel` and `target` because it opens beside the diagram rather than replacing it. `nodrag` so pressing
+     on a link is a click and not the start of dragging the card it is in. */
+  const link = cleanLink(run.link)
+  if (link) {
+    content = (
+      <a
+        href={link}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={link}
+        className="nodrag cursor-pointer underline decoration-1 underline-offset-2 hover:opacity-80"
+        style={{ color: '#0263e0' }}
+        onClick={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+      >
+        {content}
+      </a>
+    )
+  }
   return <>{content}</>
 }
 

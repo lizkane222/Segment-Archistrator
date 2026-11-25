@@ -30,7 +30,7 @@
  * clicking one opens the group rather than the inspector.
  */
 
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -54,6 +54,7 @@ import GroupStackNode from './nodes/GroupStackNode.jsx'
 import SegmentNode from './nodes/SegmentNode.jsx'
 import ShapeNode from './nodes/ShapeNode.jsx'
 import TableNode from './nodes/TableNode.jsx'
+import EventNode from './nodes/EventNode.jsx'
 import ZoneOrFrame from './nodes/ZoneOrFrame.jsx'
 import EventLayer from '../simulation/EventLayer.jsx'
 import { AnchorContext, createAnchorFocus } from './anchors.js'
@@ -91,10 +92,14 @@ import {
   reparentTarget,
   toZoneLocal,
   zoneAtPosition,
+  zoneNearPoint,
   zoneLabel,
   zoneOfParent,
 } from './rules.js'
-import { avoidingWaypoints } from './edges/routing.js'
+import { avoidingWaypoints, lineStyleOf } from './edges/routing.js'
+import { laneWaypoints } from './edges/lanes.js'
+import { refocusSelection } from './refocus.js'
+import { adoptInside, carryBends, movedBy, movedTogether, snapshotPositions } from './moveTogether.js'
 import {
   PIN_TYPE,
   cleanPoint,
@@ -119,6 +124,7 @@ import {
   encodeFreeHandle,
   facingSide,
   fanOutAnchors,
+  isTableHandle,
   fixedHandleForSide,
   internalBox,
   nearestBorder,
@@ -132,8 +138,9 @@ import {
   alignNodes,
   groupNodes,
   groupSelectionChanges,
-  matchSize,
+  matchSizeTo,
   matchStyle,
+  selectedAny,
   selectedComponents,
   ungroupNodes,
   withGroupMates,
@@ -145,6 +152,7 @@ const NODE_TYPES = {
   segmentNode: SegmentNode,
   shape: ShapeNode,
   table: TableNode,
+  event: EventNode,
   /* A divider is stored as a zone and drawn differently -- see nodes/ZoneOrFrame.jsx. */
   zone: ZoneOrFrame,
   groupStack: GroupStackNode,
@@ -194,7 +202,15 @@ const ENDPOINT_REACH = 45
 export { DROPPED_STYLE }
 
 /* Drawings, not components: they keep their own defaults -- see `DROPPED_STYLE`. */
-const DRAWING_KINDS = new Set(['shape', 'table'])
+const DRAWING_KINDS = new Set(['shape', 'table', 'event'])
+
+/* Module-level, not written inline in the JSX. React Flow re-subscribes its key listeners whenever
+   this prop's *identity* changes, and an array literal is a new identity on every render of the
+   canvas -- which is most renders while someone is clicking. A key press that lands in the gap is
+   not seen, and a shift-click that React Flow does not know is a shift-click replaces the selection
+   instead of extending it. */
+const MULTI_SELECT_KEYS = ['Shift', 'Meta', 'Control']
+const DELETE_KEYS = ['Backspace', 'Delete'] // same reason
 
 export default function Canvas({
   topology,
@@ -219,6 +235,12 @@ export default function Canvas({
      same `updateNode` the inspector's fields call, so an edit on the card and one in the sidebar
      land on the same undo stack. */
   onUpdateData,
+  /* The component being moved to another zone, while that is in progress: it follows the pointer until a
+     zone is clicked. Owned by the app because the right-click menu starts it. */
+  reassigningId = null,
+  onReassignEnd,
+  /* Opens the screenshot import for identity resolution rules -- see inspector/IdentityImportDialog.jsx. */
+  onImportRules,
   flash,
   connected = false,
   walkthroughActive = false,
@@ -269,10 +291,24 @@ export default function Canvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the signature, see above
   const pins = useMemo(() => pinNodesFor(edges), [pinSignature])
 
+  const [lassoing, setLassoing] = useState(false)
   const flowNodes = useMemo(() => {
     /* Appended after everything else so they never disturb the parent-before-child order
        `orderForFlow` guarantees. */
-    const ordered = pins.length ? [...orderForFlow(nodes), ...pins] : orderForFlow(nodes)
+    const arranged = pins.length ? [...orderForFlow(nodes), ...pins] : orderForFlow(nodes)
+    /*
+     * While a shift-drag box is being drawn, zones cannot be caught by it.
+     *
+     * A zone is the backdrop the box is nearly always drawn over, so "touches" (which is what catches a
+     * card) caught the zone every time -- and a selected zone drags everything in it, which made it
+     * impossible to pick out some of the cards inside one. React Flow skips a node whose `selectable` is
+     * false when it works out what the box covers, and it keeps its *own* record of what it selected
+     * that filtering the change stream afterwards cannot reach -- so this is done before it looks.
+     * Clicking a zone still selects it, as it did.
+     */
+    const ordered = lassoing
+      ? arranged.map((node) => (node.type === 'zone' ? { ...node, selectable: false } : node))
+      : arranged
     /*
      * `data.locked` -> React Flow's own drag and selection flags, applied here rather than
      * in `toFlowNode`, because this is the one seam every node reaches the canvas through.
@@ -287,7 +323,7 @@ export default function Canvas({
     return ordered.map((node) =>
       node.data?.locked ? { ...node, draggable: false, dragHandle: undefined } : node,
     )
-  }, [nodes, pins])
+  }, [nodes, pins, lassoing])
 
   /*
    * No anchor notes are drawn here at all any more, and there is no control for them.
@@ -356,6 +392,16 @@ export default function Canvas({
     [setEdges],
   )
 
+  /* Where a connector's text was dragged to, written onto the edge's own data like the route is. */
+  const onLabelPlacement = useCallback(
+    (edgeId, patch) => {
+      setEdges((current) =>
+        current.map((edge) => (edge.id === edgeId ? { ...edge, data: { ...edge.data, ...patch } } : edge)),
+      )
+    },
+    [setEdges],
+  )
+
   /*
    * Which connector is in route-adjust mode, entered by double-clicking the line.
    *
@@ -415,6 +461,8 @@ export default function Canvas({
         if (!nodeId) continue
         const stored = end === 'source' ? edge.data?.sourceAnchor : edge.data?.targetAnchor
         if (parseFreeHandle(stored)) continue
+        /* A row or a column of a table is a place of its own, not a share of a side. */
+        if (isTableHandle(end === 'source' ? edge.sourceHandle : edge.targetHandle)) continue
         const farEnd = end === 'source' ? 'target' : 'source'
         /* The far end of a loose connector is a point, which orders it just as well as a card. */
         const farPoint = loosePoint(edge, farEnd)
@@ -655,7 +703,7 @@ export default function Canvas({
          hit, so a release over empty canvas inside one resolved to the frame -- and a connector
          attached to a layout divider is a line pointing at a piece of furniture, which nothing
          downstream refuses and no reader could explain. */
-      const under = zoneAtPosition(nodes, point)
+      const under = zoneNearPoint(nodes, point, reach)
       const box = best ?? (under?.data?.frame ? null : boxOfZone(under, nodes))
       if (!box) return null
 
@@ -675,7 +723,9 @@ export default function Canvas({
       rename: onRename ?? null,
       setRadius: onSetRadius ?? null,
       updateData: onUpdateData ?? null,
+      importRules: onImportRules ?? null,
       onWaypoints,
+      onLabelPlacement,
       onEndpointMove,
       endpointDropTarget,
       adjustingEdgeId,
@@ -693,7 +743,9 @@ export default function Canvas({
       onRename,
       onSetRadius,
       onUpdateData,
+      onImportRules,
       onWaypoints,
+      onLabelPlacement,
       onEndpointMove,
       endpointDropTarget,
       adjustingEdgeId,
@@ -795,9 +847,99 @@ export default function Canvas({
    */
   const [modelId, setModelId] = useState(null)
 
+  /*
+   * The zone directly holding whatever is selected is lifted off the page, so where a component or a zone sits
+   * is visible at a glance. One generation only: a grandparent or further up is not what the selection is
+   * "in", and lifting the whole chain buried the answer under a stack of shadows. Keyed on the zones' ids
+   * rather than on the node array, which changes on every drag frame.
+   */
+  const selectedParents = (() => {
+    const byId = new Map(nodes.map((node) => [node.id, node]))
+    const chain = new Set()
+    for (const node of nodes) {
+      if (!node.selected) continue
+      const parent = node.parentId ? byId.get(node.parentId) : null
+      if (parent && parent.type === 'zone') chain.add(parent.id)
+    }
+    return [...chain].sort().join('|')
+  })()
+  useEffect(() => {
+    flash?.mark?.(selectedParents ? selectedParents.split('|') : [])
+    return () => flash?.mark?.([])
+  }, [selectedParents, flash])
+
+  /*
+   * Reassigning a component to another zone: it is picked up and follows the pointer, the zone under it
+   * lifts as it passes, and a click puts it down in that zone. The zone is found the way a palette drop
+   * finds one, and the component is re-parented the way a drag is -- both halves of the fact written, its
+   * position converted to the new zone's own coordinates -- so what it looks like in there is whatever the
+   * zone gives it: a component's colour is read off its parent zone, not stored on it.
+   */
+  const reassigningNode = reassigningId ? nodes.find((node) => node.id === reassigningId) : null
+  const movingZone = reassigningNode?.type === 'zone'
+  const labelOfMoving = reassigningNode?.data?.name ?? reassigningNode?.data?.label ?? 'this component'
+  /* Where a zone can go: anywhere except into itself or something inside itself, which would hang it off
+     its own branch. Everything below it is left out of the search. */
+  const targets = (() => {
+    if (!movingZone) return nodes
+    const out = new Set([reassigningNode.id])
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const node of nodes) {
+        if (!out.has(node.id) && node.parentId && out.has(node.parentId)) {
+          out.add(node.id)
+          grew = true
+        }
+      }
+    }
+    return nodes.filter((node) => !out.has(node.id))
+  })()
+  const zoneUnder = (event) => {
+    const point = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+    return { point, zone: zoneAtPosition(targets, point) }
+  }
+  const endReassign = () => {
+    flash?.hold?.([])
+    onReassignEnd?.()
+  }
+  const dropReassigned = (event) => {
+    if (!reassigningNode) return endReassign()
+    const { point, zone } = zoneUnder(event)
+    if (!zone) {
+      onNotify?.({ tone: 'info', message: 'Click inside a zone to put it there, or press Escape to leave it where it is.' })
+      return
+    }
+    const measured = getNode(reassigningNode.id)?.measured ?? {}
+    /* A component lands centred on the pointer; a zone, which can be larger than the zone it is going
+       into, lands with its corner there, and the parent grows to hold it. */
+    const size = movingZone ? { width: 32, height: 32 } : { width: measured.width ?? NODE_WIDTH, height: measured.height ?? NODE_HEIGHT }
+    const position = toZoneLocal(zone, { x: point.x - size.width / 2, y: point.y - size.height / 2 }, nodes)
+    const kind = movingZone ? null : kindOf(reassigningNode)
+    if (kind && !isValidPlacement(topology, kind, zone.data)) {
+      onAdvise?.(explainMisplacement({ topology, kind, attemptedZone: zone.data }), reassigningNode.id)
+    }
+    setNodes((current) =>
+      growZones(current.map((node) => (node.id === reassigningNode.id ? withParent(node, zone, position) : node))),
+    )
+    onNotify?.({ tone: 'success', message: `Moved “${labelOfMoving}” into ${zone.data?.label ?? 'that zone'}.` })
+    endReassign()
+  }
+  useEffect(() => {
+    if (!reassigningId) return undefined
+    const onKey = (event) => event.key === 'Escape' && endReassign()
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      flash?.hold?.([])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reassigningId])
+  const [reassignAt, setReassignAt] = useState(null)
+
   const selection = useMemo(() => {
     const chosen = selectedComponents(documentNodes, documentNodes.filter((node) => node.selected).map((node) => node.id))
-    const ids = chosen.map((node) => node.id)
+    const ids = selectedAny(documentNodes, documentNodes.filter((node) => node.selected).map((node) => node.id)).map((node) => node.id)
     /* Falls back to the first selected rather than to nothing when the model has been
        deselected: a toolbar whose two copy-from buttons do nothing until the user happens
        to re-click one of their own selection reads as broken, and the toolbar says which
@@ -822,7 +964,11 @@ export default function Canvas({
    * was selected when the button was rendered, which is exactly what the button is about.
    */
   const runSelection = useCallback(
-    (transform) => setNodes((current) => growZones(transform(current, selection.ids))),
+    (transform) => {
+      setNodes((current) => growZones(transform(current, selection.ids)))
+      /* The button just pressed has focus; the arrow keys need it on the selection. */
+      refocusSelection()
+    },
     [selection.ids, setNodes],
   )
 
@@ -834,7 +980,8 @@ export default function Canvas({
     [runSelection],
   )
   const onMatchSize = useCallback(
-    () => runSelection((nodes_, ids) => matchSize(nodes_, ids, selection.model?.id)),
+    (dimension = 'both') =>
+      runSelection((nodes_, ids) => matchSizeTo(nodes_, ids, selection.model?.id, dimension)),
     [runSelection, selection.model],
   )
   const onMatchStyle = useCallback(
@@ -898,12 +1045,17 @@ export default function Canvas({
    * move. Position and dimension changes stream through untouched -- they arrive every
    * frame of a drag and must not be filtered.
    */
+  /* See `onNodeDragStart`: whether a drag is in progress, and where everything was when it began. */
+  const dragActive = useRef(false)
+  const dragSnapshot = useRef(null)
   const handleNodesChange = useCallback(
     (rawChanges) => {
       /* First, because everything downstream -- the advisory, the store itself -- only
          knows document ids. A stack's id is not one, so a drag of it has to become a
          drag of each member before anyone else sees it. */
-      const changes = translateGroupDrag(rawChanges, nodes, documentNodes)
+      const translated = translateGroupDrag(rawChanges, nodes, documentNodes)
+
+      const changes = translated
 
       for (const change of changes) {
         if (change.type !== 'replace' || !change.item) continue
@@ -1110,9 +1262,21 @@ export default function Canvas({
       const mates = groupSelectionChanges(documentNodes, changes)
       const forwarded = mates.length ? [...changes, ...mates] : changes
 
+      /*
+       * A move that is not a drag -- the arrow keys -- carries the bends of the connectors whose two ends
+       * both moved, so a selection nudged along keeps its lines' shape. A drag does the same when it ends
+       * (see `onNodeDragStop`), from where it started rather than frame by frame.
+       */
+      if (!dragActive.current && changes.some((change) => change.type === 'position' && change.position)) {
+        const selectedZones = documentNodes.filter((node) => node.type === 'zone' && node.selected)
+        const base = selectedZones.reduce((acc, zone) => adoptInside(acc, zone.id), documentNodes)
+        const deltaOf = movedBy(snapshotPositions(base), snapshotPositions(applyNodeChanges(changes, base)))
+        setEdges((current) => carryBends(current, deltaOf))
+      }
+
       if (forwarded.length) onNodesChange(forwarded)
     },
-    [onNodesChange, setNodes, topology, getNode, onAdvise, nodes, documentNodes],
+    [onNodesChange, setNodes, setEdges, topology, getNode, onAdvise, nodes, documentNodes],
   )
 
   /*
@@ -1143,10 +1307,57 @@ export default function Canvas({
    *     from the prop replaced the store with an array from before the selection landed,
    *     and the click appeared to select nothing. `runSelection` above had the same bug.
    */
+  /*
+   * Where everything was when a drag began, so that when it ends every node's displacement -- a zone's
+   * contents included, which move only because their parent did -- is known.
+   */
+  /* The arrow keys move a selected zone too, and take what is inside it the same way a drag does. */
+  useEffect(() => {
+    const onKey = (event) => {
+      if (!event.key?.startsWith('Arrow')) return
+      const zones = documentNodes.filter((node) => node.type === 'zone' && node.selected).map((node) => node.id)
+      if (!zones.length) return
+      setNodes((current) => zones.reduce((acc, id) => adoptInside(acc, id), current))
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [documentNodes, setNodes])
+
+  const onNodeDragStart = useCallback(
+    (_event, node, dragged) => {
+      const group = dragged?.length ? dragged : node ? [node] : []
+      /* A zone being picked up takes what is inside it, parented or not -- see canvas/moveTogether.js. */
+      const zones = group.filter((item) => item.type === 'zone').map((item) => item.id)
+      let base = documentNodes
+      for (const id of zones) base = adoptInside(base, id)
+      if (base !== documentNodes) {
+        setNodes((current) => zones.reduce((acc, id) => adoptInside(acc, id), current))
+      }
+      dragSnapshot.current = snapshotPositions(base)
+      dragActive.current = true
+    },
+    [documentNodes, setNodes],
+  )
+
   const onNodeDragStop = useCallback(
     (_event, node, dragged) => {
       const moved = dragged?.length ? dragged : node ? [node] : []
+      dragActive.current = false
       if (!moved.length) return
+
+      /*
+       * Connectors whose two ends moved together moved as a whole: their bends go with them and nothing
+       * else about them is touched. Everything below that re-faces ends and re-runs the router is for
+       * connectors where only *one* end moved.
+       */
+      const settled = documentNodes.map((entry) => {
+        const item = moved.find((candidate) => candidate.id === entry.id)
+        return item ? { ...entry, position: item.position } : entry
+      })
+      const deltaOf = dragSnapshot.current ? movedBy(dragSnapshot.current, snapshotPositions(settled)) : () => null
+      dragSnapshot.current = null
+      const together = new Set(edges.filter((edge) => movedTogether(edge, deltaOf)).map((edge) => edge.id))
+      if (together.size) setEdges((current) => carryBends(current, deltaOf))
 
       /* Rounded, because that is the precision positions are stored at (`serializeNode`):
          a half-pixel that will be rounded away on save is not a move, and treating it as
@@ -1188,10 +1399,13 @@ export default function Canvas({
       const moving = new Set(moved.map((item) => item.id))
       setEdges((current) =>
         current.map((edge) => {
+          if (together.has(edge.id)) return edge
           if (!moving.has(edge.source) && !moving.has(edge.target)) return edge
           const facing = facingFor(edge)
-          const sourceFixed = parseFreeHandle(edge.data?.sourceAnchor) ? null : facing.source
-          const targetFixed = parseFreeHandle(edge.data?.targetAnchor) ? null : facing.target
+          const sourceFixed =
+            parseFreeHandle(edge.data?.sourceAnchor) || isTableHandle(edge.sourceHandle) ? null : facing.source
+          const targetFixed =
+            parseFreeHandle(edge.data?.targetAnchor) || isTableHandle(edge.targetHandle) ? null : facing.target
           if (
             (sourceFixed == null || sourceFixed === edge.sourceHandle) &&
             (targetFixed == null || targetFixed === edge.targetHandle)
@@ -1256,6 +1470,7 @@ export default function Canvas({
       setEdges((current) =>
         current.map((edge) => {
           if (edge.data?.routed !== 'auto') return edge
+          if (together.has(edge.id)) return edge
           if (!touched.has(edge.source) && !touched.has(edge.target)) return edge
           const next = avoidanceFor(edge)
           /* An empty result means the direct route is clear now, so the bends are dropped along with
@@ -1271,7 +1486,7 @@ export default function Canvas({
         }),
       )
     },
-    [documentNodes, setNodes, topology, onAdvise, edges, setEdges, avoidanceFor, facingFor],
+    [documentNodes, setNodes, topology, onAdvise, edges, setEdges, avoidanceFor, facingFor, dragSnapshot],
   )
 
   /* Deleting a zone deletes its children -- React Flow pulls them into the set
@@ -1359,14 +1574,22 @@ export default function Canvas({
        * A hand-placed anchor always wins, because it is a decision.
        */
       const facing = facingFor(connection)
+      /* A row or column of a table was chosen on purpose, by dragging from that very row: it is neither
+         re-faced nor given a free anchor. */
+      const fromRow = isTableHandle(connection.sourceHandle)
+      const toRow = isTableHandle(connection.targetHandle)
       connection = {
         ...connection,
-        sourceHandle: anchor
-          ? (fixedHandleForSide(anchor.side) ?? connection.sourceHandle)
-          : (facing.source ?? connection.sourceHandle),
-        targetHandle: landing
-          ? (fixedHandleForSide(landing.side) ?? connection.targetHandle)
-          : (facing.target ?? connection.targetHandle),
+        sourceHandle: fromRow
+          ? connection.sourceHandle
+          : anchor
+            ? (fixedHandleForSide(anchor.side) ?? connection.sourceHandle)
+            : (facing.source ?? connection.sourceHandle),
+        targetHandle: toRow
+          ? connection.targetHandle
+          : landing
+            ? (fixedHandleForSide(landing.side) ?? connection.targetHandle)
+            : (facing.target ?? connection.targetHandle),
       }
 
       /* A stack has handles because the aggregated edges have to land somewhere, but an
@@ -1415,8 +1638,8 @@ export default function Canvas({
             data: {
               discovered: false,
               ...(waypoints.length ? { waypoints, routed: 'auto' } : {}),
-              ...(sourceAnchor ? { sourceAnchor } : {}),
-              ...(targetAnchor ? { targetAnchor } : {}),
+              ...(sourceAnchor && !fromRow ? { sourceAnchor } : {}),
+              ...(targetAnchor && !toRow ? { targetAnchor } : {}),
             },
           },
           current,
@@ -1818,7 +2041,34 @@ export default function Canvas({
       <FlashContext.Provider value={flash}>
       <ChromeContext.Provider value={chrome}>
       <GroupCollapseContext.Provider value={groupCollapse}>
-        <div className="h-full w-full">
+        <div className="relative h-full w-full">
+          {reassigningNode && (
+            <div
+              className="absolute inset-0 z-30 cursor-crosshair"
+              onMouseMove={(event) => {
+                setReassignAt({ x: event.clientX, y: event.clientY })
+                flash?.hold?.(zoneUnder(event).zone ? [zoneUnder(event).zone.id] : [])
+              }}
+              onClick={dropReassigned}
+              onContextMenu={(event) => {
+                event.preventDefault()
+                endReassign()
+              }}
+              role="presentation"
+            >
+              <p className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-md bg-twilio-navy px-3 py-1.5 text-xs text-white shadow-lg">
+                Click a zone to move “{labelOfMoving}” into it · Esc to cancel
+              </p>
+              {reassignAt && (
+                <div
+                  className="pointer-events-none fixed rounded-md border-2 border-twilio-blue bg-white/90 px-3 py-1.5 text-xs font-semibold text-twilio-navy shadow-lg"
+                  style={{ left: reassignAt.x + 12, top: reassignAt.y + 12 }}
+                >
+                  {labelOfMoving}
+                </div>
+              )}
+            </div>
+          )}
           <ReactFlow
             nodes={flowNodes}
             edges={layeredEdges}
@@ -1887,6 +2137,20 @@ export default function Canvas({
              */
             nodeDragThreshold={3}
             /*
+             * How far the pointer may wander between press and release and still be a *click*.
+             *
+             * React Flow's default is 0, and the drag library underneath it cancels the click
+             * outright for any movement at all -- one pixel is enough, and a hand on a trackpad moves
+             * more than that on every press. Meanwhile `nodeDragThreshold` above says a drag does not
+             * begin until 3px, so a press that moved 1-3px was neither a drag nor a click: it did
+             * nothing, or worse, deselected. That is what made shift-clicking "hit or miss" -- the
+             * extra clicks in a multi-selection were being dropped one at a time.
+             *
+             * Set equal to the drag threshold, so every press is exactly one of the two.
+             */
+            nodeClickDistance={3}
+            paneClickDistance={3}
+            /*
              * Every layer is stated, not derived -- see the z scheme in canvas/layout.js.
              *
              * The default (`basic`) computes an edge's z as `edge.zIndex + max(z of each endpoint
@@ -1940,7 +2204,12 @@ export default function Canvas({
               }
               console.warn(`[React Flow] ${message}`)
             }}
+            onNodeDragStart={onNodeDragStart}
             onNodeDragStop={onNodeDragStop}
+            /* Dragging the rectangle round a selection is a different gesture to React Flow, and used to skip
+               everything a node drag does. */
+            onSelectionDragStart={(event, picked) => onNodeDragStart(event, picked?.[0], picked)}
+            onSelectionDragStop={(event, picked) => onNodeDragStop(event, picked?.[0], picked)}
             onBeforeDelete={onBeforeDelete}
             isValidConnection={isValidConnection}
             nodeTypes={NODE_TYPES}
@@ -1965,6 +2234,8 @@ export default function Canvas({
              * five things it was drawn around, with nothing to indicate why.
              */
             selectionMode={SelectionMode.Partial}
+            onSelectionStart={() => setLassoing(true)}
+            onSelectionEnd={() => setLassoing(false)}
             /*
              * Shift adds to the selection on click, as well as drawing the box.
              *
@@ -1978,7 +2249,7 @@ export default function Canvas({
              * Shift means "and this one too" for both gestures. The two cannot collide -- the
              * lasso starts on the pane and additive click lands on a node.
              */
-            multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
+            multiSelectionKeyCode={MULTI_SELECT_KEYS}
             onDrop={onDrop}
             onDragOver={onDragOver}
             onNodeContextMenu={openMenu}
@@ -2047,7 +2318,7 @@ export default function Canvas({
             minZoom={0.15}
             maxZoom={2}
             proOptions={{ hideAttribution: false }}
-            deleteKeyCode={['Backspace', 'Delete']}
+            deleteKeyCode={DELETE_KEYS}
           >
             <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#d7dbe4" />
 
@@ -2118,7 +2389,7 @@ export default function Canvas({
               ) : (
                 <SelectionToolbar
                   count={selection.ids.length}
-                  modelName={selection.model?.data?.name}
+                  modelName={selection.model?.data?.name ?? selection.model?.data?.label}
                   grouped={selection.grouped}
                   onAlign={onAlign}
                   onMatchSize={onMatchSize}
@@ -2379,6 +2650,33 @@ function componentBoxes(nodes, { stacks = false } = {}) {
     })
   }
   return boxes
+}
+
+/**
+ * The waypoints "Straighten" should leave a connector with: the simplest right-angle route around the
+ * components, running in the corridors between zones -- see `laneWaypoints`.
+ *
+ * `[]` means the default route is already the answer, or that nothing better can be worked out (a
+ * loose end, a zone as an endpoint, a node not measured yet, a line that is not right-angled), which
+ * is what Straighten has always done: clear the bends.
+ */
+export function planStraighten(edge, nodes, getInternalNode) {
+  if (!edge || lineStyleOf(edge.data) !== 'orthogonal') return []
+  const from = getInternalNode?.(edge.source)
+  const to = getInternalNode?.(edge.target)
+  const geometry = fromToGeometry(from, to, edge)
+  if (!geometry) return []
+  const everything = componentBoxes(nodes)
+  const own = (id) => everything.find((box) => box.id === id)
+  const sourceBox = own(edge.source)
+  const targetBox = own(edge.target)
+  if (!sourceBox || !targetBox) return []
+  const zones = (nodes ?? [])
+    .filter((node) => node.type === 'zone')
+    .map((zone) => boxOfZone(zone, nodes))
+    .filter(Boolean)
+  const boxes = everything.filter((box) => box.id !== edge.source && box.id !== edge.target)
+  return laneWaypoints({ ...geometry, sourceBox, targetBox, boxes, zones }) ?? []
 }
 
 /**

@@ -185,11 +185,20 @@ def validate_architecture(graph: dict) -> list[str]:
 
     # A zone has no kind -- it is not in `kinds` above -- but it is a legal edge
     # endpoint, so its id still has to count as known.
-    zone_ids = {
-        zone["id"]
-        for zone in graph.get("zones") or []
-        if isinstance(zone, dict) and zone.get("id")
-    }
+    # The document names a zone as a connector end by its canvas node id (`zone-engage`, see
+    # `zoneNodeId` in frontend/src/canvas/layout.js), not by the bare zone id -- so both spellings
+    # are known. Checking only the bare id refused every connector drawn to or from a zone.
+    zone_ids = set()
+    for zone in graph.get("zones") or []:
+        if isinstance(zone, dict) and zone.get("id"):
+            zone_ids.add(zone["id"])
+            zone_ids.add(f"zone-{zone['id']}")
+    # A document with no `zones` key is one drawn before zones were stored, and the canvas draws the
+    # topology's own; connectors to those zones are legitimate too, as are copies (`destinations~2`).
+    if "zones" not in graph:
+        for zone in topology.ZONES:
+            zone_ids.add(zone["id"])
+            zone_ids.add(f"zone-{zone['id']}")
 
     for edge in edges:
         if not isinstance(edge, dict):

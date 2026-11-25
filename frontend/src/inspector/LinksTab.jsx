@@ -16,10 +16,19 @@
 import { BookOpen, CircleCheck, CircleHelp, ExternalLink, Link2Off } from 'lucide-react'
 
 import CopyButton from '../ui/CopyButton.jsx'
+import { safeHttpUrl } from '../ui/safeUrl.js'
 import { EmptyNote, Section } from './primitives.jsx'
 
 export default function LinksTab({ node }) {
-  const data = node.data
+  /* These URLs are stored in the diagram, so they are whatever the last person to save it
+     wrote -- possibly someone it was shared by. Only http(s) becomes a link. */
+  const data = {
+    ...node.data,
+    docsUrl: safeHttpUrl(node.data.docsUrl),
+    workspaceUrl: safeHttpUrl(node.data.workspaceUrl),
+    previewWebhookUrl: safeHttpUrl(node.data.previewWebhookUrl),
+    logoUrl: safeHttpUrl(node.data.logoUrl),
+  }
 
   return (
     <>

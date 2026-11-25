@@ -100,6 +100,39 @@ export function activeFilterCount(state) {
   )
 }
 
+/*
+ * Which sub-zone a kind is drawn in, when the diagram boxes it off.
+ *
+ * Sources, Destinations and Warehouse are drawing choices dividing Connections, so no workspace
+ * component *stores* one of them as its zone -- it stores `connections`. A Pipeline chip for
+ * "Destinations" compared against the stored zone therefore matched nothing, ever. The kind is what
+ * says which box it would go in, and the kind ids are regular enough to say it by name.
+ */
+const SUBDIVISION_OF_KIND = (kind) => {
+  if (/^source(_|$)/.test(kind)) return 'sources'
+  if (/^destination(_|$)/.test(kind)) return 'destinations'
+  if (kind === 'warehouse' || kind === 'reverse_etl_model') return 'warehouses'
+  return null
+}
+
+/**
+ * Is a workspace component in a Pipeline zone, counting the zones around it?
+ *
+ * Its own zone, any zone that contains that one (a destination is in Connections, and Connections is
+ * in Segment), or the sub-zone its kind would be boxed in. A chip for a zone then returns everything a
+ * reader would call "in" it.
+ */
+export function inPipelineZone(node, zoneId, topology = null) {
+  if (node.zone === zoneId) return true
+  const byId = new Map((topology?.zones ?? []).map((zone) => [zone.id, zone]))
+  const seen = new Set()
+  for (let current = byId.get(node.zone); current && !seen.has(current.id); current = byId.get(current.parent)) {
+    if (current.id === zoneId) return true
+    seen.add(current.id)
+  }
+  return SUBDIVISION_OF_KIND(node.kind) === zoneId
+}
+
 /**
  * Filter workspace nodes client-side.
  *
@@ -107,11 +140,11 @@ export function activeFilterCount(state) {
  * filtering them locally is instant and costs no rate budget. The catalog is the
  * opposite case -- hundreds of entries, filtered server-side via query params.
  */
-export function applyWorkspaceFilters(nodes, state) {
+export function applyWorkspaceFilters(nodes, state, topology = null) {
   const needle = state.search.trim().toLowerCase()
 
   return nodes.filter((node) => {
-    if (state.zones.length && !state.zones.includes(node.zone)) return false
+    if (state.zones.length && !state.zones.some((zone) => inPipelineZone(node, zone, topology))) return false
     if (state.kinds.length && !state.kinds.includes(node.kind)) return false
 
     if (state.bound === BOUND_YES && node.bound === false) return false

@@ -25,9 +25,10 @@ from apps.segmentapi.exceptions import SegmentAuthError, SegmentError
 from apps.segmentapi.graphql import SegmentGraphQLClient
 
 from .authentication import WorkspacePrincipal
+from .cookies import set_session_cookie_on
 from .models import OperatorWorkspaceBookmark, RememberedConnection, WorkspaceSession
 from .permissions import AllowAny, HasSession
-from .serializers import StartSessionSerializer, WorkspaceSerializer
+from .serializers import ConnectionSerializer, StartSessionSerializer, WorkspaceSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -67,23 +68,38 @@ def session_payload(session):
         "workspace": WorkspaceSerializer(session).data if connected else None,
         "connected": connected,
         "anonymous": bool(session) and not connected,
+        # Every workspace this account has connected, which is what the tab groups are made
+        # of. Metadata only: no credential of any kind is in it.
+        "connections": connections_payload(account),
         # So the header does not draw a sign-in button on a deployment that has no Google
         # client configured and could not honour the click.
-        "auth": {"google": google.is_configured()},
+        "auth": {
+            "google": google.is_configured(),
+            # Whether anyone not signed in is shut out entirely, so the SPA shows a sign-in
+            # screen instead of minting an anonymous scope to draw into.
+            "required": settings.REQUIRE_ACCOUNT,
+            "domains": list(settings.ALLOWED_EMAIL_DOMAINS),
+            "invitations": settings.INVITATIONS_ENABLED,
+        },
     }
 
 
-def set_session_cookie(response, session):
-    response.set_cookie(
-        settings.WORKSPACE_SESSION_COOKIE,
-        str(session.id),
-        max_age=settings.WORKSPACE_SESSION_IDLE_HOURS * 3600,
-        httponly=True,
-        samesite="Lax",
-        secure=not settings.DEBUG,
-        path="/",
+def connections_payload(account):
+    if account is None:
+        return []
+    rows = RememberedConnection.objects.filter(account=account).order_by("-last_used_at")
+    return ConnectionSerializer(rows, many=True).data
+
+
+def sign_in_required():
+    return Response(
+        {"error": {"code": "sign_in_required", "message": "Sign in with your Twilio account to use this app."}},
+        status=status.HTTP_401_UNAUTHORIZED,
     )
-    return response
+
+
+def set_session_cookie(response, session):
+    return set_session_cookie_on(response, session.id)
 
 
 @method_decorator(ensure_csrf_cookie, name="get")
@@ -129,6 +145,8 @@ class SessionView(APIView):
         # Hoisted above the credential branch: the GraphQL path needs to know the
         # account too, both to gate on its email and to merge/save its bookmarks.
         outgoing = request.user if isinstance(request.user, WorkspacePrincipal) else None
+        if settings.REQUIRE_ACCOUNT and (outgoing is None or outgoing.account is None):
+            return sign_in_required()
         anonymous_scope = outgoing.anon_scope if outgoing is not None else None
         # Carried onto the new row, so signing in later can still claim what was drawn
         # before either step happened. Connecting a credential is about the *subject* of
@@ -397,6 +415,16 @@ class SessionView(APIView):
     def delete(self, request):
         session = request.user.session
         workspace_slug = session.workspace_slug
+        if session.account_id:
+            # A signed-in person disconnecting a workspace is not signing out: the session is
+            # their login now, so it stays and only lets go of the credential.
+            if session.workspace_id:
+                RememberedConnection.objects.filter(
+                    account_id=session.account_id, workspace_id=session.workspace_id
+                ).delete()
+            session.clear_credential()
+            logger.info("Disconnected workspace %s", workspace_slug)
+            return Response(status=status.HTTP_204_NO_CONTENT)
         # Forget the remembered copy too. Disconnect is the one control that says "stop
         # holding this credential", and leaving it on the account would hand it straight
         # back on the next sign-in.
@@ -455,6 +483,31 @@ class ResumeConnectionView(APIView):
         return Response(session_payload(session))
 
 
+@method_decorator(csrf_protect, name="delete")
+class ConnectionDetailView(APIView):
+    """
+    `DELETE /api/connections/<workspace_id>` -- forget one of this account's workspaces.
+
+    Only ever the caller's own: the account comes from the session and the id only picks
+    among its rows. If this browser's session is currently holding that credential, it lets
+    go of it too, so forgetting a connection really does stop it being usable.
+    """
+
+    permission_classes = [HasSession]
+
+    def delete(self, request, workspace_id):
+        session = request.user.session
+        if not session.account_id:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        RememberedConnection.objects.filter(
+            account_id=session.account_id, workspace_id=workspace_id
+        ).delete()
+        if session.workspace_id == workspace_id:
+            session.clear_credential()
+        logger.info("Forgot remembered connection for workspace %s", workspace_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 @method_decorator(csrf_protect, name="post")
 class AnonymousSessionView(APIView):
     """
@@ -474,6 +527,9 @@ class AnonymousSessionView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        if settings.REQUIRE_ACCOUNT:
+            # No tokenless scope to draw into in a closed app: sign in first.
+            return sign_in_required()
         if isinstance(request.user, WorkspacePrincipal):
             return Response(session_payload(request.user.session), status=status.HTTP_200_OK)
 

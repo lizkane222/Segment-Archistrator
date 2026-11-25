@@ -104,6 +104,6 @@ validate them.
 ## 7. General smoke test
 
 - [ ] Fresh incognito visit to the deployed URL loads with no console errors, correct
-      title ("Segment Archistrator"), and CSS/JS assets load.
+      title ("Archistrator"), and CSS/JS assets load.
 - [ ] Existing anonymous flow (no sign-in at all) still fully works — connect, build,
       save, simulate.

@@ -28,6 +28,10 @@ export default defineConfig(({ command }) => ({
     outDir: '../static/spa',
     emptyOutDir: true,
   },
+  test: {
+    // Tests that execute function code opt out of the trust gate -- see src/functions/trust.js.
+    setupFiles: ['./src/test/setup.js'],
+  },
   server: {
     port: 5177,
     proxy: {

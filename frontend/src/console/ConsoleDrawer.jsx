@@ -123,7 +123,13 @@ export default function ConsoleDrawer({ entries, unread, onOpen, onClear }) {
         >
           Worst first
         </button>
-        <CopyButton text={formatLogText(entries)} label="Copy the log as text" size={12} />
+        {/* What the tab on screen shows, in the order it is shown -- not the whole log. On Errors this
+            copies the errors; on All, everything. */}
+        <CopyButton
+          text={() => formatLogText(rows)}
+          label={level === 'all' ? 'Copy the log as text' : `Copy the ${LABELS[level].toLowerCase()} shown`}
+          size={12}
+        />
         <button
           type="button"
           onClick={onClear}
@@ -215,6 +221,7 @@ export default function ConsoleDrawer({ entries, unread, onOpen, onClear }) {
                         </pre>
                       )}
                     </div>
+                    <CopyButton text={() => formatLogText([entry])} label="Copy this message" size={11} />
                   </div>
                 </li>
               )

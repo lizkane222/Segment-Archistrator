@@ -21,8 +21,29 @@
  * note on that section.
  */
 
+import ColorField from '../ui/ColorField.jsx'
 import { useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight, Paintbrush, RotateCcw } from 'lucide-react'
+import {
+  AlignCenter,
+  AlignCenterHorizontal,
+  AlignEndHorizontal,
+  AlignLeft,
+  AlignRight,
+  AlignStartHorizontal,
+  Bold,
+  ChevronDown,
+  ChevronRight,
+  Italic,
+  List,
+  ListOrdered,
+  Minus,
+  Paintbrush,
+  Plus,
+  RemoveFormatting,
+  RotateCcw,
+  Strikethrough,
+  Underline,
+} from 'lucide-react'
 
 import { SHAPES, outlineFor, styleFor, zoneStyleFor } from '../canvas/kinds.js'
 import { SHAPES as GEOMETRY, shapeById, shapePath } from '../canvas/shapes/geometry.js'
@@ -36,6 +57,162 @@ import {
 } from '../canvas/layout.js'
 import PalettePicker from '../ui/PalettePicker.jsx'
 import { Section } from './primitives.jsx'
+import {
+  MARKS,
+  applyMark,
+  clearMarks,
+  hasFormatting,
+  markState,
+  richFromText,
+  richToText,
+  setList,
+} from '../canvas/richText.js'
+
+/* The sizes the stepper walks, the same list the floating text bar uses. */
+const TEXT_SIZES = [9, 10, 11, 12, 13, 16, 20, 24, 32, 48]
+const DEFAULT_TEXT_SIZE = 12
+
+const MARK_ROWS = [
+  { mark: 'b', label: 'Bold', Icon: Bold },
+  { mark: 'i', label: 'Italic', Icon: Italic },
+  { mark: 'u', label: 'Underline', Icon: Underline },
+  { mark: 's', label: 'Strikethrough', Icon: Strikethrough },
+]
+const H_ALIGNS = [
+  { id: 'left', label: 'Align text left', Icon: AlignLeft },
+  { id: 'center', label: 'Centre text', Icon: AlignCenter },
+  { id: 'right', label: 'Align text right', Icon: AlignRight },
+]
+const V_ALIGNS = [
+  { id: 'top', label: 'Text to the top', Icon: AlignStartHorizontal },
+  { id: 'middle', label: 'Text to the middle', Icon: AlignCenterHorizontal },
+  { id: 'bottom', label: 'Text to the bottom', Icon: AlignEndHorizontal },
+]
+
+function TextButton({ label, active = false, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      className={`nodrag rounded p-1.5 transition-colors ${
+        active
+          ? 'bg-twilio-blue-light text-twilio-blue-dark'
+          : 'text-twilio-gray-60 hover:bg-twilio-gray-10 hover:text-twilio-navy'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/*
+ * Rich text for the label, from the panel.
+ *
+ * The floating bar only exists while a label is being edited; this is the same set of controls for a
+ * label that is merely selected. Marks and lists apply to the whole label (select text in the label
+ * itself for part of it), size and alignment are properties of the label as a whole, and colour is the
+ * Text swatch above. Written to the same two places the bar writes -- `nameRich` and `style` -- so the
+ * two cannot disagree.
+ */
+function TextControls({ node, onUpdate, onUpdateOne }) {
+  const data = node.data
+  const style = data.style ?? {}
+  const plain = data.name ?? ''
+  const rich = data.nameRich ?? richFromText(plain)
+  const length = richToText(rich).length
+  const size = Number(style.fontSize) || DEFAULT_TEXT_SIZE
+
+  const writeRich = (next) =>
+    onUpdateOne({ nameRich: hasFormatting(next) ? next : undefined, name: richToText(next) })
+  const toggle = (mark) => {
+    if (!MARKS.includes(mark) || !length) return
+    writeRich(applyMark(rich, 0, length, mark, markState(rich, 0, length, mark) !== 'all'))
+  }
+  const listState = rich.blocks?.every((block) => block.list === 'bullet')
+    ? 'bullet'
+    : rich.blocks?.every((block) => block.list === 'number')
+      ? 'number'
+      : null
+  const toggleList = (kind) => length && writeRich(setList(rich, 0, length, listState === kind ? null : kind))
+  const set = (patch) => onUpdate({ style: { ...style, ...patch } })
+  const step = (direction) => {
+    const nearest = TEXT_SIZES.reduce((best, entry) =>
+      Math.abs(entry - size) < Math.abs(best - size) ? entry : best,
+    )
+    const at = TEXT_SIZES.indexOf(nearest) + direction
+    set({ fontSize: TEXT_SIZES[Math.min(TEXT_SIZES.length - 1, Math.max(0, at))] })
+  }
+
+  return (
+    <Section title="Text" note="Applies to the whole label. Double-click the label to format part of it.">
+      {node.data.lucid && (
+        <label className="flex items-center gap-2 py-1 text-xs text-twilio-navy">
+          <input
+            type="checkbox"
+            checked={!node.data.labelHidden}
+            onChange={(event) => onUpdateOne({ labelHidden: event.target.checked ? undefined : true })}
+            className="nodrag"
+          />
+          Show the name on the canvas
+        </label>
+      )}
+      <div className="flex flex-wrap items-center gap-0.5 py-1">
+        {MARK_ROWS.map(({ mark, label, Icon }) => (
+          <TextButton key={mark} label={label} active={markState(rich, 0, length, mark) === 'all'} onClick={() => toggle(mark)}>
+            <Icon size={14} aria-hidden="true" />
+          </TextButton>
+        ))}
+        <span className="mx-1 h-4 w-px bg-twilio-gray-20" aria-hidden="true" />
+        <TextButton label="Bulleted list" active={listState === 'bullet'} onClick={() => toggleList('bullet')}>
+          <List size={14} aria-hidden="true" />
+        </TextButton>
+        <TextButton label="Numbered list" active={listState === 'number'} onClick={() => toggleList('number')}>
+          <ListOrdered size={14} aria-hidden="true" />
+        </TextButton>
+        <TextButton label="Clear formatting" onClick={() => length && writeRich(clearMarks(rich))}>
+          <RemoveFormatting size={14} aria-hidden="true" />
+        </TextButton>
+      </div>
+      <div className="flex flex-wrap items-center gap-0.5 py-1">
+        {H_ALIGNS.map(({ id, label, Icon }) => (
+          <TextButton key={id} label={label} active={(style.textAlign ?? 'center') === id} onClick={() => set({ textAlign: id })}>
+            <Icon size={14} aria-hidden="true" />
+          </TextButton>
+        ))}
+        <span className="mx-1 h-4 w-px bg-twilio-gray-20" aria-hidden="true" />
+        {V_ALIGNS.map(({ id, label, Icon }) => (
+          <TextButton key={id} label={label} active={(style.textVAlign ?? 'middle') === id} onClick={() => set({ textVAlign: id })}>
+            <Icon size={14} aria-hidden="true" />
+          </TextButton>
+        ))}
+      </div>
+      <div className="flex items-center gap-1 py-1 text-xs">
+        <span className="w-20 shrink-0 text-twilio-gray-60">Font size</span>
+        <TextButton label="Smaller text" onClick={() => step(-1)}>
+          <Minus size={13} aria-hidden="true" />
+        </TextButton>
+        <input
+          type="number"
+          min={6}
+          max={96}
+          value={size}
+          onChange={(event) => {
+            const next = Number.parseInt(event.target.value, 10)
+            if (Number.isFinite(next) && next >= 6 && next <= 96) set({ fontSize: next })
+          }}
+          className="nodrag w-14 rounded border border-twilio-gray-20 px-1.5 py-0.5 text-xs tabular-nums text-twilio-navy focus:border-twilio-blue focus:outline-none"
+        />
+        <TextButton label="Larger text" onClick={() => step(1)}>
+          <Plus size={13} aria-hidden="true" />
+        </TextButton>
+        <span className="text-[10px] text-twilio-gray-60">px</span>
+      </div>
+    </Section>
+  )
+}
 
 const SWATCHES = [
   { key: 'bg', label: 'Background' },
@@ -324,12 +501,10 @@ export default function StyleTab({
         {SWATCHES.map(({ key, label }) => (
           <div key={key} className="flex items-center gap-2 py-1 text-xs">
             <span className="w-28 shrink-0 text-twilio-gray-60">{label}</span>
-            <input
-              type="color"
+            <ColorField
               value={effective[key]}
-              onChange={(event) => set({ [key]: event.target.value })}
-              className="nodrag h-6 w-10 shrink-0 cursor-pointer rounded border border-twilio-gray-20 bg-white"
-              title={`${label} colour`}
+              onChange={(next) => set({ [key]: next })}
+              label={`${label} color`}
             />
             <span className="font-mono text-[10px] uppercase text-twilio-gray-60">
               {effective[key]}
@@ -432,6 +607,10 @@ export default function StyleTab({
         )}
       </Section>
 
+      {!isZone && kind !== 'table' && (
+        <TextControls node={node} onUpdate={onUpdate} onUpdateOne={onUpdateOne} />
+      )}
+
       {/* A zone's geometry belongs to its resize handles -- the Zone tab says so, and two panels
           disagreeing about one rectangle is worse than one of them staying quiet. */}
       {!isZone && (
@@ -488,7 +667,7 @@ export default function StyleTab({
         note={
           palettesOpen
             ? channels.length === CHANNELS.length
-              ? 'One click sets the fill, a matching border and a legible label colour together.'
+              ? 'One click sets the fill, a matching border and a legible label color together.'
               : `One click sets the ${CHANNELS.filter((channel) => channels.includes(channel.key))
                   .map((channel) => channel.label.toLowerCase())
                   .join(' and ')} only.`
@@ -595,7 +774,7 @@ export default function StyleTab({
         /* Size is left out on purpose, and the request itself is the reason: "make same
            size" and "apply same style" were asked for as two separate actions, so one of
            them is not allowed to quietly do the other. */
-        note="Applies the colours, outline and shape above to every component of this kind currently on the canvas. Not the size — that stays per component."
+        note="Applies the colors, outline and shape above to every component of this kind currently on the canvas. Not the size — that stays per component."
       >
         <button
           type="button"

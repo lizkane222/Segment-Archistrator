@@ -3,7 +3,7 @@
 from cryptography.fernet import Fernet
 
 from .base import *  # noqa: F403
-from .base import SEGMENT_TOKEN_ENCRYPTION_KEYS
+from .base import SEGMENT_TOKEN_ENCRYPTION_KEYS, env
 
 DEBUG = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
@@ -11,6 +11,10 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
 # Vite dev server runs on :5177 and proxies /api to :8000, so requests are
 # same-origin from the browser's perspective and no CORS setup is needed.
 CSRF_TRUSTED_ORIGINS = ["http://localhost:5177", "http://127.0.0.1:5177"]
+
+# Local work has no Google client to sign in with. Set REQUIRE_ACCOUNT=True to try the real thing.
+REQUIRE_ACCOUNT = env.bool("REQUIRE_ACCOUNT", default=False)
+INVITATIONS_ENABLED = True
 
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False

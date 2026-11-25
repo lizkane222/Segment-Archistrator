@@ -468,3 +468,23 @@ def test_scenarios_survive_a_save_and_reload_through_the_api(auth_client):
 
     reloaded = auth_client.get(f"/api/diagrams/{created.json()['id']}")
     assert reloaded.json()["graph"]["scenarios"] == scenarios
+
+
+def test_a_connector_may_end_at_a_zone_by_its_canvas_node_id():
+    """`zone-engage` is how the document names a zone as a connector end; it is not a missing node."""
+    from apps.diagrams.validators import validate_architecture
+
+    graph = {
+        "nodes": [{"id": "n1", "kind": "profile_sync", "name": "Sync"}],
+        "zones": [{"id": "engage", "label": "Engage"}, {"id": "destinations~2", "label": "Destinations (2)"}],
+        "edges": [
+            {"id": "e1", "source": "zone-engage", "target": "n1"},
+            {"id": "e2", "source": "n1", "target": "zone-destinations~2"},
+        ],
+    }
+    assert validate_architecture(graph) == []
+    # No stored zones: the topology's own are drawn, so they are legitimate ends too.
+    assert validate_architecture({**{k: v for k, v in graph.items() if k != "zones"}, "edges": graph["edges"][:1]}) == []
+    # A genuinely missing node is still a refusal.
+    broken = {**graph, "edges": [{"id": "e3", "source": "zone-nowhere", "target": "n1"}]}
+    assert validate_architecture(broken)

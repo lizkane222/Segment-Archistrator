@@ -19,6 +19,8 @@ happens in the views that mean it (sign-in, sign-out).
 
 from django.conf import settings
 
+from .cookies import set_session_cookie_on
+
 
 class SlidingSessionCookieMiddleware:
     def __init__(self, get_response):
@@ -38,13 +40,5 @@ class SlidingSessionCookieMiddleware:
         if settings.WORKSPACE_SESSION_COOKIE in response.cookies:
             return response
 
-        response.set_cookie(
-            settings.WORKSPACE_SESSION_COOKIE,
-            str(session.id),
-            max_age=settings.WORKSPACE_SESSION_IDLE_HOURS * 3600,
-            httponly=True,
-            samesite="Lax",
-            secure=not settings.DEBUG,
-            path="/",
-        )
+        set_session_cookie_on(response, session.id)
         return response

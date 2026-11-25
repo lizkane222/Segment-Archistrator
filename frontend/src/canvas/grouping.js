@@ -163,6 +163,48 @@ export function groupSections(nodes, topology) {
     .sort(compareGroups(topology))
 }
 
+/** `Destination` -> `Destinations`, `Journey` -> `Journeys`, `Reverse ETL Model` -> `Reverse ETL Models`. */
+function pluralise(label) {
+  if (/[^aeiou]y$/i.test(label)) return `${label.slice(0, -1)}ies`
+  if (/(s|x|ch|sh)$/i.test(label)) return `${label}es`
+  return `${label}s`
+}
+
+/**
+ * The same components as a tree, for the palette's Workspace tab: one section per kind ("Destinations",
+ * "Sources"), and inside it a subsection per type ("HubSpot", "Android"). A kind with no type axis is
+ * just its items. Subsections are never named "Destination · A/B Testing" -- the category is what a
+ * reader scans for, and the kind is already the heading above it.
+ */
+export function groupTree(nodes, topology) {
+  const kinds = new Map()
+  for (const section of groupSections(nodes, topology)) {
+    const kindLabel = topology?.kinds?.[section.kind]?.label ?? humanise(section.kind) ?? 'Component'
+    const entry = kinds.get(section.kind) ?? {
+      key: section.kind,
+      kind: section.kind,
+      label: pluralise(kindLabel),
+      count: 0,
+      items: [],
+      subs: [],
+    }
+    entry.count += section.items.length
+    if (section.type) {
+      entry.subs.push({
+        key: section.key,
+        type: section.type,
+        label: section.type === UNCATEGORISED ? 'Uncategorised' : humanise(section.type),
+        items: section.items,
+      })
+    } else {
+      entry.items.push(...section.items)
+    }
+    kinds.set(section.kind, entry)
+  }
+  for (const entry of kinds.values()) entry.subs.sort((a, b) => a.label.localeCompare(b.label))
+  return [...kinds.values()].sort((a, b) => a.label.localeCompare(b.label))
+}
+
 /** A stack node's box. Explicit, because React Flow does not measure a node it
     cannot write a dimensions change back for -- see the header. */
 export function groupStackSize(count) {
@@ -486,6 +528,46 @@ function asRows(value) {
  * Which sections a kind has comes from the topology (`buckets`, `expandable`), so
  * adding one is a server-side edit like every other rule in this app.
  */
+/* Rows for a profile section read off the pasted `profileSnapshot`, or
+   null when that section has not been pasted. Derived at render time and never written
+   back to the node, as with `profileIdentity`. */
+function snapshotRows(snapshot, field) {
+  if (!snapshot) return null
+  if (field === 'identifiers') {
+    if (!snapshot.identifiers?.length) return null
+    return snapshot.identifiers.map((entry, index) => ({
+      id: `${entry?.type ?? 'id'}:${entry?.id ?? index}:${index}`,
+      label: `${entry?.type ?? 'id'}: ${entry?.id ?? ''}`,
+    }))
+  }
+  if (field === 'traits') {
+    const entries = Object.entries(snapshot.traits ?? {})
+    if (!entries.length) return null
+    return entries.map(([key, value]) => ({
+      id: key,
+      label: `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`,
+    }))
+  }
+  if (field === 'events') {
+    if (!snapshot.events?.length) return null
+    /* Names only, the ten most recently received. An entry with no parseable
+       timestamp sorts last rather than being dropped. */
+    const time = (entry) => {
+      const t = Date.parse(entry?.timestamp ?? '')
+      return Number.isNaN(t) ? -Infinity : t
+    }
+    return snapshot.events
+      .map((entry, index) => ({ entry, index }))
+      .sort((a, b) => time(b.entry) - time(a.entry) || a.index - b.index)
+      .slice(0, 10)
+      .map(({ entry, index }) => ({
+        id: entry?.message_id ?? `event:${index}`,
+        label: entry?.event ?? entry?.type ?? 'event',
+      }))
+  }
+  return null
+}
+
 export function internalSections(data, topology) {
   const spec = topology?.kinds?.[data?.kind]
   if (!spec) return []
@@ -502,7 +584,7 @@ export function internalSections(data, topology) {
     return PROFILE_SECTIONS.map(([field, label]) => ({
       id: field,
       label,
-      rows: asRows(data?.[field]),
+      rows: (data?.kind === 'profile' && snapshotRows(data.profileSnapshot, field)) || asRows(data?.[field]),
     }))
   }
 

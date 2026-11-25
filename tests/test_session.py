@@ -29,7 +29,8 @@ def test_get_session_with_no_cookie(client):
         "workspace": None,
         "connected": False,
         "anonymous": False,
-        "auth": {"google": False},
+        "auth": {"google": False, "required": False, "domains": [], "invitations": True},
+        "connections": [],
     }
 
 
@@ -174,7 +175,8 @@ def test_expired_session_is_rejected_and_deleted(auth_client, session, settings)
         "workspace": None,
         "connected": False,
         "anonymous": False,
-        "auth": {"google": False},
+        "auth": {"google": False, "required": False, "domains": [], "invitations": True},
+        "connections": [],
     }
     assert WorkspaceSession.objects.count() == 0
 
@@ -187,7 +189,8 @@ def test_unknown_cookie_is_not_authenticated(client):
         "workspace": None,
         "connected": False,
         "anonymous": False,
-        "auth": {"google": False},
+        "auth": {"google": False, "required": False, "domains": [], "invitations": True},
+        "connections": [],
     }
 
 

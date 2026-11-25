@@ -17,6 +17,7 @@
  */
 
 import { zoneProductOf } from './frames.js'
+import { isTableHandle } from './handles.js'
 import { componentSize, zoneNodeId, zoneSize } from './layout.js'
 
 /* Kinds with no topology entry, so no zone and no adjacency table. A custom
@@ -25,7 +26,7 @@ import { componentSize, zoneNodeId, zoneSize } from './layout.js'
    rules to say about it. Listed here rather than read from kinds.js: whether a
    kind has rules is a rules question, and importing the icon table to answer it
    would make the two files circular in spirit if not yet in fact. */
-export const RULE_FREE_KINDS = new Set(['custom'])
+export const RULE_FREE_KINDS = new Set(['custom', 'event'])
 
 /* Zones that hold products rather than components -- see CONTAINER_ZONES in
    topology.py, which is where the reasoning lives. Hardcoded here for the same
@@ -220,7 +221,18 @@ export function makeConnectionValidator({ topology, getNode, edges }) {
     const to = getNode(target)
     if (!from || !to) return false
 
-    const duplicate = edges.some((e) => e.source === source && e.target === target)
+    /* Two components are either connected or not -- unless one end is a table's row or column, where
+       each row is its own thing to connect and several may feed the same component. Then it is only a
+       duplicate when it is the same row, to the same place. */
+    const tableEnd = isTableHandle(connection.sourceHandle) || isTableHandle(connection.targetHandle)
+    const duplicate = edges.some(
+      (e) =>
+        e.source === source &&
+        e.target === target &&
+        (!(tableEnd || isTableHandle(e.sourceHandle) || isTableHandle(e.targetHandle)) ||
+          ((e.sourceHandle ?? null) === (connection.sourceHandle ?? null) &&
+            (e.targetHandle ?? null) === (connection.targetHandle ?? null))),
+    )
     if (duplicate) return false
 
     return true
@@ -460,6 +472,52 @@ export function zoneAtPosition(nodes, position) {
     }
   }
   return found
+}
+
+/**
+ * The zone a point is aimed at, which is not always the one it is inside.
+ *
+ * Aiming a connector's end at a zone means aiming at its *border*, and the pointer is as often a pixel
+ * outside it as inside. `zoneAtPosition` answers "which is the deepest zone containing this point", and a
+ * pixel outside Warehouse is inside the zone that holds Warehouse -- so the connector attached itself to
+ * the parent, the large region round everything, and ended up on the far side of the diagram.
+ *
+ * So a zone whose border is within `reach` of the point wins, the nearest border first and the deeper zone
+ * on a tie. Only when no border is near is it the deepest zone that contains the point -- which is what
+ * "the middle of Warehouse" has always meant. `accept` filters which zones count (a layout divider is
+ * furniture and nothing should attach to it).
+ */
+export function zoneNearPoint(nodes, point, reach = 0, accept = () => true) {
+  const all = nodes ?? []
+  const byId = new Map(all.map((node) => [node.id, node]))
+  let near = null
+  let nearEdge = Infinity
+  let nearDepth = -1
+  let inside = null
+  let insideDepth = -1
+
+  for (const zone of all) {
+    if (zone.type !== 'zone' || !accept(zone)) continue
+    const anchor = zoneAnchor(zone, byId)
+    const { width, height } = zoneSize(zone)
+    const right = anchor.x + width
+    const bottom = anchor.y + height
+    const within = point.x >= anchor.x && point.x <= right && point.y >= anchor.y && point.y <= bottom
+    const edge = within
+      ? Math.min(point.x - anchor.x, right - point.x, point.y - anchor.y, bottom - point.y)
+      : Math.hypot(Math.max(anchor.x - point.x, 0, point.x - right), Math.max(anchor.y - point.y, 0, point.y - bottom))
+
+    if (within && anchor.depth > insideDepth) {
+      inside = zone
+      insideDepth = anchor.depth
+    }
+    if (edge <= reach && (edge < nearEdge || (edge === nearEdge && anchor.depth > nearDepth))) {
+      near = zone
+      nearEdge = edge
+      nearDepth = anchor.depth
+    }
+  }
+  return near ?? inside
 }
 
 /**

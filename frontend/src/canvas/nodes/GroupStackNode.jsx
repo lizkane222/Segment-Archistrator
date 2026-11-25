@@ -148,7 +148,11 @@ function GroupStackNode({ data }) {
  * changes no geometry at all, so nothing downstream has to know this can happen.
  */
 export function InternalSections({ data, topology }) {
-  const sections = internalSections(data, topology)
+  /* A profile with pasted identifiers already lists them on its face, so they get no chip. */
+  const identifiersShown = data?.kind === 'profile' && data.profileSnapshot?.identifiers?.length > 0
+  const sections = internalSections(data, topology).filter(
+    (section) => !(identifiersShown && section.id === 'identifiers'),
+  )
   const [open, setOpen] = useState(null)
   if (!sections.length) return null
 

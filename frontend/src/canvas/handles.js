@@ -57,6 +57,30 @@ export const SIDES = [
 export const LEGACY_SOURCE = 'e'
 export const LEGACY_TARGET = 'w'
 
+/* --- a table's rows and columns ---------------------------------------------- */
+
+/*
+ * A table is several things to connect, not one: each row can feed a different component, and so
+ * can each column. So a table carries a handle per row on its left and right edges and one per column
+ * on its top and bottom, `row-r-2` being the right-hand side of the third row and `col-b-0` the foot
+ * of the first column. They are ordinary registered handles, so React Flow places the connector's
+ * end at them itself and the edge needs no geometry of its own -- and a row that grows with its text
+ * takes its connector with it.
+ *
+ * The id says which side it is on, so the rest of the app that asks "which side does this end use?"
+ * (fan-out, reversing, which way the line leaves) gets an answer without learning about tables.
+ */
+const TABLE_HANDLE = /^(row|col)-([rltb])-(\d+)$/
+const TABLE_SIDE = { r: 'right', l: 'left', t: 'top', b: 'bottom' }
+
+/** `'row-r-2'` -> `{axis: 'row', side: 'right', index: 2}`, or null for any other handle. */
+export function parseTableHandle(id) {
+  const match = typeof id === 'string' ? TABLE_HANDLE.exec(id) : null
+  return match ? { axis: match[1], side: TABLE_SIDE[match[2]], index: Number(match[3]) } : null
+}
+
+export const isTableHandle = (id) => parseTableHandle(id) !== null
+
 /* --- a connector that meets a component anywhere along its border ------------ */
 
 /*

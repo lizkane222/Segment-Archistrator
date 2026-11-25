@@ -17,6 +17,8 @@ import { Frame, MousePointerClick, Spline, SquareDashed, X } from 'lucide-react'
 import BindTab from './BindTab.jsx'
 import CodeTab from './CodeTab.jsx'
 import EdgeStyleTab from './EdgeStyleTab.jsx'
+import EventTab from './EventTab.jsx'
+import TablePasteTab from './TablePasteTab.jsx'
 import FieldsTab from './FieldsTab.jsx'
 import LinksTab from './LinksTab.jsx'
 import OverviewTab from './OverviewTab.jsx'
@@ -42,6 +44,8 @@ import {
   resolveSpace,
   spacesFromGraph,
   tabsFor,
+  EVENT,
+  PASTE,
 } from './tabs.js'
 
 export default function Inspector({
@@ -61,6 +65,8 @@ export default function Inspector({
   wide,
   onWide,
   onConnect,
+  /* Starts a path from an event card's payload. */
+  onStartSimulation,
   onUpdateNode,
   /* Style writes, which reach every selected component rather than only the inspected one -- see
      `styleTargets` in AppShell.jsx. Optional: a caller that does not pass it gets the single-node
@@ -69,6 +75,10 @@ export default function Inspector({
   styleTargetCount,
   onUpdateKind,
   onUpdateEdge,
+  /* Every connector an edge edit reaches, and the connectors themselves -- more than one when the
+     inspected connector is part of a multi-selection. See inspector/multiEdit.js. */
+  edgeTargets = null,
+  edgeGroup = null,
   /* A connector's two non-`data` operations: which side each end meets (a top-level handle plus
      an anchor -- see `endpointSidePatch`) and reversing it. Passed through rather than folded
      into `onUpdateEdge`, which merges into `data` and would put a handle where nothing reads it. */
@@ -248,6 +258,18 @@ export default function Inspector({
             onNotify={onNotify}
           />
         )}
+        {tab === EVENT && (
+          <EventTab
+            node={node}
+            nodes={nodes}
+            scenarios={scenarios}
+            onUpdate={(patch) => onUpdateNode(node.id, patch)}
+            onStartSimulation={onStartSimulation}
+          />
+        )}
+        {tab === PASTE && (
+          <TablePasteTab key={node.id} node={node} onUpdate={(patch) => onUpdateNode(node.id, patch)} onNotify={onNotify} />
+        )}
         {tab === RULES && <RulesTab node={node} onNotify={onNotify} />}
         {tab === DATA && (
           <DataTab
@@ -274,9 +296,10 @@ export default function Inspector({
           <EdgeStyleTab
             edge={node}
             nodes={nodes}
-            onUpdate={(patch) => onUpdateEdge(node.id, patch)}
-            onUpdateEnds={(patch) => onUpdateEdgeEnds?.(node.id, patch)}
-            onReverse={() => onReverseEdge?.([node.id])}
+            group={edgeGroup?.length ? edgeGroup : [node]}
+            onUpdate={(patch) => onUpdateEdge(edgeTargets ?? [node.id], patch)}
+            onUpdateEnds={(patch) => onUpdateEdgeEnds?.(edgeTargets ?? [node.id], patch)}
+            onReverse={() => onReverseEdge?.(edgeTargets ?? [node.id])}
             commandContext={commandContext}
             onRunCommand={onRunCommand}
             onPreview={onPreview}

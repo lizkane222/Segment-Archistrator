@@ -37,6 +37,12 @@ export function createFlash({ duration = FLASH_MS, schedule = setTimeout, cancel
      leave the original timer to stop it early. */
   const timers = new Map()
   const listeners = new Set()
+  /* Ids held lit for as long as something is pointing at them -- a hovered option in a picker -- rather
+     than for a timed pulse. Separate from `timers` because it ends when the pointer does, not on a clock. */
+  let held = new Set()
+  /* Ids marked for as long as something about them is selected -- the zone a selected component sits in. A
+     third, separate set so a hovered picker option and a selection never cancel each other out. */
+  let marked = new Set()
 
   const emit = () => {
     for (const listener of listeners) listener()
@@ -52,6 +58,26 @@ export function createFlash({ duration = FLASH_MS, schedule = setTimeout, cancel
 
   return {
     flashing: (id) => id != null && timers.has(id),
+    /** Lit while pointed at. `hold` replaces whatever was held; `release` lets go of all of it. */
+    held: (id) => id != null && held.has(id),
+    marked: (id) => id != null && marked.has(id),
+    mark: (ids) => {
+      const next = new Set((Array.isArray(ids) ? ids : [ids]).filter((id) => id != null))
+      if (next.size === marked.size && [...next].every((id) => marked.has(id))) return
+      marked = next
+      emit()
+    },
+    hold: (ids) => {
+      const next = new Set((Array.isArray(ids) ? ids : [ids]).filter((id) => id != null))
+      if (next.size === held.size && [...next].every((id) => held.has(id))) return
+      held = next
+      emit()
+    },
+    release: () => {
+      if (held.size === 0) return
+      held = new Set()
+      emit()
+    },
     /**
      * Start (or restart) the pulse on every id given.
      *
@@ -97,6 +123,18 @@ export const FlashContext = createContext(NO_FLASH)
 
 export function useFlash() {
   return useContext(FlashContext)
+}
+
+/** Whether this id is marked -- the zone directly above a selected component. See `mark` above. */
+export function useMarked(id) {
+  const flash = useFlash()
+  return useSyncExternalStore(flash.subscribe, () => flash.marked(id))
+}
+
+/** Whether this component is being pointed at right now -- see `hold` above. */
+export function useHeld(id) {
+  const flash = useFlash()
+  return useSyncExternalStore(flash.subscribe, () => flash.held(id))
 }
 
 /** Whether this component is pulsing -- a boolean, so the rest do not re-render. */

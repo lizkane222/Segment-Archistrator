@@ -48,6 +48,33 @@
    normaliser has to compare. */
 export const MARKS = ['b', 'i', 'u', 's']
 
+/*
+ * A link is the fifth thing a run can carry, and unlike the four marks it has a value: `{text, link: url}`.
+ * It is kept out of `MARKS` for that reason -- everything that loops over the marks treats them as on/off
+ * -- and handled beside them wherever a run is copied, compared or merged.
+ *
+ * Only absolute http, https and mailto addresses are ever stored or drawn. A label can be shared with a
+ * workspace, and `javascript:` in an `href` is script that runs as this page when someone clicks it.
+ */
+
+/** The address a link may point at, or null. Bare domains get `https://`; anything else is refused. */
+export function cleanLink(value) {
+  if (typeof value !== 'string') return null
+  let text = value.trim()
+  if (!text) return null
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(text)) {
+    if (/^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(text)) text = `mailto:${text}`
+    else if (/^[^\s/]+\.[^\s/]+/.test(text)) text = `https://${text}`
+    else return null
+  }
+  try {
+    const url = new URL(text)
+    return ['https:', 'http:', 'mailto:'].includes(url.protocol) ? url.href : null
+  } catch {
+    return null
+  }
+}
+
 /* One block per line. The separator is what `richToText` joins with and what `richFromText`
    splits on, so the round trip through plain text is lossless in the one way that matters. */
 const NEWLINE = '\n'
@@ -93,7 +120,8 @@ export function isEmptyRich(rich) {
  */
 export function hasFormatting(rich) {
   return (rich?.blocks ?? []).some(
-    (block) => block.list || (block.runs ?? []).some((run) => MARKS.some((mark) => run?.[mark])),
+    (block) =>
+      block.list || (block.runs ?? []).some((run) => MARKS.some((mark) => run?.[mark]) || cleanLink(run?.link)),
   )
 }
 
@@ -139,11 +167,13 @@ export function normalizeRich(rich) {
 function markFlags(run) {
   const flags = {}
   for (const mark of MARKS) if (run?.[mark]) flags[mark] = true
+  const link = cleanLink(run?.link)
+  if (link) flags.link = link
   return flags
 }
 
 function sameMarks(a, b) {
-  return MARKS.every((mark) => Boolean(a?.[mark]) === Boolean(b?.[mark]))
+  return MARKS.every((mark) => Boolean(a?.[mark]) === Boolean(b?.[mark])) && (a?.link ?? null) === (b?.link ?? null)
 }
 
 /**
@@ -159,6 +189,36 @@ function sameMarks(a, b) {
  */
 export function applyMark(rich, start, end, mark, on = true) {
   if (!MARKS.includes(mark)) return rich
+  return rewriteRange(rich, start, end, (run) => {
+    const marked = { ...run }
+    if (on) marked[mark] = true
+    else delete marked[mark]
+    return marked
+  })
+}
+
+/**
+ * Make the text in a range a link, or -- with no `url` -- take the link off it.
+ *
+ * `url` goes through `cleanLink`, so a refused address links nothing rather than storing something that
+ * would never be drawn; the caller asks `cleanLink` first when it wants to tell the user.
+ */
+export function applyLink(rich, start, end, url) {
+  const link = url == null || url === '' ? null : cleanLink(url)
+  if (url && !link) return rich
+  return rewriteRange(rich, start, end, (run) => {
+    const next = { ...run }
+    if (link) next.link = link
+    else delete next.link
+    return next
+  })
+}
+
+/*
+ * Run `change` over the part of each run that falls inside a range, splitting runs at the ends of it.
+ * What `applyMark` and `applyLink` share: the range arithmetic is the hard part and is the same.
+ */
+function rewriteRange(rich, start, end, change) {
   const text = richToText(rich)
   const from = Math.max(0, Math.min(text.length, Math.min(start, end)))
   const to = Math.max(0, Math.min(text.length, Math.max(start, end)))
@@ -188,18 +248,41 @@ export function applyMark(rich, start, end, mark, on = true) {
       const tail = run.text.slice(Math.min(length, to - runStart))
 
       if (head) runs.push({ ...run, text: head })
-      if (body) {
-        const marked = { ...run, text: body }
-        if (on) marked[mark] = true
-        else delete marked[mark]
-        runs.push(marked)
-      }
+      if (body) runs.push(change({ ...run, text: body }))
       if (tail) runs.push({ ...run, text: tail })
     }
     return { ...block, runs }
   })
 
   return normalizeRich({ blocks })
+}
+
+/**
+ * The link at a selection: `{url, start, end}` when all of the selected text is one link, or -- for a bare
+ * caret -- when it is inside one, in which case the range is the whole link so editing it edits all of it.
+ * Null otherwise.
+ */
+export function linkAt(rich, start, end) {
+  const lo = Math.min(start, end)
+  const hi = Math.max(start, end)
+  let cursor = 0
+  const spans = []
+  for (const [index, block] of (normalizeRich(rich).blocks ?? []).entries()) {
+    if (index > 0) cursor += NEWLINE.length
+    for (const run of block.runs ?? []) {
+      spans.push({ from: cursor, to: cursor + run.text.length, link: run.link ?? null })
+      cursor += run.text.length
+    }
+  }
+  if (lo === hi) {
+    const hit = spans.find((span) => span.link && lo > span.from && lo <= span.to) ?? spans.find((span) => span.link && lo >= span.from && lo < span.to)
+    return hit ? { url: hit.link, start: hit.from, end: hit.to } : null
+  }
+  const covered = spans.filter((span) => span.to > lo && span.from < hi)
+  const first = covered[0]
+  if (!first?.link || !covered.every((span) => span.link === first.link && span.from < hi && span.to > lo)) return null
+  /* Contiguous by construction (normalised runs of one link merge), so the first span is the link. */
+  return { url: first.link, start: lo, end: hi }
 }
 
 /**
@@ -338,6 +421,11 @@ export function richFromDom(root) {
     if (tag === 'i' || tag === 'em') next.i = true
     if (tag === 'u') next.u = true
     if (tag === 's' || tag === 'strike' || tag === 'del') next.s = true
+    /* A link keeps its address if it is one that is safe to draw; anything else is just its text. */
+    if (tag === 'a') {
+      const link = cleanLink(node.getAttribute?.('href') ?? '')
+      if (link) next.link = link
+    }
     /* execCommand may produce inline styles instead of tags, depending on the browser and on
        `styleWithCSS`. Read as well as the tags, or bold would silently not persist. */
     const style = node.style ?? {}

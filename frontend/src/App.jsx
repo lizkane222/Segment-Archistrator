@@ -2,12 +2,21 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 
 import AppShell from './AppShell.jsx'
+import SignInModal from './auth/SignInModal.jsx'
+import { clearSession } from './diagram/session.js'
 import ErrorBoundary from './ui/ErrorBoundary.jsx'
-import { auth as authApi, session as sessionApi } from './services/api.js'
+import {
+  auth as authApi,
+  connections as connectionsApi,
+  session as sessionApi,
+  setSignInRequiredHandler,
+  setWorkspaceScope,
+} from './services/api.js'
 import {
   SIGN_IN_PARAMS,
   SessionContext,
   needsBootstrap,
+  needsSignIn,
   sessionStateFrom,
   signInNotice,
 } from './auth/session.js'
@@ -38,6 +47,9 @@ export default function App() {
      shell. Held here rather than in the shell because the parameters must be stripped
      before anything else reads the URL. */
   const [notice, setNotice] = useState(null)
+  /* Bumped on log out, so the shell remounts empty: its open diagrams are the signed-out person's
+     to lose, and a shell that stayed mounted would write them back to storage. */
+  const [shellKey, setShellKey] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -83,34 +95,72 @@ export default function App() {
       /* Optimistic, then authoritative: the header should show the workspace name the
          instant the dialog closes, but connecting also rewrites which workspace the
          session's diagrams are about. */
-      setSession((current) => ({ ...(current ?? {}), workspace, connected: true, anonymous: false }))
+      setSession((current) => ({
+        ...(current ?? {}),
+        workspace,
+        connected: true,
+        anonymous: false,
+        /* Added to the groups now, so the tab that is about to be put in this workspace's group
+           does not find the group missing and fall back to no workspace while the re-read is in
+           flight. */
+        connections: [
+          workspace,
+          ...(current?.connections ?? []).filter((entry) => entry.id !== workspace.id),
+        ],
+      }))
       refreshSession()
     },
     [refreshSession],
   )
 
-  /** Disconnect: forget the Segment credential, keep the session and the account. */
-  const handleSignOut = useCallback(async () => {
-    try {
-      await sessionApi.end()
-    } finally {
-      /* DELETE removes the session row, so there is no scope left to save into. Get
-         another one rather than leaving the canvas unable to persist. */
-      await sessionApi.startAnonymous().catch(() => {})
-      await refreshSession()
-    }
-  }, [refreshSession])
+  /**
+   * Disconnect one workspace: forget its credential, and keep the session and the account.
+   *
+   * The tabs in its group fall back to no workspace (AppShell prunes them), and the diagrams stay
+   * where they are -- saved diagrams belong to the account, not to the connection.
+   */
+  const handleDisconnect = useCallback(
+    async (workspaceId) => {
+      if (!workspaceId) return
+      try {
+        await connectionsApi.forget(workspaceId)
+      } finally {
+        await refreshSession()
+      }
+    },
+    [refreshSession],
+  )
 
   /** Log out: forget the account. A different act from Disconnect, on purpose. */
   const handleLogOut = useCallback(async () => {
     try {
       await authApi.logOut()
     } finally {
+      /* The open diagrams are kept in this browser's storage for crash recovery. They are the
+         signed-out person's, and the next person to sign in here must not be handed them. */
+      clearSession()
+      setShellKey((key) => key + 1)
+      setWorkspaceScope(null)
       await refreshSession()
     }
   }, [refreshSession])
 
   const state = useMemo(() => sessionStateFrom(session), [session])
+
+  /* Any request the server answers "nobody is signed in" means the session lapsed under an open
+     page. Re-read it once, however many requests were in flight: the answer is the sign-in screen,
+     and a toast per failed request would bury it. */
+  useEffect(() => {
+    let pending = false
+    setSignInRequiredHandler(() => {
+      if (pending) return
+      pending = true
+      refreshSession().finally(() => {
+        pending = false
+      })
+    })
+    return () => setSignInRequiredHandler(null)
+  }, [refreshSession])
 
   if (status === 'booting') {
     return (
@@ -137,6 +187,10 @@ export default function App() {
     )
   }
 
+  /* Not a separate screen: the shell stays mounted underneath, inert, so a session that lapses
+     mid-use does not discard what is open and what was open is there to come back to. */
+  const locked = needsSignIn(state)
+
   return (
     /* The outer net. Anything the inner boundaries do not hold lands here as a message
        with the error in it -- which is strictly better than the blank white page this
@@ -147,10 +201,13 @@ export default function App() {
       hint="Unsaved canvas changes are gone. Retrying starts a fresh canvas; the error is below, and the console has the component stack."
     >
       <SessionContext.Provider value={state}>
+        <div className="h-full" inert={locked}>
         <AppShell
-          workspace={state.workspace}
+          key={shellKey}
+          connections={state.connections}
+          accountEmail={state.account?.email ?? null}
           onConnected={handleConnected}
-          onSignOut={handleSignOut}
+          onDisconnect={handleDisconnect}
           onLogOut={handleLogOut}
           /* Re-read the session from the server. Two callers, both of which have just
              discovered that what this component believes about the session is out of date:
@@ -160,6 +217,14 @@ export default function App() {
           onRefreshSession={refreshSession}
           signInNotice={notice}
         />
+        </div>
+        {locked && (
+          <SignInModal
+            notice={notice}
+            domains={state.domains}
+            googleAvailable={state.googleAvailable}
+          />
+        )}
       </SessionContext.Provider>
     </ErrorBoundary>
   )

@@ -28,6 +28,7 @@ import {
   zoneLabel,
   zoneOfParent,
   zoneOrigin,
+  zoneNearPoint,
 } from './rules.js'
 
 const TOPOLOGY = {
@@ -877,5 +878,44 @@ describe('a duplicated zone', () => {
     expect(message).toContain('Profile')
     expect(message).toContain('Profiles')
     expect(message).not.toContain('~2')
+  })
+})
+
+describe('connecting rows of a table', () => {
+  it('lets several rows feed one component, but not the same row twice', async () => {
+    const { makeConnectionValidator } = await import('./rules.js')
+    const nodes = { t: { id: 't' }, d: { id: 'd' } }
+    const edges = [{ id: 'e1', source: 't', target: 'd', sourceHandle: 'row-r-0', targetHandle: 'w' }]
+    const valid = makeConnectionValidator({ topology: { kinds: {} }, getNode: (id) => nodes[id], edges })
+    expect(valid({ source: 't', target: 'd', sourceHandle: 'row-r-1', targetHandle: 'w' })).toBe(true)
+    expect(valid({ source: 't', target: 'd', sourceHandle: 'row-r-0', targetHandle: 'w' })).toBe(false)
+  })
+  it('still refuses a second plain connector between the same two components', async () => {
+    const { makeConnectionValidator } = await import('./rules.js')
+    const nodes = { a: { id: 'a' }, b: { id: 'b' } }
+    const edges = [{ id: 'e1', source: 'a', target: 'b', sourceHandle: 'e', targetHandle: 'w' }]
+    const valid = makeConnectionValidator({ topology: { kinds: {} }, getNode: (id) => nodes[id], edges })
+    expect(valid({ source: 'a', target: 'b', sourceHandle: 'n', targetHandle: 's' })).toBe(false)
+  })
+})
+
+describe('zoneNearPoint', () => {
+  const zone = (id, x, y, width, height, parentId) => ({ id, type: 'zone', position: { x, y }, width, height, ...(parentId ? { parentId } : {}), data: { id } })
+  const nodes = [zone('outer', 0, 0, 1000, 600), zone('left', 40, 40, 300, 300, 'outer'), zone('right', 420, 40, 300, 300, 'outer')]
+
+  it('picks the zone whose border is being aimed at, even from a pixel outside it', () => {
+    // Four pixels left of the right-hand zone's left border: inside only the outer zone.
+    expect(zoneNearPoint(nodes, { x: 416, y: 200 }, 45).id).toBe('right')
+  })
+  it('takes the deepest zone containing the point when no border is near', () => {
+    expect(zoneNearPoint(nodes, { x: 570, y: 190 }, 45).id).toBe('right')
+    expect(zoneNearPoint(nodes, { x: 880, y: 500 }, 45).id).toBe('outer')
+  })
+  it('breaks a tie between nested borders towards the deeper zone', () => {
+    const flush = [zone('outer', 0, 0, 500, 500), zone('inner', 0, 0, 300, 300, 'outer')]
+    expect(zoneNearPoint(flush, { x: 0, y: 100 }, 45).id).toBe('inner')
+  })
+  it('can skip zones that should not be attached to', () => {
+    expect(zoneNearPoint(nodes, { x: 416, y: 200 }, 45, (z) => z.id !== 'right').id).toBe('outer')
   })
 })
