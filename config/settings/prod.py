@@ -12,32 +12,32 @@ ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
 
 CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS if h]
 
-# True whenever the proxy in front of this app terminates TLS (Render always
-# does, even on free URLs; an AWS load balancer only does once it has an HTTPS
-# listener + cert, which needs a domain). Until that's in place, forcing these
-# on would either redirect-loop every request or stop the browser from sending
-# the session cookie back at all -- so this is env-driven, not hard-coded.
-# Flip it back to default (true) the moment HTTPS is in front of this app.
-_HTTPS_AVAILABLE = env.bool("SECURE_SSL_REDIRECT", default=True)
-
-# Not X-Forwarded-Proto: CloudFront unconditionally strips that header on
-# every request to a custom origin, no exceptions -- confirmed in AWS's own
-# docs. CloudFront-Forwarded-Proto is the header it actually supports for
-# this, and only when explicitly enabled on the origin request policy (see
-# the "forward-cloudfront-proto" policy on the distribution).
-SECURE_PROXY_SSL_HEADER = ("HTTP_CLOUDFRONT_FORWARDED_PROTO", "https")
-SECURE_SSL_REDIRECT = _HTTPS_AVAILABLE
-# A year is the end state, but a browser that has seen this header will refuse plain HTTP
-# for that long, so the first HTTPS deploy should set SECURE_HSTS_SECONDS=3600 and raise it
-# once nothing has gone wrong.
-SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=31536000) if _HTTPS_AVAILABLE else 0
-SECURE_HSTS_INCLUDE_SUBDOMAINS = _HTTPS_AVAILABLE
-# Not preload: that is a promise to browser vendors that is not undoable, and nobody has
-# submitted this host to the list.
+# CloudFront's Viewer Protocol Policy ("Redirect HTTP to HTTPS") already
+# guarantees that every request reaching this app came from a real HTTPS
+# connection to the viewer -- Django doesn't need to (and here, can't)
+# independently verify that per request. CloudFront strips the standard
+# X-Forwarded-Proto header unconditionally for every custom origin, no
+# exceptions, and the one header it does support for this
+# (CloudFront-Forwarded-Proto) only reaches a custom origin via a *custom*
+# origin request policy -- a feature AWS gates behind the $200/month
+# CloudFront Business plan, which is wildly disproportionate for this app.
+#
+# So: no redirect at the Django layer (CloudFront already did it, and a
+# broken redirect here previously looped the site forever), and no per-request
+# scheme detection -- just hardcode what's structurally always true instead.
+# Because request.is_secure() can never be confirmed True, Django's
+# SecurityMiddleware will never actually emit the HSTS header regardless of
+# SECURE_HSTS_SECONDS, so there's no point setting it above 0.
+SECURE_SSL_REDIRECT = False
+SECURE_HSTS_SECONDS = 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 SECURE_HSTS_PRELOAD = False
 SECURE_CONTENT_TYPE_NOSNIFF = True
-SESSION_COOKIE_SECURE = _HTTPS_AVAILABLE
-CSRF_COOKIE_SECURE = _HTTPS_AVAILABLE
+# Unlike HSTS, these aren't gated on request.is_secure() -- they're applied to
+# every Set-Cookie regardless, so hardcoding True here is both safe and
+# actually takes effect.
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
 X_FRAME_OPTIONS = "DENY"
 
 # Not read from the environment, on purpose: this deployment is closed to anyone who has not
