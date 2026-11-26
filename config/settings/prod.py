@@ -20,7 +20,12 @@ CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS if h]
 # Flip it back to default (true) the moment HTTPS is in front of this app.
 _HTTPS_AVAILABLE = env.bool("SECURE_SSL_REDIRECT", default=True)
 
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# Not X-Forwarded-Proto: CloudFront unconditionally strips that header on
+# every request to a custom origin, no exceptions -- confirmed in AWS's own
+# docs. CloudFront-Forwarded-Proto is the header it actually supports for
+# this, and only when explicitly enabled on the origin request policy (see
+# the "forward-cloudfront-proto" policy on the distribution).
+SECURE_PROXY_SSL_HEADER = ("HTTP_CLOUDFRONT_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = _HTTPS_AVAILABLE
 # A year is the end state, but a browser that has seen this header will refuse plain HTTP
 # for that long, so the first HTTPS deploy should set SECURE_HSTS_SECONDS=3600 and raise it
