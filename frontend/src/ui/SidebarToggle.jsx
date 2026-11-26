@@ -5,7 +5,8 @@
  * that is the one seam both a component with the sidebar open and one with it collapsed can
  * agree on -- there's no `<aside>` left to put a button inside once the width is zero.
  *
- * Hidden until the pointer is at that border while the sidebar is open, the same reasoning
+ * Always visible (it used to appear only on hover while its sidebar was open, which left people
+ * not knowing the panels could fold at all). Originally hidden until the pointer was at the border, the same reasoning
  * `handleReveal` in canvas/chrome.js uses for the connection dots: a control drawn on every one
  * of two hundred nodes is a wall of chrome, but a border with forty other borders on the same
  * screen has only the two these panels own. Once collapsed there is nothing else marking where
@@ -34,8 +35,12 @@ export default function SidebarToggle({ side, open, onToggle }) {
 
   return (
     <div
-      className={`group pointer-events-none absolute inset-y-0 z-10 flex w-4 items-center ${
-        isLeft ? 'right-0 translate-x-1/2 justify-start' : 'left-0 -translate-x-1/2 justify-end'
+      className={`group pointer-events-none absolute inset-y-0 z-10 flex items-center ${
+        /* Open: straddling the seam, half over each side. Closed: wholly inside the window, against
+           its edge, because half of a button off-screen is half a button that cannot be clicked. */
+        open
+          ? `w-4 ${isLeft ? 'right-0 translate-x-1/2 justify-start' : 'left-0 -translate-x-1/2 justify-end'}`
+          : `w-6 ${isLeft ? 'left-0 justify-start' : 'right-0 justify-end'}`
       }`}
     >
       <button
@@ -44,9 +49,8 @@ export default function SidebarToggle({ side, open, onToggle }) {
         aria-pressed={open}
         aria-label={label}
         title={label}
-        className={`nodrag pointer-events-auto flex h-6 w-6 items-center justify-center rounded-full border border-twilio-gray-20 bg-white text-twilio-gray-60 shadow-sm transition-opacity hover:border-twilio-blue hover:text-twilio-navy focus-visible:opacity-100 ${
-          open ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'
-        }`}
+        className="nodrag pointer-events-auto flex h-[7.5rem] w-6 items-center justify-center rounded-full border border-twilio-gray-20 bg-white text-twilio-gray-60 shadow-sm transition-colors hover:border-twilio-blue hover:text-twilio-navy"
+
       >
         <Icon size={13} aria-hidden="true" />
       </button>

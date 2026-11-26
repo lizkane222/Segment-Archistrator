@@ -45,8 +45,8 @@
      Segment is the outermost one and contains the other three, so its tint is
      almost white -- anything stronger would show through all three products and
      shift every colour below. */
-  --color-zone-segment: #f8f9fb;
-  --color-zone-segment-border: #121c2d;
+  --color-zone-segment: #f5faf7;
+  --color-zone-segment-border: #0e7c3a;
   --color-zone-connections: #e4f7ff;
   --color-zone-connections-border: #0263e0;
   /* Protocols is inside Connections but is its own product, so it gets its own
@@ -387,4 +387,18 @@
 
 @media (prefers-reduced-motion: reduce) {
   .wordmark-shine { animation: none; display: none; }
+}
+
+/*
+ * The app's default zoom, applied to everything inside #root (see ui/uiScale.js).
+ *
+ * `zoom` shrinks what is drawn but not the box it is laid out in, so the root is made
+ * 1/scale larger than the window and then scaled back down to exactly fill it. Without that the
+ * workbench would fill 80% of the window and leave a strip of bare body down one side and along
+ * the bottom. Unlayered on purpose: it has to beat the `height: 100%` on #root in the base layer.
+ */
+#root {
+  zoom: var(--ui-scale, 1);
+  width: calc(100vw / var(--ui-scale, 1));
+  height: calc(100vh / var(--ui-scale, 1));
 }

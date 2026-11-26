@@ -13,7 +13,7 @@
  * counter would report a freshly-opened diagram as edited before anyone touched it.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { trustGraphCode } from '../functions/trust.js'
 import { ApiError, diagrams as diagramsApi, templates as templatesApi } from '../services/api.js'
@@ -32,6 +32,7 @@ export function useDiagrams() {
   const [loadingLists, setLoadingLists] = useState(true)
   const [busy, setBusy] = useState(null) // 'open' | 'save' | 'delete' | null
   const [current, setCurrent] = useState(blank)
+  const savingRef = useRef(null)
   /* See `openDiagram`. Null for anything not opened from the server. */
   const [openedWorkspace, setOpenedWorkspace] = useState(null)
   /* null means "never persisted", which counts as dirty: a template that has been
@@ -174,7 +175,15 @@ export function useDiagrams() {
   /** Update an open diagram, or create one if this document has never been saved. */
   const save = useCallback(
     async (graph, { name, description, groupName } = {}) => {
+      /* One save at a time. A never-saved document has no id until the first create returns, so a
+         second Save (a double cmd-s, or the button right after the shortcut) landing in that gap
+         would see `id: null` and create a *second* diagram. `busy` cannot stop it -- it is state, and
+         does not change until the next render -- so the in-flight request is held here and the
+         repeat is handed the same answer. Edits made during the request leave the diagram dirty, and
+         the next Save sends them to the same record. */
+      if (savingRef.current) return savingRef.current
       setBusy('save')
+      const run = (async () => {
       try {
         const body = {
           name: name ?? current.name ?? UNTITLED,
@@ -202,7 +211,11 @@ export function useDiagrams() {
         return result
       } finally {
         setBusy(null)
+        savingRef.current = null
       }
+      })()
+      savingRef.current = run
+      return run
     },
     [current, refresh],
   )

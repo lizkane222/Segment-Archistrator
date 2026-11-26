@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import AdminTemplates from './AdminTemplates.jsx'
+import { ACCEPTED_LABEL, dragHasFiles } from './importFile.js'
 import { DRAG_TYPE } from './openDrag.js'
 import { groupSaved } from './tabs.js'
 import {
@@ -43,6 +44,7 @@ export default function OpenDialog({
   onOpenGroup,
   onStartBlank,
   onImportFile,
+  onDropFile,
   onImportMermaid,
   adminMode = false,
   currentName = '',
@@ -52,6 +54,8 @@ export default function OpenDialog({
   onClose,
 }) {
   const [confirming, setConfirming] = useState(null)
+  /* A file is being dragged over the dialog. */
+  const [fileOver, setFileOver] = useState(false)
   const { groups, loose } = useMemo(() => groupSaved(saved), [saved])
 
   const renderSaved = (diagram) => (
@@ -89,7 +93,33 @@ export default function OpenDialog({
       className="absolute inset-0 z-40 flex items-center justify-center bg-twilio-navy/30 p-6"
       /* Click-through-to-close on the backdrop only, never on the card. */
       onClick={(event) => event.target === event.currentTarget && onClose()}
+      /* Files dragged in from the desktop import as a diagram. Only for real files: the dialog's own
+         entries drag too (see openDrag.js) and must not light this up. */
+      onDragOver={(event) => {
+        if (!onDropFile || !dragHasFiles(event)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+        setFileOver(true)
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFileOver(false)
+      }}
+      onDrop={(event) => {
+        if (!onDropFile || !dragHasFiles(event)) return
+        event.preventDefault()
+        setFileOver(false)
+        const [file] = Array.from(event.dataTransfer.files ?? [])
+        if (file) onDropFile(file)
+      }}
     >
+      {fileOver && (
+        <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-twilio-blue bg-twilio-blue/10 text-center">
+          <p className="max-w-sm text-sm font-medium text-twilio-navy">
+            Drop to import as a diagram
+            <span className="mt-1 block text-xs font-normal text-twilio-gray-60">{ACCEPTED_LABEL}</span>
+          </p>
+        </div>
+      )}
       <div className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-twilio-gray-20 bg-white shadow-lg">
         <header className="flex shrink-0 items-center justify-between border-b border-twilio-gray-20 px-4 py-3">
           <h2 className="text-sm font-semibold text-twilio-navy">Open an architecture</h2>

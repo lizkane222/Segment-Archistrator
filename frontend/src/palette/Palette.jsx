@@ -77,7 +77,10 @@ export default function Palette({
   workspaceStatus = 'idle',
   workspaceError = null,
   onRetryWorkspace,
-  onVisualizeAll,
+  /* Builds a diagram from the workspace components ticked in the Workspace tab: `(nodes) => void`. */
+  onBuildSelected,
+  /* Bumped by the shell to bring the Workspace tab forward (e.g. from "Visualize the workspace"). */
+  workspaceSignal = 0,
   onConnect,
   /* Just connected: the Workspace tab glows until it is clicked, to say where binding starts. */
   guideWorkspaceTab = false,
@@ -91,6 +94,22 @@ export default function Palette({
   const [filters, dispatch] = useReducer(filtersReducer, initialFilters)
   const activeCount = activeFilterCount(filters)
   const converting = Boolean(convert)
+  /* Workspace components ticked for "Build diagram": by graph id, kept here because the footer button
+     and the list both need it. */
+  const [picked, setPicked] = useState(() => new Set())
+  const togglePicked = (ids, on) =>
+    setPicked((current) => {
+      const next = new Set(current)
+      for (const id of ids) {
+        if (on) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
+
+  useEffect(() => {
+    if (workspaceSignal) dispatch({ type: 'setTab', tab: TABS.workspace })
+  }, [workspaceSignal])
 
   /* Conversion picks from Segment components and Shapes, which both live under Components. */
   useEffect(() => {
@@ -185,6 +204,8 @@ export default function Palette({
             workspaceReason={workspaceReason}
             selectedIds={selectedIds}
             onConnect={onConnect}
+            picked={picked}
+            onPick={togglePicked}
             filters={filters}
             dispatch={dispatch}
           />
@@ -198,14 +219,18 @@ export default function Palette({
         <div className="shrink-0 border-t border-twilio-gray-20 p-3">
           <button
             type="button"
-            onClick={onVisualizeAll}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-twilio-blue px-3 py-2 text-xs font-medium text-white hover:bg-twilio-blue-dark"
+            disabled={picked.size === 0}
+            onClick={() => {
+              onBuildSelected?.((graph.nodes ?? []).filter((node) => picked.has(node.id)))
+              setPicked(new Set())
+            }}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-twilio-blue px-3 py-2 text-xs font-medium text-white hover:bg-twilio-blue-dark disabled:opacity-50"
           >
             <LayoutGrid size={13} aria-hidden="true" />
-            Visualize all
+            Build diagram from {picked.size} selected
           </button>
           <p className="mt-1.5 text-center text-[10px] text-twilio-gray-60">
-            Opens all {graph.nodes?.length ?? 0} components in a new tab.
+            Each component is placed in its own zone, in a new tab.
           </p>
         </div>
       )}
@@ -531,6 +556,8 @@ function WorkspaceTab({
   workspaceReason,
   selectedIds = [],
   onConnect,
+  picked,
+  onPick,
   filters,
   dispatch,
 }) {
@@ -636,15 +663,41 @@ function WorkspaceTab({
         />
       )}
 
-      <p className="text-[11px] text-twilio-gray-60">
-        {nodes.length} of {graph.nodes?.length ?? 0} components
-      </p>
+      <div className="flex items-center justify-between gap-2 text-[11px] text-twilio-gray-60">
+        <span>
+          {nodes.length} of {graph.nodes?.length ?? 0} components
+        </span>
+        <span className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onPick(nodes.map((node) => node.id), true)}
+            className="hover:text-twilio-navy hover:underline"
+          >
+            Select shown
+          </button>
+          <button
+            type="button"
+            onClick={() => onPick([...picked], false)}
+            disabled={picked.size === 0}
+            className="hover:text-twilio-navy hover:underline disabled:opacity-40"
+          >
+            Clear
+          </button>
+        </span>
+      </div>
 
       <Hint>
-        Drag a component onto a card of the same kind to bind it, or onto empty canvas to add it.
+        Tick the components you want, then build a diagram from them. Or drag one onto a card of the
+        same kind to bind it, or onto empty canvas to add it.
       </Hint>
 
-      <WorkspaceSections nodes={nodes} topology={topology} onCanvas={onCanvas} />
+      <WorkspaceSections
+        nodes={nodes}
+        topology={topology}
+        onCanvas={onCanvas}
+        picked={picked}
+        onPick={onPick}
+      />
     </div>
   )
 }
@@ -657,7 +710,7 @@ function WorkspaceTab({
  * Its own component because WorkspaceTab returns early for a missing token, and a hook
  * behind an early return is a hook that is sometimes called.
  */
-function WorkspaceSections({ nodes, topology, onCanvas }) {
+function WorkspaceSections({ nodes, topology, onCanvas, picked, onPick }) {
   const tree = useMemo(() => groupTree(nodes, topology), [nodes, topology])
   const [closed, setClosed] = useState(null)
 
@@ -675,16 +728,26 @@ function WorkspaceSections({ nodes, topology, onCanvas }) {
   const items = (list) => (
     <div className="space-y-1">
       {list.map((node) => (
-        <DraggableItem
-          key={node.id}
-          kind={node.kind}
-          label={node.name}
-          hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
-          placed={onCanvas?.has(node.segmentId)}
-          /* Dragging a real workspace component onto the canvas carries its
-             ids and links with it, so it lands already bound. */
-          payload={{ name: node.name, bound: true, data: node }}
-        />
+        <div key={node.id} className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={picked.has(node.id)}
+            onChange={(event) => onPick([node.id], event.target.checked)}
+            aria-label={`Include ${node.name} in the new diagram`}
+            className="h-3.5 w-3.5 shrink-0 accent-twilio-blue"
+          />
+          <div className="min-w-0 flex-1">
+            <DraggableItem
+              kind={node.kind}
+              label={node.name}
+              hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
+              placed={onCanvas?.has(node.segmentId)}
+              /* Dragging a real workspace component onto the canvas carries its
+                 ids and links with it, so it lands already bound. */
+              payload={{ name: node.name, bound: true, data: node }}
+            />
+          </div>
+        </div>
       ))}
     </div>
   )

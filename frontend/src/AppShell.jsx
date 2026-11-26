@@ -37,6 +37,7 @@ import OpenDialog from './diagram/OpenDialog.jsx'
 import Palette from './palette/Palette.jsx'
 import { selectedWorkspaceIds } from './palette/filters.js'
 import EventPreview from './simulation/EventPreview.jsx'
+import { ACCEPTED_LABEL, IMPORT_ACCEPT, isImportable } from './diagram/importFile.js'
 import FeedbackDialog from './feedback/FeedbackDialog.jsx'
 import WalkthroughDrawer from './simulation/WalkthroughDrawer.jsx'
 import { Toasts, useToasts } from './ui/Toasts.jsx'
@@ -296,21 +297,26 @@ export default function AppShell({
   /* Read once for every tab, and only ever listed -- see hooks/useWorkspaceResources.js. */
   const resources = useWorkspaceResources(workspace)
 
-  /* "Visualize all" opens a new tab rather than replacing the one in front of the reader, which may
-     hold a diagram they are binding against this very list. */
-  const visualizeAll = useCallback(() => {
-    if (!resources.graph || !topology) return
-    tabs.open({
-      doc: {
-        id: null,
-        name: `${workspace?.name ?? 'Workspace'} — all components`,
-        description: '',
-        sourceTemplate: '',
-        updatedAt: null,
-      },
-      graph: visualizeWorkspace(resources.graph, topology),
-    })
-  }, [resources.graph, topology, tabs.open, workspace?.name])
+  /* Builds a diagram from the workspace components the reader ticked, in a new tab -- not from the
+     whole workspace, which is unreadable past a few dozen components and rarely what anyone wants
+     to show. A new tab rather than replacing the one in front of the reader, which may hold a diagram
+     they are binding against this very list. */
+  const buildFromSelection = useCallback(
+    (picked) => {
+      if (!resources.graph || !topology || !picked?.length) return
+      tabs.open({
+        doc: {
+          id: null,
+          name: `${workspace?.name ?? 'Workspace'} — selected components`,
+          description: '',
+          sourceTemplate: '',
+          updatedAt: null,
+        },
+        graph: visualizeWorkspace({ nodes: picked, edges: resources.graph.edges }, topology),
+      })
+    },
+    [resources.graph, topology, tabs.open, workspace?.name],
+  )
 
   /* Which pane the shared controls act on. The last one clicked, held here rather than derived,
      because "the active tab" and "the pane you are working in" are different questions once there
@@ -565,7 +571,7 @@ export default function AppShell({
             <Workbench
               workspace={workspaceOf(tab)}
               resources={resources}
-              onVisualizeAll={visualizeAll}
+              onBuildSelected={buildFromSelection}
               onConnected={handleConnected}
               guideWorkspaceTab={Boolean(workspaceOf(tab)) && workspaceOf(tab).id === guideWorkspaceId}
               onGuideDone={dismissGuide}
@@ -591,6 +597,7 @@ export default function AppShell({
                 })
               }
               onCaptureTab={tabs.capture}
+              onSelectTab={tabs.setActiveId}
               onPublishLiveGraph={publishLiveGraph}
               /* Clicking anywhere in a pane makes it the one the tab strip is about. */
               onFocusPane={() => setFocused(index)}
@@ -670,7 +677,7 @@ export function chromePlacement({ chromeOwner, slots, slot }) {
 function Workbench({
   workspace,
   resources,
-  onVisualizeAll,
+  onBuildSelected,
   onConnected,
   guideWorkspaceTab = false,
   onGuideDone,
@@ -688,6 +695,7 @@ function Workbench({
   onCaptureTab,
   allTabs,
   onOpenInNewTab,
+  onSelectTab,
   onPublishLiveGraph,
   onFocusPane,
   onDirtyChange,
@@ -752,6 +760,15 @@ function Workbench({
      it pre-filled (a converted Lucid export), or null when it is closed. */
   const [mermaidOpen, setMermaidOpen] = useState(null)
   const [connectOpen, setConnectOpen] = useState(false)
+  /* "Visualize the workspace": bring the Workspace tab forward (opening the sidebar if it is folded),
+     and if nothing is connected yet go straight to the Connect dialog. Picking components happens in
+     the tab; nothing is added to the canvas here. */
+  const [workspaceSignal, setWorkspaceSignal] = useState(0)
+  const startWorkspaceFlow = () => {
+    PALETTE_OPEN.set(true)
+    setWorkspaceSignal((count) => count + 1)
+    if (workspaceReason) setConnectOpen(true)
+  }
 
   /*
    * Importing identity rules from a screenshot: `{type, id}` of the component or the zone it was started
@@ -1850,6 +1867,16 @@ function Workbench({
   }
 
   const openDiagram = (id) => {
+    /* Already open in another tab: go there rather than open it a second time. A second copy is
+       either a detached duplicate (whose first Save creates a *new* diagram, which is how Save
+       came to multiply diagrams) or a second editor of one record, where either tab's Save
+       overwrites the other. Switching tabs gives one open diagram, one Save, one record. */
+    const holder = (allTabs ?? []).find((entry) => entry.doc?.id === id)
+    if (holder && onSelectTab) {
+      setDialogOpen(false)
+      onSelectTab(holder.id)
+      return undefined
+    }
     if (!onOpenInNewTab) return loadDiagram(id)
     setDialogOpen(false)
     onOpenInNewTab({ diagram: id }, docs.saved.find((entry) => entry.id === id))
@@ -1887,7 +1914,8 @@ function Workbench({
 
   const loadDiagram = async (id) => {
     try {
-      const heldElsewhere = (allTabs ?? []).some((entry) => entry.id !== tab?.id && entry.doc?.id === id)
+      const holder = (allTabs ?? []).find((entry) => entry.id !== tab?.id && entry.doc?.id === id)
+      const heldElsewhere = Boolean(holder)
       applyGraph(
         await docs.openDiagram(id, heldElsewhere ? { copyAs: (name) => openedAgainName(name, takenNames()) } : {}),
       )
@@ -1919,10 +1947,21 @@ function Workbench({
      Reads exactly the file `exportDiagramFile` writes, and rebuilds through the same
      `applyGraph` every other "load a diagram" path uses, so the result is byte-for-byte
      what `roundTrip.test.js` already proves that function does. */
-  const importDiagramFile = async (event) => {
+  const importDiagramFile = (event) => {
     const file = event.target.files?.[0]
     event.target.value = ''
+    return importFromFile(file)
+  }
+
+  /* A file from the picker or dropped on the Open dialog. */
+  const importFromFile = async (file) => {
     if (!file) return
+    if (!isImportable(file)) {
+      return notify({
+        tone: 'error',
+        message: `“${file.name}” is not a file this can import. Accepted: ${ACCEPTED_LABEL}.`,
+      })
+    }
     try {
       const text = await file.text()
       /* One picker for both formats, told apart by content rather than by extension: a Mermaid
@@ -3085,7 +3124,7 @@ function Workbench({
         <input
           ref={importInputRef}
           type="file"
-          accept="application/json,.json,.mmd,.mermaid,.md,.txt"
+          accept={IMPORT_ACCEPT}
           className="hidden"
           onChange={importDiagramFile}
         />
@@ -3145,7 +3184,8 @@ function Workbench({
                   workspaceStatus={resources?.status ?? 'idle'}
                   workspaceError={resources?.error?.message ?? null}
                   onRetryWorkspace={() => loadWorkspace()}
-                  onVisualizeAll={onVisualizeAll}
+                  onBuildSelected={onBuildSelected}
+                  workspaceSignal={workspaceSignal}
                   onConnect={() => setConnectOpen(true)}
                   guideWorkspaceTab={guideWorkspaceTab}
                   onGuideDone={onGuideDone}
@@ -3291,11 +3331,11 @@ function Workbench({
               {graphState.status !== 'loading' && componentCount === 0 && !drawing && (
                 <EmptyOverlay
                   workspaceReason={workspaceReason}
-                  onLoad={onVisualizeAll}
-                  canVisualize={Boolean(workspaceGraph)}
+                  onLoad={startWorkspaceFlow}
                   onOpen={() => setDialogOpen(true)}
                   onStartBlank={startBlank}
                   onImportFile={triggerImport}
+              onDropFile={importFromFile}
                   onImportMermaid={openMermaidImport}
                 />
               )}
@@ -3538,7 +3578,7 @@ const components = (count) => `${count} component${count === 1 ? '' : 's'}`
 /* The canvas is mounted with its zone backdrops and no components, so this sits
    on top rather than replacing it -- dragging from the palette works before any
    fetch, which is how you draw an architecture with no token at all. */
-function EmptyOverlay({ workspaceReason, canVisualize, onLoad, onOpen, onStartBlank, onImportFile, onImportMermaid }) {
+function EmptyOverlay({ workspaceReason, onLoad, onOpen, onStartBlank, onImportFile, onImportMermaid }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
       <div className="pointer-events-auto max-w-sm rounded-lg border border-twilio-gray-20 bg-white/95 p-5 text-center shadow-sm">
@@ -3567,9 +3607,12 @@ function EmptyOverlay({ workspaceReason, canVisualize, onLoad, onOpen, onStartBl
           <button
             type="button"
             onClick={onLoad}
-            title={workspaceReason ?? (canVisualize ? 'Open every workspace component in a new tab' : 'The workspace is still loading')}
-            className="rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
-            disabled={Boolean(workspaceReason) || !canVisualize}
+            title={
+              workspaceReason
+                ? 'Connect a workspace, then pick the components to draw'
+                : 'Pick workspace components in the sidebar and build a diagram from them'
+            }
+            className="rounded-md border border-twilio-gray-20 px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
           >
             Visualize the workspace
           </button>

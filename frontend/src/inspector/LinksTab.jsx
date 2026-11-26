@@ -17,6 +17,7 @@ import { BookOpen, CircleCheck, CircleHelp, ExternalLink, Link2Off } from 'lucid
 
 import CopyButton from '../ui/CopyButton.jsx'
 import { safeHttpUrl } from '../ui/safeUrl.js'
+import { extraDocsLinks } from './docsLinks.js'
 import { EmptyNote, Section } from './primitives.jsx'
 
 export default function LinksTab({ node }) {
@@ -33,6 +34,7 @@ export default function LinksTab({ node }) {
   return (
     <>
       <Section title="Segment documentation">
+        <div className="space-y-2">
         {data.docsUrl ? (
           <LinkCard
             icon={BookOpen}
@@ -44,6 +46,10 @@ export default function LinksTab({ node }) {
         ) : (
           <EmptyNote>No docs page mapped for this component kind.</EmptyNote>
         )}
+        {extraDocsLinks(node.data, data.docsUrl).map((link) => (
+          <LinkCard key={link.url} icon={BookOpen} href={link.url} label={link.label} sublabel={link.url} verified />
+        ))}
+        </div>
       </Section>
 
       <Section title="Customer workspace">
