@@ -180,9 +180,10 @@ export const feedback = {
    * way to Airtable. A submission with no files sends a FormData with no files, which is simpler than
    * branching on two content types.
    */
-  submit: ({ description, proposedFix, reporter, files }) => {
+  submit: ({ kind, description, proposedFix, reporter, files }) => {
     const body = new FormData()
     body.append('description', description ?? '')
+    body.append('kind', kind === 'feature' ? 'feature' : 'bug')
     if (proposedFix) body.append('proposed_fix', proposedFix)
     if (reporter) body.append('reporter', reporter)
     for (const file of files ?? []) body.append('attachments', file, file.name)

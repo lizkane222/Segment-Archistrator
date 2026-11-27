@@ -26,6 +26,7 @@ import { ApiError, feedback as feedbackApi } from '../services/api.js'
 import { problemTitle } from './title.js'
 
 export default function FeedbackDialog({ config, onClose }) {
+  const [kind, setKind] = useState('bug')
   const [description, setDescription] = useState('')
   const [proposedFix, setProposedFix] = useState('')
   const [reporter, setReporter] = useState('')
@@ -64,7 +65,7 @@ export default function FeedbackDialog({ config, onClose }) {
     setSubmitting(true)
     setError(null)
     try {
-      setDone(await feedbackApi.submit({ description, proposedFix, reporter, files }))
+      setDone(await feedbackApi.submit({ kind, description, proposedFix, reporter, files }))
     } catch (err) {
       setError(
         err instanceof ApiError
@@ -88,7 +89,7 @@ export default function FeedbackDialog({ config, onClose }) {
         <header className="flex items-center justify-between border-b border-twilio-gray-20 px-4 py-3">
           <h2 className="flex items-center gap-1.5 text-sm font-semibold text-twilio-navy">
             <MessageSquarePlus size={15} aria-hidden="true" />
-            Report a problem
+            Report a problem or submit a feature request
           </h2>
           <button
             type="button"
@@ -127,8 +128,37 @@ export default function FeedbackDialog({ config, onClose }) {
           </div>
         ) : (
           <div className="p-5">
-            <label htmlFor="fb-description" className="text-sm font-medium text-twilio-navy">
-              What went wrong?
+            <fieldset>
+              <legend className="text-sm font-medium text-twilio-navy">What is this?</legend>
+              <div className="mt-1.5 flex gap-2">
+                {[
+                  ['bug', 'Bug'],
+                  ['feature', 'New feature request'],
+                ].map(([value, label]) => (
+                  <label
+                    key={value}
+                    className={`flex-1 cursor-pointer rounded-md border px-3 py-1.5 text-center text-xs transition-colors ${
+                      kind === value
+                        ? 'border-twilio-blue bg-twilio-blue/10 font-medium text-twilio-navy'
+                        : 'border-twilio-gray-20 text-twilio-gray-60 hover:border-twilio-gray-40'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="fb-kind"
+                      value={value}
+                      checked={kind === value}
+                      onChange={() => setKind(value)}
+                      className="sr-only"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <label htmlFor="fb-description" className="mt-4 block text-sm font-medium text-twilio-navy">
+              {kind === 'feature' ? 'What would you like to be able to do?' : 'What went wrong?'}
             </label>
             <textarea
               id="fb-description"
@@ -149,7 +179,7 @@ export default function FeedbackDialog({ config, onClose }) {
             )}
 
             <label htmlFor="fb-fix" className="mt-4 block text-sm font-medium text-twilio-navy">
-              What do you think would fix it?{' '}
+              {kind === 'feature' ? 'How do you imagine it working?' : 'What do you think would fix it?'}{' '}
               <span className="font-normal text-twilio-gray-40">optional</span>
             </label>
             <textarea
@@ -237,10 +267,6 @@ export default function FeedbackDialog({ config, onClose }) {
               {submitting && <Loader2 size={15} className="animate-spin" aria-hidden="true" />}
               {submitting ? 'Sending…' : 'Send'}
             </button>
-            <p className="mt-3 text-[11px] leading-relaxed text-twilio-gray-60">
-              Goes to the team&rsquo;s Airtable. The status, the timestamp and which app it came from are
-              filled in automatically — you do not need to.
-            </p>
           </div>
         )}
       </form>

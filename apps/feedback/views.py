@@ -19,6 +19,7 @@ from rest_framework.views import APIView
 
 from apps.auth_workspace.permissions import AllowAny, HasSession, SignedIn
 
+from . import airtable
 from .airtable import AirtableClient, AirtableError, AirtableNotConfigured
 from .serializers import MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, FeedbackSerializer
 
@@ -84,7 +85,15 @@ class FeedbackView(APIView):
         fields = serializer.to_fields(app_name=settings.AIRTABLE_APP_NAME)
 
         try:
-            record_id = client.create_record(fields)
+            try:
+                record_id = client.create_record(fields)
+            except AirtableError as err:
+                # A base that has no "Type" column yet must not lose reports over it: retry without.
+                if "unknown field" not in str(err).lower() or airtable.FIELD_TYPE not in str(err):
+                    raise
+                logger.warning("Airtable table has no %r field; saving without it", airtable.FIELD_TYPE)
+                fields.pop(airtable.FIELD_TYPE, None)
+                record_id = client.create_record(fields)
         except AirtableError as err:
             logger.warning("Airtable refused a feedback record: %s", err)
             return Response(

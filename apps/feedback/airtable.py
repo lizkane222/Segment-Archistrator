@@ -54,6 +54,10 @@ FIELD_DESCRIPTION = "Problem Description"
 FIELD_PROPOSED_FIX = "Proposed Fix"
 FIELD_ATTACHMENTS = "Attachments"
 FIELD_REPORTER = "Reporter"
+# Bug or new feature request. Also user-chosen, but always sent (defaults to a bug).
+FIELD_TYPE = "Type"
+TYPE_BUG = "Bug"
+TYPE_FEATURE = "New feature request"
 
 # The four this app fills in behind the form.
 FIELD_TITLE = "Problem Title"
@@ -71,6 +75,7 @@ WRITTEN_FIELDS = (
     FIELD_DESCRIPTION,
     FIELD_PROPOSED_FIX,
     FIELD_REPORTER,
+    FIELD_TYPE,
     FIELD_SUBMITTED_AT,
     FIELD_STATUS,
     FIELD_APP,
@@ -84,6 +89,7 @@ FIELD_TYPES = {
     FIELD_DESCRIPTION: ("multilineText", "richText", "singleLineText"),
     FIELD_PROPOSED_FIX: ("multilineText", "richText", "singleLineText"),
     FIELD_REPORTER: ("singleLineText", "multilineText", "email"),
+    FIELD_TYPE: ("singleSelect", "singleLineText"),
     FIELD_SUBMITTED_AT: ("dateTime", "date"),
     FIELD_STATUS: ("singleSelect", "singleLineText"),
     FIELD_APP: ("singleSelect", "singleLineText"),

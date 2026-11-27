@@ -146,3 +146,16 @@ def test_the_single_selects_only_ever_write_a_value_the_base_has():
     values = airtable.fixed_values()
     assert values[airtable.FIELD_STATUS] == airtable.STATUS_NEW
     assert set(values) <= set(airtable.WRITTEN_FIELDS)
+
+
+def test_kind_defaults_to_bug_and_feature_is_recorded():
+    base = {"description": "Something is wrong with the connectors here"}
+    bug = FeedbackSerializer(data=base)
+    assert bug.is_valid(), bug.errors
+    assert bug.to_fields(app_name="X")[airtable.FIELD_TYPE] == airtable.TYPE_BUG
+
+    feature = FeedbackSerializer(data={**base, "kind": "feature"})
+    assert feature.is_valid(), feature.errors
+    assert feature.to_fields(app_name="X")[airtable.FIELD_TYPE] == airtable.TYPE_FEATURE
+
+    assert not FeedbackSerializer(data={**base, "kind": "other"}).is_valid()

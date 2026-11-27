@@ -3058,8 +3058,8 @@ function Workbench({
               <button
                 type="button"
                 onClick={() => setFeedbackOpen(true)}
-                title="Report a problem or suggest an improvement"
-                aria-label="Report a problem or suggest an improvement"
+                title="Report a problem or submit a feature request"
+                aria-label="Report a problem or submit a feature request"
                 className="flex items-center rounded-md border border-twilio-gray-20 p-1.5 text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy"
               >
                 <MessageSquarePlus size={14} aria-hidden="true" />
