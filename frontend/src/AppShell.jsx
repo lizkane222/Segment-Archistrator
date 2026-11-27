@@ -3335,7 +3335,6 @@ function Workbench({
                   onOpen={() => setDialogOpen(true)}
                   onStartBlank={startBlank}
                   onImportFile={triggerImport}
-              onDropFile={importFromFile}
                   onImportMermaid={openMermaidImport}
                 />
               )}
@@ -3388,6 +3387,7 @@ function Workbench({
               onOpenGroup={openGroup}
               onStartBlank={startBlank}
               onImportFile={triggerImport}
+              onDropFile={importFromFile}
               onImportMermaid={openMermaidImport}
               adminMode={adminMode}
               currentName={docs.current.name}
