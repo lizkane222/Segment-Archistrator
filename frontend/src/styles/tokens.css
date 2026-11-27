@@ -45,8 +45,8 @@
      Segment is the outermost one and contains the other three, so its tint is
      almost white -- anything stronger would show through all three products and
      shift every colour below. */
-  --color-zone-segment: #f8f9fb;
-  --color-zone-segment-border: #121c2d;
+  --color-zone-segment: #f5faf7;
+  --color-zone-segment-border: #0e7c3a;
   --color-zone-connections: #e4f7ff;
   --color-zone-connections-border: #0263e0;
   /* Protocols is inside Connections but is its own product, so it gets its own
@@ -286,4 +286,119 @@
   .walkthrough-trail {
     transition: none;
   }
+}
+
+
+/*
+ * A persistent "click here next" glow, for the guide after a workspace is connected.
+ *
+ * Not `flash-border`: that one pulses three times and stops, which is right for answering "which
+ * one?" and wrong for pointing at a control the reader has not found yet. This holds until the
+ * thing it points at is used. Blue, because it is an invitation rather than a warning.
+ */
+@keyframes guide-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(2, 99, 224, 0.55), 0 0 4px 1px rgba(2, 99, 224, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(2, 99, 224, 0.18), 0 0 12px 3px rgba(2, 99, 224, 0.55);
+  }
+}
+
+.guide-glow {
+  outline: 2px solid #0263e0;
+  outline-offset: -2px;
+  animation: guide-glow 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-glow {
+    animation: none;
+  }
+}
+
+/*
+ * "This is the one you are pointing at": a component lit for as long as the pointer is on its entry in a
+ * picker (the walkthrough's Start at list). Not `flash-border`, which pulses three times and stops --
+ * right for "which one is this message about", wrong for something that has to stay put while a list is
+ * being read. Same pseudo-element trick, for the same reason: every real property on the card is already
+ * spoken for. Blue, because it is a choice being made rather than a problem being reported.
+ */
+@keyframes pick-glow {
+  0%,
+  100% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 0 rgba(2, 99, 224, 0.5);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 14px 5px rgba(2, 99, 224, 0.45);
+  }
+}
+
+.pick-glow::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border: 3px solid #0263e0;
+  border-radius: 0.75rem;
+  pointer-events: none;
+  animation: pick-glow 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pick-glow::after {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/*
+ * A zone lifted off the page: the one directly above the selected component, or the one a component being
+ * reassigned is held over. A drop shadow rather than a colour change, because a zone's colour is already
+ * the thing that says what it is -- and a component inherits it, so tinting the zone would also be
+ * tinting the answer to "what will this component look like in here".
+ */
+.zone-lifted {
+  box-shadow:
+    0 12px 28px -4px rgba(18, 28, 45, 0.38),
+    0 4px 10px rgba(18, 28, 45, 0.2);
+  transition: box-shadow 120ms ease-out;
+}
+
+/* Sign-in wordmark: a band of light sweeps across the lettering. The wordmark PNG doubles as a
+   mask (set inline in SignInModal, since Vite hashes CSS url() assets and that fails on Node 18), so the light shows only where there is ink. It travels left to right across the word,
+   not along each stroke's path. */
+.wordmark-shine {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 40%, rgba(255, 255, 255, 0.95) 50%, transparent 60%) no-repeat;
+  background-size: 250% 100%;
+  background-position: 120% 0;
+  animation: wordmark-shine 3.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes wordmark-shine {
+  0% { background-position: 120% 0; }
+  70%, 100% { background-position: -20% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wordmark-shine { animation: none; display: none; }
+}
+
+/*
+ * The app's default zoom, applied to everything inside #root (see ui/uiScale.js).
+ *
+ * `zoom` shrinks what is drawn but not the box it is laid out in, so the root is made
+ * 1/scale larger than the window and then scaled back down to exactly fill it. Without that the
+ * workbench would fill 80% of the window and leave a strip of bare body down one side and along
+ * the bottom. Unlayered on purpose: it has to beat the `height: 100%` on #root in the base layer.
+ */
+#root {
+  zoom: var(--ui-scale, 1);
+  width: calc(100vw / var(--ui-scale, 1));
+  height: calc(100vh / var(--ui-scale, 1));
 }

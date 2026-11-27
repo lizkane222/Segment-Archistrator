@@ -31,7 +31,7 @@
  * than by clicking around. The hook that holds this in state is `useTabs`, at the bottom.
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 
 import { UNTITLED } from './useDiagrams.js'
 
@@ -81,15 +81,73 @@ export function restoreTabs(list) {
 }
 
 /**
+ * The group a tab opened from a saved diagram belongs in, as the arguments `open` takes.
+ *
+ * A diagram saved from a tab remembers that tab's group label. Opened again, it brings the label
+ * back: into the connected workspace's group when the label is that workspace's name, otherwise as
+ * a group of the user's own. Empty when the diagram was saved from no group, which leaves the new
+ * tab to be born where the one in front of you is, as it always was.
+ */
+export function groupForSaved(entry, connections = [], signedIn = false) {
+  const label = String(entry?.group_name ?? '').trim()
+  if (!label) return {}
+  const workspace = signedIn
+    ? connections.find((item) => item.id === entry.workspace_id && item.name === label)
+    : null
+  return workspace ? { workspaceId: workspace.id } : { workspaceId: null, groupName: label }
+}
+
+/**
+ * The saved list as the Open dialog shows it: named groups first, each with its diagrams, then
+ * whatever was saved from no group. Groups are ordered by their most recent diagram, and the
+ * diagrams in each by recency -- the server's own order, which this keeps.
+ */
+export function groupSaved(saved = []) {
+  const byName = new Map()
+  const loose = []
+  for (const diagram of saved) {
+    const name = String(diagram.group_name ?? '').trim()
+    if (!name) loose.push(diagram)
+    else if (byName.has(name)) byName.get(name).push(diagram)
+    else byName.set(name, [diagram])
+  }
+  return {
+    groups: [...byName].map(([name, diagrams]) => ({ name, diagrams })),
+    loose,
+  }
+}
+
+/**
+ * What groups a tab on the strip: its connected workspace, else its custom group name, else nothing.
+ *
+ * A custom group is the user's own label -- "Acme", "Q4 pitch" -- for organising tabs. It carries no
+ * credential and reaches no workspace: only `workspaceId` does, and a tab has one or the other.
+ */
+export function groupKeyOf(tab) {
+  if (tab?.workspaceId) return tab.workspaceId
+  return tab?.groupName ? `name:${tab.groupName}` : null
+}
+
+/**
  * A new tab.
  *
  * `graph` may be null, which means "nothing loaded yet" -- a blank tab. That is distinct from an
  * empty graph (`{nodes: [], ...}`), which means the user has a diagram open and has deleted
  * everything in it, and would be saved as such.
  */
-export function newTab({ id, doc, graph = null } = {}) {
+export function newTab({ id, doc, graph = null, workspaceId = null, groupName = null, opening = null } = {}) {
   return {
     id: id ?? nextTabId(),
+    /* A load to perform when the pane mounts -- `{template: key}` or `{diagram: id}` -- so Open can
+       start a tab and fill it, rather than replacing the canvas of the tab you are in. Transient: not
+       stored in the session, and ignored once the tab has a graph. */
+    ...(opening ? { opening } : {}),
+    /* A label of the user's own, for a tab that is in no connected workspace. Never both. */
+    groupName: workspaceId ? null : String(groupName ?? '').trim() || null,
+    /* The workspace group this tab belongs to, or null for a tab about no workspace. The group is
+       the workspace's id, and the credential is the server's to look up -- see
+       `WorkspaceSessionAuthentication._scope`. */
+    workspaceId: workspaceId || null,
     doc: doc ?? { id: null, name: UNTITLED, description: '', sourceTemplate: '', updatedAt: null },
     graph,
   }
@@ -110,6 +168,9 @@ export function forkTab(tab, { id, name } = {}) {
   const from = tab?.doc ?? {}
   return newTab({
     id,
+    /* A fork stays in its original's group: it is a copy of a diagram about that workspace. */
+    workspaceId: tab?.workspaceId ?? null,
+    groupName: tab?.groupName ?? null,
     doc: {
       ...from,
       id: null,
@@ -135,6 +196,60 @@ export function forkName(name) {
      forks is a name with no information left in it. */
   const seen = match[2] ? Number(match[2]) : 1
   return `${match[1]} (copy ${seen + 1})`
+}
+
+/**
+ * The tabs in display order: grouped by workspace, groups in the order they first appeared, and
+ * tabs within a group in the order they were opened.
+ *
+ * A group is only ever *shown* contiguously -- the stored order is left alone, because split and
+ * "the tab to the right" are about position and a drag should not reshuffle unrelated tabs.
+ */
+export function groupTabs(tabs) {
+  const groups = []
+  const byKey = new Map()
+  for (const tab of tabs ?? []) {
+    const key = groupKeyOf(tab)
+    if (!byKey.has(key)) {
+      const group = { key, workspaceId: tab.workspaceId ?? null, groupName: tab.workspaceId ? null : (tab.groupName ?? null), tabs: [] }
+      byKey.set(key, group)
+      groups.push(group)
+    }
+    byKey.get(key).tabs.push(tab)
+  }
+  return groups
+}
+
+/** Does this graph hold components bound to a real workspace resource? Same test as the server's. */
+export function hasBoundComponents(graph) {
+  return (graph?.nodes ?? []).some((node) => {
+    const data = { ...node, ...(node?.data ?? {}) }
+    return Boolean(data.bound && data.segmentId)
+  })
+}
+
+/**
+ * Whether a tab may be dragged into another workspace's group.
+ *
+ * Components bound from workspace A carry A's ids, names and links. Moving that diagram under B
+ * would show them on a tab whose requests, shared diagrams and saves are all B's -- and a diagram
+ * saved there is about B, though every bound component came from A. So a diagram with bound
+ * components stays where its components came from; an unbound one has nothing to leak and can go
+ * anywhere. Moving *into* "no workspace" is a move out of a group, held to the same rule.
+ */
+export function canMoveToGroup(tab, graph, workspaceId) {
+  const target = workspaceId ?? null
+  /* Same workspace -- including moving between custom groups, or into one from "no workspace": only
+     the user's own label changes, so there is nothing for a bound component to leak into. */
+  if ((tab?.workspaceId ?? null) === target) return { ok: true }
+  if (hasBoundComponents(graph ?? tab?.graph)) {
+    return {
+      ok: false,
+      reason:
+        'This diagram has components bound from its workspace, so it has to stay in that workspace. Fork it and unbind the components to move a copy.',
+    }
+  }
+  return { ok: true }
 }
 
 /**
@@ -173,10 +288,15 @@ export function visibleTabs(tabs, activeId, { split = false } = {}) {
   const active = list[index] ?? list[0]
   if (!split) return [active]
 
-  /* The next tab along, wrapping to the previous one when the active tab is last -- so splitting
-     while the rightmost tab is active shows something rather than showing one pane and an
-     apology. */
-  const partner = list[index + 1] ?? list[index - 1] ?? null
+  /* The next tab along *in the same group*, wrapping to the previous one when the active tab is last
+     -- so splitting while the rightmost tab is active shows something rather than showing one pane
+     and an apology. Two panes share one set of workspace requests, so a pane from another group
+     beside this one would be reading and saving under the wrong workspace. */
+  const mates = list.filter(
+    (tab, position) => position !== index && groupKeyOf(tab) === groupKeyOf(active),
+  )
+  const after = mates.find((tab) => list.indexOf(tab) > index)
+  const partner = after ?? mates[mates.length - 1] ?? null
   return partner ? [active, partner] : [active]
 }
 
@@ -209,6 +329,14 @@ export function useTabs(initial, restored = {}) {
   const [split, setSplit] = useState(() => Boolean(restored.split))
   const [orientation, setOrientation] = useState(() => restored.orientation ?? SPLIT_VERTICAL)
 
+  /* The active tab's group, readable from callbacks that must not change identity when it moves. */
+  const activeGroupRef = useRef({ workspaceId: null, groupName: null })
+  const activeIdRef = useRef(null)
+
+  const activeTab = tabs.find((tab) => tab.id === activeId) ?? tabs[0]
+  activeGroupRef.current = { workspaceId: activeTab?.workspaceId ?? null, groupName: activeTab?.groupName ?? null }
+  activeIdRef.current = activeTab?.id ?? null
+
   const visible = useMemo(() => visibleTabs(tabs, activeId, { split }), [tabs, activeId, split])
 
   /**
@@ -240,7 +368,15 @@ export function useTabs(initial, restored = {}) {
   }, [])
 
   const open = useCallback((tab) => {
-    const created = newTab(tab)
+    /* A new tab is born in the group of the one you are looking at, unless told otherwise: opening
+       a diagram "next to" this one means about the same workspace. `workspaceId: null` is a
+       decision (a tab about no workspace); leaving it out is not. */
+    const stated = tab && ('workspaceId' in tab || 'groupName' in tab)
+    const created = newTab({
+      ...tab,
+      workspaceId: stated ? (tab.workspaceId ?? null) : activeGroupRef.current.workspaceId,
+      groupName: stated ? (tab.groupName ?? null) : activeGroupRef.current.groupName,
+    })
     setTabs((current) => [...current, created])
     setActiveId(created.id)
     return created
@@ -260,6 +396,33 @@ export function useTabs(initial, restored = {}) {
     })
     if (created) setActiveId(created.id)
     return created
+  }, [])
+
+  /* Put a tab in a group. Whether it *may* go is `canMoveToGroup`'s call, made by the caller, which is
+     the one with the live graph; this only does it. */
+  const setGroup = useCallback((tabId, workspaceId, groupName = null) => {
+    const name = workspaceId ? null : String(groupName ?? '').trim() || null
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId &&
+        ((tab.workspaceId ?? null) !== (workspaceId ?? null) || (tab.groupName ?? null) !== name)
+          ? { ...tab, workspaceId: workspaceId ?? null, groupName: name }
+          : tab,
+      ),
+    )
+  }, [])
+
+  /* Tabs whose workspace is no longer connected fall back to no workspace, so a stale id can never
+     attach one to whichever workspace is connected under that id next. */
+  const pruneGroups = useCallback((validIds) => {
+    const valid = new Set(validIds)
+    setTabs((current) =>
+      current.some((tab) => tab.workspaceId && !valid.has(tab.workspaceId))
+        ? current.map((tab) =>
+            tab.workspaceId && !valid.has(tab.workspaceId) ? { ...tab, workspaceId: null } : tab,
+          )
+        : current,
+    )
   }, [])
 
   const close = useCallback((tabId) => {
@@ -286,8 +449,13 @@ export function useTabs(initial, restored = {}) {
     setSplit((current) => {
       if (current) return false
       setTabs((list) => {
-        if (list.length > 1) return list
-        return [...list, forkTab(list[0])]
+        /* A second pane must come from the *same group* -- see `visibleTabs` -- so having other
+           tabs open is not enough: if none of them is in this group, fork the active one. */
+        const active = list.find((tab) => tab.id === activeIdRef.current) ?? list[0]
+        const hasMate = list.some(
+          (tab) => tab !== active && groupKeyOf(tab) === groupKeyOf(active),
+        )
+        return hasMate ? list : [...list, forkTab(active)]
       })
       return true
     })
@@ -307,5 +475,7 @@ export function useTabs(initial, restored = {}) {
     open,
     fork,
     close,
+    setGroup,
+    pruneGroups,
   }
 }

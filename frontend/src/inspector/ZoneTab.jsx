@@ -76,7 +76,7 @@ export default function ZoneTab({ node, onUpdate }) {
       </Section>
 
       <Section
-        title="Colour"
+        title="Color"
         note="The border colour. The fill is a wash of the same hue."
         actions={
           data.color && (

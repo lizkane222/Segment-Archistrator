@@ -10,6 +10,8 @@ import {
   catalogQuery,
   filtersReducer,
   initialFilters,
+  relatedNodeIds,
+  selectedWorkspaceIds,
 } from './filters.js'
 
 const reduce = (actions, state = initialFilters) => actions.reduce(filtersReducer, state)
@@ -170,5 +172,62 @@ describe('catalogQuery', () => {
       { type: 'toggleCategory', category: 'Email' },
     ])
     expect(catalogQuery(state)).toEqual({ q: 'braze', category: ['CRM', 'Email'] })
+  })
+})
+
+describe('pipeline sub-zones', () => {
+  it('matches a destination to the Destinations chip even though it is stored in connections', async () => {
+    const { inPipelineZone } = await import('./filters.js')
+    const topology = { zones: [{ id: 'connections', parent: 'segment' }, { id: 'segment', parent: null }] }
+    expect(inPipelineZone({ zone: 'connections', kind: 'destination' }, 'destinations', topology)).toBe(true)
+    expect(inPipelineZone({ zone: 'connections', kind: 'source' }, 'destinations', topology)).toBe(false)
+    expect(inPipelineZone({ zone: 'connections', kind: 'source' }, 'segment', topology)).toBe(true)
+  })
+})
+
+describe('connected-to-selection', () => {
+  const edges = [
+    { source: 'source:s1', target: 'destination:d1' },
+    { source: 'source:s1', target: 'destination:d2' },
+    { source: 'source:s2', target: 'destination:d1' },
+    { source: 'space:sp', target: 'audience:a1' },
+  ]
+  const nodes = ['source:s1', 'source:s2', 'destination:d1', 'destination:d2', 'audience:a1', 'space:sp'].map(
+    (id) => ({ id, name: id, kind: id.split(':')[0] }),
+  )
+
+  it('finds destinations from a source and sources from a destination', () => {
+    expect([...relatedNodeIds(edges, ['source:s1'])].sort()).toEqual(['destination:d1', 'destination:d2'])
+    expect([...relatedNodeIds(edges, ['destination:d1'])].sort()).toEqual(['source:s1', 'source:s2'])
+  })
+
+  it('relates an audience to its space and nothing else', () => {
+    expect([...relatedNodeIds(edges, ['audience:a1'])]).toEqual(['space:sp'])
+  })
+
+  it('unions several selected components and excludes the selection itself', () => {
+    const related = relatedNodeIds(edges, ['source:s1', 'destination:d1'])
+    expect([...related].sort()).toEqual(['destination:d2', 'source:s2'])
+  })
+
+  it('narrows the list when given a related set', () => {
+    const related = relatedNodeIds(edges, ['source:s1'])
+    const out = applyWorkspaceFilters(nodes, initialFilters, null, related)
+    expect(out.map((n) => n.id).sort()).toEqual(['destination:d1', 'destination:d2'])
+  })
+
+  it('reads selected bound canvas components, ignoring zones and unbound cards', () => {
+    const canvas = [
+      { id: 'a', selected: true, data: { id: 'source:s1' } },
+      { id: 'b', selected: true, data: { kind: 'destination', segmentId: 'd1' } },
+      { id: 'c', selected: true, type: 'zone', data: { id: 'source:s2' } },
+      { id: 'd', selected: true, data: { id: 'source:s2', bound: false } },
+      { id: 'e', selected: false, data: { id: 'source:s2' } },
+    ]
+    expect(selectedWorkspaceIds(canvas, nodes)).toEqual(['source:s1', 'destination:d1'])
+  })
+
+  it('does not count following the selection as an active filter', () => {
+    expect(activeFilterCount(initialFilters)).toBe(0)
   })
 })

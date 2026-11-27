@@ -28,11 +28,14 @@
 
 import { useEffect, useRef } from 'react'
 
-import { useChrome } from '../chrome.js'
+import { LINK_SHORTCUT_EVENT, useChrome } from '../chrome.js'
 import {
+  applyLink,
   applyMark,
   clearMarks,
+  cleanLink,
   isEmptyRich,
+  linkAt,
   markState,
   richFromDom,
   richFromText,
@@ -109,6 +112,19 @@ export default function RichEditor({
         return setList(rich, from, to, current === style ? null : style)
       }),
       clearFormatting: () => transform(element, (rich) => clearMarks(rich)),
+      /*
+       * Links. The toolbar asks for the address in a field of its own, which takes focus away from this
+       * editor -- so the range is read *first* (`selection`, and `linkAt` for what is already linked)
+       * and handed back with the address once there is one. Nothing here depends on the caret still
+       * being in the text by then.
+       */
+      selection: () => textOffsets(element),
+      linkAt: () => {
+        const { start, end } = textOffsets(element)
+        return linkAt(richFromDom(element), start, end)
+      },
+      link: (url, range) =>
+        transform(element, (rich) => applyLink(rich, range.start, range.end, url), range),
       /* What the toolbar reads to draw a button pressed. From the runs rather than from
          `queryCommandState`, for the same reason the marks are applied that way. */
       state: (name) => {
@@ -154,9 +170,17 @@ export default function RichEditor({
          and on a group member it re-selects every mate. */
       onPointerDown={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation()
+        /* A link in the middle of being edited is text; following it is for when the edit is over. */
+        if (event.target?.closest?.('a')) event.preventDefault()
+      }}
       onDoubleClick={(event) => event.stopPropagation()}
-      onBlur={commit}
+      /* Focus moving to the toolbar's own address field is not the edit being over. */
+      onBlur={(event) => {
+        if (event.relatedTarget?.closest?.('[data-keep-editing]')) return
+        commit()
+      }}
       onKeyDown={(event) => {
         /* All of it, unconditionally. Without this Backspace reaches React Flow's `deleteKeyCode`
            and deletes the component whose label is being typed into. */
@@ -178,6 +202,13 @@ export default function RichEditor({
          * alone so the shortcut and the toolbar button do the same thing.
          */
         if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+          if (event.key.toLowerCase() === 'k' && !event.shiftKey) {
+            /* Cmd/Ctrl-K is "link" in every editor anyone has used. The address field belongs to the
+               toolbar, so this only says so; the toolbar reads the selection and opens it. */
+            event.preventDefault()
+            window.dispatchEvent(new CustomEvent(LINK_SHORTCUT_EVENT))
+            return
+          }
           const mark = { b: 'b', i: 'i', u: 'u' }[event.key.toLowerCase()]
           if (mark) {
             event.preventDefault()
@@ -241,9 +272,9 @@ export default function RichEditor({
  * and answer about the runs rather than about CSS -- so bold means bold whatever the label's base
  * weight is, and the toolbar's pressed state is the same answer the transform acts on.
  */
-function transform(element, change) {
+function transform(element, change, range = null) {
   const rich = richFromDom(element)
-  const { start, end } = textOffsets(element)
+  const { start, end } = range ?? textOffsets(element)
   const next = change(rich, start, end)
   seed(element, next)
   /* The same range, restored by offset: the DOM nodes it pointed into no longer exist, and a caret
@@ -456,6 +487,17 @@ function runNode(run) {
     const wrapper = document.createElement(tag)
     wrapper.appendChild(node)
     node = wrapper
+  }
+  const link = cleanLink(run.link)
+  if (link) {
+    const anchor = document.createElement('a')
+    anchor.setAttribute('href', link)
+    anchor.setAttribute('title', link)
+    /* Drawn the way `RichLabel` draws one, so the text does not change colour when the edit opens. */
+    anchor.style.color = '#0263e0'
+    anchor.style.textDecoration = 'underline'
+    anchor.appendChild(node)
+    node = anchor
   }
   return node
 }

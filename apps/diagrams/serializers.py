@@ -7,16 +7,36 @@ workspace_id would let any caller with a valid token write into another
 workspace's diagrams.
 """
 
+import uuid
+
 from rest_framework import serializers
 
 from apps.auth_workspace.models import RememberedConnection
 
-from .models import Diagram, Template, has_bound_nodes
+from .models import (
+    MAX_GRAPH_DEPTH,
+    Diagram,
+    Template,
+    carries_workspace_identity,
+    graph_depth,
+    has_bound_nodes,
+)
 from .validators import placement_advisories, placement_notes, validate_architecture
 
 
 class TemplateSerializer(serializers.ModelSerializer):
     placeholder_count = serializers.IntegerField(read_only=True)
+    owner = serializers.SerializerMethodField()
+    locked_workspace_id = serializers.CharField(read_only=True)
+
+    def get_owner(self, obj) -> str:
+        """"builtin", "me" or "shared" -- from the reader's side, never an account id."""
+        if obj.is_builtin:
+            return "builtin"
+        principal = self.context.get("principal")
+        if principal is not None and obj.owner_id and obj.owner_id == getattr(principal, "account_id", None):
+            return "me"
+        return "shared"
 
     class Meta:
         model = Template
@@ -28,6 +48,10 @@ class TemplateSerializer(serializers.ModelSerializer):
             "graph",
             "is_builtin",
             "placeholder_count",
+            "owner",
+            "shared_with_company",
+            "locked_workspace_id",
+            "published",
         ]
         read_only_fields = fields
 
@@ -43,8 +67,61 @@ class TemplateListSerializer(TemplateSerializer):
             "category",
             "is_builtin",
             "placeholder_count",
+            "owner",
+            "shared_with_company",
+            "locked_workspace_id",
+            "published",
         ]
         read_only_fields = fields
+
+
+class TemplateCreateSerializer(serializers.Serializer):
+    """
+    Input for `POST /api/templates`: a diagram, saved so it can be started from again.
+
+    `locked_workspace_id` is not an input. Whether a template is generic or belongs to one
+    workspace is a fact about its graph -- does it still carry that workspace's ids and links --
+    and a client that could say "generic" over a graph full of them would be publishing a
+    workspace's data to everyone who can see the template.
+    """
+
+    name = serializers.CharField(max_length=255, trim_whitespace=True)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=10_000)
+    category = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    graph = serializers.JSONField()
+    shared_with_company = serializers.BooleanField(required=False, default=False)
+
+    def validate_graph(self, value):
+        # The same rules a saved diagram is held to.
+        return DiagramSerializer().validate_graph(value)
+
+    def create(self, validated_data):
+        principal = self.context["principal"]
+        graph = validated_data["graph"]
+        locked = ""
+        if carries_workspace_identity(graph):
+            locked = principal.workspace_id if principal.has_token else ""
+            if not locked or locked not in principal.connected_workspace_ids:
+                raise serializers.ValidationError(
+                    {
+                        "graph": (
+                            "This diagram still carries a workspace's own data. Connect that "
+                            "workspace in this tab to keep it, or remove it first."
+                        )
+                    }
+                )
+        return Template.objects.create(
+            key=f"u-{uuid.uuid4().hex[:24]}",
+            name=validated_data["name"],
+            description=validated_data.get("description", ""),
+            category=validated_data.get("category") or "My templates",
+            graph=graph,
+            is_builtin=False,
+            owner=principal.account,
+            shared_with_company=validated_data.get("shared_with_company", False),
+            locked_workspace_id=locked,
+            sort_order=1000,
+        )
 
 
 class DiagramSerializer(serializers.ModelSerializer):
@@ -63,6 +140,7 @@ class DiagramSerializer(serializers.ModelSerializer):
             "description",
             "graph",
             "source_template",
+            "group_name",
             # Writable: the one lever someone has over who else can read this.
             "shared_with_workspace",
             # Read-only, and still never accepted from a body -- see the module
@@ -93,6 +171,9 @@ class DiagramSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def validate_group_name(self, value):
+        return " ".join((value or "").split())[:80]
+
     def get_advisories(self, obj) -> list[str]:
         """
         Notes about placement, on the saved graph rather than the submitted one.
@@ -118,6 +199,8 @@ class DiagramSerializer(serializers.ModelSerializer):
     def validate_graph(self, value):
         if not isinstance(value, dict):
             raise serializers.ValidationError("graph must be an object.")
+        if graph_depth(value) > MAX_GRAPH_DEPTH:
+            raise serializers.ValidationError("graph is nested too deeply.")
         for key in ("nodes", "edges"):
             if key in value and not isinstance(value[key], list):
                 raise serializers.ValidationError(f"graph.{key} must be an array.")
@@ -254,6 +337,7 @@ class DiagramListSerializer(DiagramSerializer):
             "name",
             "description",
             "source_template",
+            "group_name",
             "shared_with_workspace",
             "workspace_id",
             # So the open dialog can badge someone else's diagram and disable Delete

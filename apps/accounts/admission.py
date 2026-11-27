@@ -50,8 +50,11 @@ def domain_allowed(email: str) -> bool:
     return domain_of(email) in allowed
 
 
+REFUSAL_WRONG_DOMAIN = "Sign in with your company Google account. Other accounts cannot use this app."
+
+
 @transaction.atomic
-def admit(*, email: str, google_sub: str, email_verified: bool = False):
+def admit(*, email: str, google_sub: str, email_verified: bool = False, hosted_domain: str = ""):
     """
     Decide whether this Google identity may hold an account.
 
@@ -78,6 +81,19 @@ def admit(*, email: str, google_sub: str, email_verified: bool = False):
     if not email or not google_sub:
         return None, REFUSAL_UNVERIFIED
 
+    if not settings.INVITATIONS_ENABLED:
+        # A closed app: the address must be on an allowed domain, for everyone, every time --
+        # including an account that already exists, so removing a domain revokes it. And the
+        # token must say the account is *managed by* that Workspace (`hd`): a verified address
+        # on its own only proves someone once clicked a link sent to it.
+        allowed = {d.strip().lower().lstrip("@") for d in settings.ALLOWED_EMAIL_DOMAINS if d.strip()}
+        if (
+            domain_of(email) not in allowed
+            or (hosted_domain or "").strip().lower() not in allowed
+        ):
+            logger.info("Refused sign-in for %s: not on an allowed Workspace domain", email)
+            return None, REFUSAL_WRONG_DOMAIN
+
     existing = Account.objects.filter(google_sub=google_sub).first()
     if existing is None:
         # Fall back to the address. Google's `sub` should never change for one
@@ -95,6 +111,9 @@ def admit(*, email: str, google_sub: str, email_verified: bool = False):
 
     if domain_allowed(email):
         return _create(email=email, google_sub=google_sub), None
+
+    if not settings.INVITATIONS_ENABLED:
+        return None, REFUSAL_NOT_INVITED
 
     invite = (
         Invitation.objects.select_for_update()

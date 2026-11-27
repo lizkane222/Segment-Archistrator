@@ -12,9 +12,15 @@
  * blocks the whole tab and looks like a browser error next to this UI.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+
+import AdminTemplates from './AdminTemplates.jsx'
+import { ACCEPTED_LABEL, dragHasFiles } from './importFile.js'
+import { DRAG_TYPE } from './openDrag.js'
+import { groupSaved } from './tabs.js'
 import {
   FilePlus2,
+  FolderOpen,
   LayoutTemplate,
   Loader2,
   Save,
@@ -31,14 +37,50 @@ export default function OpenDialog({
   error,
   busy,
   currentId,
+  workspaceId = null,
+  onDeleteTemplate,
   onOpenTemplate,
   onOpenDiagram,
+  onOpenGroup,
   onStartBlank,
   onImportFile,
+  onDropFile,
+  onImportMermaid,
+  adminMode = false,
+  currentName = '',
+  getCurrentGraph,
+  onTemplatesChanged,
   onDelete,
   onClose,
 }) {
   const [confirming, setConfirming] = useState(null)
+  /* A file is being dragged over the dialog. */
+  const [fileOver, setFileOver] = useState(false)
+  const { groups, loose } = useMemo(() => groupSaved(saved), [saved])
+
+  const renderSaved = (diagram) => (
+    <Entry
+      key={diagram.id}
+      title={diagram.name}
+      description={diagram.description}
+      active={diagram.id === currentId}
+      meta={[
+        `${diagram.node_count ?? 0} components`,
+        diagram.placeholder_count ? `${diagram.placeholder_count} unbound` : null,
+        formatWhen(diagram.updated_at),
+      ]}
+      disabled={Boolean(busy)}
+      onOpen={() => onOpenDiagram(diagram.id)}
+      onDelete={() => setConfirming(diagram.id)}
+      confirming={confirming === diagram.id}
+      onConfirmDelete={async () => {
+        await onDelete(diagram.id)
+        setConfirming(null)
+      }}
+      onCancelDelete={() => setConfirming(null)}
+      drag={adminMode ? { kind: 'diagram', id: diagram.id, name: diagram.name } : null}
+    />
+  )
 
   useEffect(() => {
     const onKey = (event) => event.key === 'Escape' && onClose()
@@ -51,7 +93,33 @@ export default function OpenDialog({
       className="absolute inset-0 z-40 flex items-center justify-center bg-twilio-navy/30 p-6"
       /* Click-through-to-close on the backdrop only, never on the card. */
       onClick={(event) => event.target === event.currentTarget && onClose()}
+      /* Files dragged in from the desktop import as a diagram. Only for real files: the dialog's own
+         entries drag too (see openDrag.js) and must not light this up. */
+      onDragOver={(event) => {
+        if (!onDropFile || !dragHasFiles(event)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+        setFileOver(true)
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFileOver(false)
+      }}
+      onDrop={(event) => {
+        if (!onDropFile || !dragHasFiles(event)) return
+        event.preventDefault()
+        setFileOver(false)
+        const [file] = Array.from(event.dataTransfer.files ?? [])
+        if (file) onDropFile(file)
+      }}
     >
+      {fileOver && (
+        <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-twilio-blue bg-twilio-blue/10 text-center">
+          <p className="max-w-sm text-sm font-medium text-twilio-navy">
+            Drop to import as a diagram
+            <span className="mt-1 block text-xs font-normal text-twilio-gray-60">{ACCEPTED_LABEL}</span>
+          </p>
+        </div>
+      )}
       <div className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-twilio-gray-20 bg-white shadow-lg">
         <header className="flex shrink-0 items-center justify-between border-b border-twilio-gray-20 px-4 py-3">
           <h2 className="text-sm font-semibold text-twilio-navy">Open an architecture</h2>
@@ -77,8 +145,15 @@ export default function OpenDialog({
             <Heading
               icon={LayoutTemplate}
               title="Reference architectures"
-              note="Seeded templates. Opening one makes a copy — the template itself is never edited."
+              note="Built-in and saved templates. Opening one makes a copy — the template itself is never edited."
             />
+            {adminMode && (
+              <AdminTemplates
+                currentName={currentName}
+                getCurrentGraph={getCurrentGraph}
+                onChanged={onTemplatesChanged}
+              />
+            )}
             <div className="p-2">
               {loading && <Loading />}
               {!loading && !templates.length && (
@@ -94,12 +169,47 @@ export default function OpenDialog({
                   description={template.description}
                   meta={[
                     template.category,
+                    template.owner === 'me' ? 'Yours' : null,
+                    template.owner === 'shared' ? 'Shared' : null,
+                    template.locked_workspace_id ? 'One workspace only' : null,
                     template.placeholder_count
                       ? `${template.placeholder_count} to bind`
                       : null,
                   ]}
-                  disabled={Boolean(busy)}
+                  /* A template that still carries one workspace's data is for that workspace: from
+                     another group it would put that workspace's ids and names into a diagram about
+                     a different one. */
+                  disabled={
+                    Boolean(busy) ||
+                    Boolean(
+                      template.locked_workspace_id && template.locked_workspace_id !== workspaceId,
+                    )
+                  }
+                  tip={
+                    template.locked_workspace_id && template.locked_workspace_id !== workspaceId
+                      ? 'This template carries one workspace’s own data. Switch to that workspace’s tabs to use it.'
+                      : undefined
+                  }
+                  deleteDisabled={Boolean(busy)}
+                  onConfirmDelete={async () => {
+                    await onDeleteTemplate?.(template.key)
+                    setConfirming(null)
+                  }}
+                  onCancelDelete={() => setConfirming(null)}
                   onOpen={() => onOpenTemplate(template.key)}
+                  onDelete={template.owner === 'me' ? () => setConfirming(`t:${template.key}`) : undefined}
+                  confirming={confirming === `t:${template.key}`}
+                  drag={
+                    adminMode
+                      ? {
+                          kind: 'template',
+                          id: template.key,
+                          name: template.name,
+                          builtin: Boolean(template.is_builtin),
+                          owner: template.owner,
+                        }
+                      : null
+                  }
                 />
               ))}
             </div>
@@ -116,37 +226,39 @@ export default function OpenDialog({
               {!loading && !saved.length && (
                 <Empty>Nothing saved yet. Open a template or load the workspace, then Save.</Empty>
               )}
-              {saved.map((diagram) => (
-                <Entry
-                  key={diagram.id}
-                  title={diagram.name}
-                  description={diagram.description}
-                  active={diagram.id === currentId}
-                  meta={[
-                    `${diagram.node_count ?? 0} components`,
-                    diagram.placeholder_count
-                      ? `${diagram.placeholder_count} unbound`
-                      : null,
-                    formatWhen(diagram.updated_at),
-                  ]}
-                  disabled={Boolean(busy)}
-                  onOpen={() => onOpenDiagram(diagram.id)}
-                  onDelete={() => setConfirming(diagram.id)}
-                  confirming={confirming === diagram.id}
-                  onConfirmDelete={async () => {
-                    await onDelete(diagram.id)
-                    setConfirming(null)
-                  }}
-                  onCancelDelete={() => setConfirming(null)}
-                />
+              {groups.map((group) => (
+                <div key={group.name} className="mb-2">
+                  <div className="flex items-center gap-2 rounded-md bg-twilio-gray-10 px-2.5 py-1.5">
+                    <FolderOpen size={13} className="shrink-0 text-twilio-gray-60" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate text-xs font-semibold text-twilio-navy">
+                      {group.name}
+                      <span className="ml-2 text-[10px] font-normal text-twilio-gray-40">
+                        {group.diagrams.length} diagram{group.diagrams.length === 1 ? '' : 's'}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onOpenGroup?.(group.diagrams)}
+                      disabled={Boolean(busy)}
+                      title={`Open every diagram in ${group.name}, together as one group of tabs`}
+                      className="shrink-0 rounded border border-twilio-gray-20 bg-white px-2 py-0.5 text-[11px] text-twilio-blue transition-colors hover:border-twilio-blue disabled:opacity-50"
+                    >
+                      Open group
+                    </button>
+                  </div>
+                  <div className="ml-3 border-l border-twilio-gray-20 pl-1.5 pt-1">
+                    {group.diagrams.map(renderSaved)}
+                  </div>
+                </div>
               ))}
+              {loose.map(renderSaved)}
             </div>
           </section>
         </div>
 
         <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-twilio-gray-20 bg-twilio-gray-10 px-4 py-2.5">
           <p className="text-[11px] text-twilio-gray-60">
-            Opening replaces what is on the canvas.
+            Opening starts a new tab; what you have open stays as it is.
           </p>
           <div className="flex items-center gap-2">
             <button
@@ -159,6 +271,18 @@ export default function OpenDialog({
               <Upload size={13} aria-hidden="true" />
               Import a diagram file
             </button>
+            {onImportMermaid && (
+              <button
+                type="button"
+                onClick={onImportMermaid}
+                disabled={Boolean(busy)}
+                title="Paste or drop Mermaid text -- a flowchart or a sequence diagram -- to draw it as a new diagram"
+                className="flex items-center gap-1.5 rounded-md border border-twilio-gray-20 bg-white px-3 py-1.5 text-xs text-twilio-gray-60 transition-colors hover:border-twilio-gray-40 hover:text-twilio-navy disabled:opacity-50"
+              >
+                <Upload size={13} aria-hidden="true" />
+                Import Mermaid diagram
+              </button>
+            )}
             <button
               type="button"
               onClick={onStartBlank}
@@ -195,9 +319,12 @@ function Entry({
   disabled,
   onOpen,
   onDelete,
+  deleteDisabled,
+  tip,
   confirming,
   onConfirmDelete,
   onCancelDelete,
+  drag = null,
 }) {
   if (confirming) {
     return (
@@ -227,6 +354,16 @@ function Entry({
 
   return (
     <div
+      /* Admin mode only: dragged onto the publish area to offer it to everyone. */
+      draggable={Boolean(drag)}
+      onDragStart={
+        drag
+          ? (event) => {
+              event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(drag))
+              event.dataTransfer.effectAllowed = 'copy'
+            }
+          : undefined
+      }
       className={`group mb-1 flex items-start gap-2 rounded-md border p-2.5 transition-colors ${
         active
           ? 'border-twilio-blue bg-twilio-blue-light/40'
@@ -237,6 +374,7 @@ function Entry({
         type="button"
         onClick={onOpen}
         disabled={disabled}
+        title={tip}
         className="min-w-0 flex-1 text-left disabled:opacity-50"
       >
         <span className="block truncate text-xs font-semibold text-twilio-navy">
@@ -256,7 +394,7 @@ function Entry({
         <button
           type="button"
           onClick={onDelete}
-          disabled={disabled}
+          disabled={deleteDisabled ?? disabled}
           title={`Delete ${title}`}
           className="shrink-0 text-twilio-gray-40 opacity-0 transition-opacity hover:text-twilio-error group-hover:opacity-100 disabled:opacity-30"
         >

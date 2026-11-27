@@ -52,6 +52,36 @@ function readCookie(name) {
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
+/*
+ * Which workspace the calling tab is about, sent with every request as `X-Workspace-Id`.
+ *
+ * A tab group is a workspace, and several can be open at once in one browser with one cookie -- so
+ * the workspace a request acts as cannot be state on the session, which every other tab's in-flight
+ * requests would race. It is chosen per request instead, from among the account's own remembered
+ * connections (see `WorkspaceSessionAuthentication._scope`): the server treats the header as a
+ * *choice*, never as a grant.
+ *
+ * `null` sends nothing, which is the session's own connection and what a caller written before tab
+ * groups expects. A tab about no workspace sends `none`, explicitly: leaving the header off there
+ * would answer an unconnected tab with whichever workspace the session last held.
+ */
+let workspaceScope = null
+
+export function setWorkspaceScope(workspaceId) {
+  workspaceScope = workspaceId === undefined ? null : workspaceId
+}
+
+export function currentWorkspaceScope() {
+  return workspaceScope
+}
+
+/* Told when the server says nobody is signed in, so the shell can show the sign-in screen instead
+   of a toast per failed request. */
+let onSignInRequired = null
+export function setSignInRequiredHandler(handler) {
+  onSignInRequired = handler
+}
+
 async function request(path, { method = 'GET', body, signal } = {}) {
   const headers = { Accept: 'application/json' }
   /*
@@ -65,6 +95,8 @@ async function request(path, { method = 'GET', body, signal } = {}) {
    */
   const multipart = typeof FormData !== 'undefined' && body instanceof FormData
   if (body !== undefined && !multipart) headers['Content-Type'] = 'application/json'
+
+  if (workspaceScope !== null) headers['X-Workspace-Id'] = workspaceScope || 'none'
 
   if (UNSAFE.has(method)) {
     const csrftoken = readCookie('csrftoken')
@@ -95,6 +127,10 @@ async function request(path, { method = 'GET', body, signal } = {}) {
       })
     }
     return null
+  }
+
+  if (response.status === 401 && !(method === 'POST' && path === '/api/session')) {
+    onSignInRequired?.()
   }
 
   if (!response.ok) {
@@ -144,9 +180,10 @@ export const feedback = {
    * way to Airtable. A submission with no files sends a FormData with no files, which is simpler than
    * branching on two content types.
    */
-  submit: ({ description, proposedFix, reporter, files }) => {
+  submit: ({ kind, description, proposedFix, reporter, files }) => {
     const body = new FormData()
     body.append('description', description ?? '')
+    body.append('kind', kind === 'feature' ? 'feature' : 'bug')
     if (proposedFix) body.append('proposed_fix', proposedFix)
     if (reporter) body.append('reporter', reporter)
     for (const file of files ?? []) body.append('attachments', file, file.name)
@@ -200,6 +237,13 @@ export const session = {
   end: () => request('/api/session', { method: 'DELETE' }),
 }
 
+/* The workspaces this account has connected -- the tab groups. Credentials never come back down. */
+export const connections = {
+  /* Forget one, and stop it being usable. Not the same as signing out. */
+  forget: (workspaceId) =>
+    request(`/api/connections/${encodeURIComponent(workspaceId)}`, { method: 'DELETE' }),
+}
+
 /* --- Accounts ------------------------------------------------------------- */
 
 export const auth = {
@@ -224,6 +268,26 @@ export const invitations = {
      so in `emailSent`, and the UI is expected to repeat it rather than implying
      otherwise. */
   create: (email) => request('/api/invitations', { method: 'POST', body: { email } }),
+}
+
+/* --- Administration -------------------------------------------------------
+   Every one of these is refused by the server for anyone who is not an administrator; the app only
+   draws the controls for those who are. */
+export const admin = {
+  users: {
+    list: () => request('/api/admin/users'),
+    setAdmin: (id, isAdmin) =>
+      request(`/api/admin/users/${id}`, { method: 'PATCH', body: { isAdmin } }),
+  },
+  templates: {
+    /* Every built-in Reference architecture, including the ones withdrawn from everyone else. */
+    list: () => request('/api/admin/templates'),
+    publish: ({ name, description, graph }) =>
+      request('/api/admin/templates', { method: 'POST', body: { name, description, graph } }),
+    update: (key, patch) =>
+      request(`/api/admin/templates/${key}`, { method: 'PATCH', body: patch }),
+    remove: (key) => request(`/api/admin/templates/${key}`, { method: 'DELETE' }),
+  },
 }
 
 /* --- Static rules -------------------------------------------------------- */
@@ -279,6 +343,14 @@ export const workspace = {
 export const templates = {
   list: () => request('/api/templates'),
   get: (key) => request(`/api/templates/${key}`),
+  /* Save a diagram as a template. The graph is whatever the person chose to keep; whether the result
+     is generic or tied to this workspace is decided by the server, from the graph. */
+  create: ({ name, description, graph, shared }) =>
+    request('/api/templates', {
+      method: 'POST',
+      body: { name, description, graph, shared_with_company: Boolean(shared) },
+    }),
+  remove: (key) => request(`/api/templates/${key}`, { method: 'DELETE' }),
 }
 
 export const diagrams = {

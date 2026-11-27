@@ -43,6 +43,24 @@ describe('serializeNode', () => {
     expect(node.extent).toBeUndefined()
   })
 
+  it('keeps a pasted profileSnapshot so it saves, exports and reloads', () => {
+    const profileSnapshot = {
+      identifiers: [{ type: 'email', id: 'b@example.com' }],
+      traits: { plan: 'pro' },
+      events: [{ event: 'Signed Up', timestamp: '2026-01-23T10:58:23.745Z' }],
+      metadata: {},
+      links: [],
+      importedAt: 1,
+    }
+    const saved = serializeNode(flowNode({ data: { kind: 'profile', name: 'Profile', profileSnapshot } }))
+    expect(saved.profileSnapshot).toEqual(profileSnapshot)
+
+    const [reloaded] = buildLayout(
+      { zones: ZONES, nodes: [{ ...saved, zone: 'connections' }], edges: [] },
+    ).nodes.filter((n) => n.type !== 'zone')
+    expect(reloaded.data.profileSnapshot).toEqual(profileSnapshot)
+  })
+
   it('drops React Flow runtime state', () => {
     const node = serializeNode(flowNode())
     for (const key of ['selected', 'dragging', 'measured', 'zIndex', 'type']) {

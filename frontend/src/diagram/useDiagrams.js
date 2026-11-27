@@ -13,8 +13,9 @@
  * counter would report a freshly-opened diagram as edited before anyone touched it.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { trustGraphCode } from '../functions/trust.js'
 import { ApiError, diagrams as diagramsApi, templates as templatesApi } from '../services/api.js'
 import { graphFingerprint } from './serialize.js'
 
@@ -31,6 +32,7 @@ export function useDiagrams() {
   const [loadingLists, setLoadingLists] = useState(true)
   const [busy, setBusy] = useState(null) // 'open' | 'save' | 'delete' | null
   const [current, setCurrent] = useState(blank)
+  const savingRef = useRef(null)
   /* See `openDiagram`. Null for anything not opened from the server. */
   const [openedWorkspace, setOpenedWorkspace] = useState(null)
   /* null means "never persisted", which counts as dirty: a template that has been
@@ -65,40 +67,54 @@ export function useDiagrams() {
    * a new diagram rather than editing the template. Templates are read-only in v1
    * and shared by every workspace, so writing back into one would edit everyone's.
    */
-  const openTemplate = useCallback(async (key) => {
+  const openTemplate = useCallback(async (key, { nameFor } = {}) => {
     setBusy('open')
     try {
       const template = await templatesApi.get(key)
+      const templateName = template.name ?? UNTITLED
       setCurrent({
         id: null,
-        name: template.name ?? UNTITLED,
+        /* `nameFor` lets the caller date-stamp and version the instance: it knows which names are
+           already taken by other tabs, which this hook cannot see. */
+        name: nameFor ? nameFor(templateName) : templateName,
         description: template.description ?? '',
         sourceTemplate: template.key ?? key,
         updatedAt: null,
       })
       setSavedPrint(null)
+      /* Built in, or this person's own. A template somebody else shared carries code somebody else
+         wrote, which is exactly what the trust gate exists to hold back. */
+      if (template.is_builtin || template.owner === 'me') trustGraphCode(template.graph)
       return template.graph ?? { nodes: [], edges: [] }
     } finally {
       setBusy(null)
     }
   }, [])
 
-  const openDiagram = useCallback(async (id) => {
+  const openDiagram = useCallback(async (id, { copyAs } = {}) => {
     setBusy('open')
     try {
       const diagram = await diagramsApi.get(id)
+      /* `copyAs` is passed when another tab already holds this saved diagram. Opening it a second
+         time as the same record would let either tab's Save overwrite the other's, so this one is
+         detached (`id: null`, like a fork) and given a name of its own: its first Save creates a
+         second diagram. */
+      const copyName = copyAs ? copyAs(diagram.name ?? UNTITLED) : null
       setCurrent({
-        id: diagram.id,
-        name: diagram.name ?? UNTITLED,
+        id: copyName ? null : diagram.id,
+        name: copyName ?? diagram.name ?? UNTITLED,
         description: diagram.description ?? '',
         sourceTemplate: diagram.source_template ?? '',
-        updatedAt: diagram.updated_at ?? null,
+        updatedAt: copyName ? null : (diagram.updated_at ?? null),
       })
       /* Which workspace its bound components came from, and whether this account can get
          back there. Held apart from `current` -- it is a fact about the server's copy, not
          part of the document a tab carries -- and read by the shell to resume the
          connection. */
       setOpenedWorkspace(diagram.workspace ?? null)
+      /* Only a diagram the server says is this person's own carries code they wrote. One
+         shared with them, or predating accounts, is somebody else's -- see functions/trust.js. */
+      if (diagram.owner === 'me') trustGraphCode(diagram.graph)
       return diagram.graph ?? { nodes: [], edges: [] }
     } finally {
       setBusy(null)
@@ -158,12 +174,22 @@ export function useDiagrams() {
 
   /** Update an open diagram, or create one if this document has never been saved. */
   const save = useCallback(
-    async (graph, { name, description } = {}) => {
+    async (graph, { name, description, groupName } = {}) => {
+      /* One save at a time. A never-saved document has no id until the first create returns, so a
+         second Save (a double cmd-s, or the button right after the shortcut) landing in that gap
+         would see `id: null` and create a *second* diagram. `busy` cannot stop it -- it is state, and
+         does not change until the next render -- so the in-flight request is held here and the
+         repeat is handed the same answer. Edits made during the request leave the diagram dirty, and
+         the next Save sends them to the same record. */
+      if (savingRef.current) return savingRef.current
       setBusy('save')
+      const run = (async () => {
       try {
         const body = {
           name: name ?? current.name ?? UNTITLED,
           description: description ?? current.description ?? '',
+          /* The tab group it is saved from, so Open can list it under that group. */
+          group_name: groupName ?? '',
           graph,
         }
         const result = current.id
@@ -185,18 +211,23 @@ export function useDiagrams() {
         return result
       } finally {
         setBusy(null)
+        savingRef.current = null
       }
+      })()
+      savingRef.current = run
+      return run
     },
     [current, refresh],
   )
 
   /** Fork: always creates, and carries the template lineage forward. */
   const saveAs = useCallback(
-    async (name, graph, { description } = {}) => {
+    async (name, graph, { description, groupName } = {}) => {
       setBusy('save')
       try {
         const result = await diagramsApi.create({
           name: name || UNTITLED,
+          group_name: groupName ?? '',
           description: description ?? current.description ?? '',
           source_template: current.sourceTemplate ?? '',
           graph,

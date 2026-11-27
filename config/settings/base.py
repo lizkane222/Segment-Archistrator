@@ -37,7 +37,11 @@ INSTALLED_APPS = [
 # permission framework. See the docstring in apps/accounts/models.py.
 
 MIDDLEWARE = [
+    # First, so a load balancer's health check is answered before host validation or the
+    # HTTPS redirect can refuse it. See config/middleware.py.
+    "config.middleware.HealthCheckMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.SecurityHeadersMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -78,8 +82,8 @@ USE_TZ = True
 # --- Static files -----------------------------------------------------------
 # The Vite build lands in static/spa/ and is served by WhiteNoise from the same
 # origin as /api/*. Same-origin is load-bearing: the session cookie could not be
-# SameSite=Lax across two *.onrender.com services, because onrender.com is on
-# the Public Suffix List.
+# SameSite=Lax across two services on a shared hosting domain (e.g.
+# *.elasticbeanstalk.com), because those domains are on the Public Suffix List.
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static" / "spa"] if (BASE_DIR / "static" / "spa").exists() else []
@@ -104,6 +108,10 @@ REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
 }
 
+# Send the CSP as report-only instead of enforcing it. A rollout escape hatch if the policy in
+# config/middleware.py ever blocks something real; not for steady state.
+CSP_REPORT_ONLY = env.bool("CSP_REPORT_ONLY", default=False)
+
 # --- Session / cookie -------------------------------------------------------
 WORKSPACE_SESSION_COOKIE = "sab_session"
 WORKSPACE_SESSION_IDLE_HOURS = env.int("WORKSPACE_SESSION_IDLE_HOURS", default=12)
@@ -127,7 +135,23 @@ GOOGLE_OAUTH_REDIRECT_URI = env("GOOGLE_OAUTH_REDIRECT_URI", default="")
 # invitation-only -- see `manage.py invite_user`, which is how a fresh deployment
 # admits its first person. Exact domains, not suffixes: example.com does not admit
 # mail.example.com.
-ALLOWED_EMAIL_DOMAINS = env.list("ALLOWED_EMAIL_DOMAINS", default=[])
+ALLOWED_EMAIL_DOMAINS = env.list("ALLOWED_EMAIL_DOMAINS", default=["twilio.com"])
+
+# The app's owners: always administrators, and the only ones who cannot be demoted from inside the app.
+# Everyone else becomes an administrator when an owner or another administrator says so (Account.is_admin).
+# Set to the address you sign in with. Empty means nobody is an owner and `manage.py make_admin` is the
+# only way to the first administrator.
+ADMIN_EMAILS = [email.strip().lower() for email in env.list("ADMIN_EMAILS", default=[]) if email.strip()]
+
+# Whether the app is closed to anyone who has not signed in. True means a session with no
+# account is not a session at all: every API route except sign-in itself answers 401, and
+# nothing can be saved or connected before Google has vouched for the person. prod.py
+# hard-codes it; dev and test turn it off so the canvas is usable without a Google client.
+REQUIRE_ACCOUNT = env.bool("REQUIRE_ACCOUNT", default=True)
+
+# Whether an `Invitation` can admit someone whose domain is not allowed. False in prod: this
+# app is for people at the allowed domains only, and an invitation must not be a way round it.
+INVITATIONS_ENABLED = env.bool("INVITATIONS_ENABLED", default=False)
 
 # --- Segment API ------------------------------------------------------------
 SEGMENT_API_BASE_URLS = {
@@ -162,11 +186,13 @@ AIRTABLE_BASE_ID = env("AIRTABLE_BASE_ID", default="")
 AIRTABLE_TABLE = env("AIRTABLE_TABLE", default="Feedback")
 
 # What this app calls itself in the `App` field, so one base can collect feedback from several tools.
-AIRTABLE_APP_NAME = env("AIRTABLE_APP_NAME", default="Segment Archistrator")
+AIRTABLE_APP_NAME = env("AIRTABLE_APP_NAME", default="Archistrator")
 
 # Cache TTLs, in seconds. Space Schema is capped at 25 req/min, so it gets a
 # much longer TTL than the general workspace resources.
 WORKSPACE_CACHE_TTL = 300
+# Source -> destination/warehouse edges cost two requests per source, so they are held longer.
+CONNECTIONS_CACHE_TTL = env.int("CONNECTIONS_CACHE_TTL", default=900)
 SPACE_SCHEMA_CACHE_TTL = 3600
 
 LOGGING = {

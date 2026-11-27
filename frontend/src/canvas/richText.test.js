@@ -17,6 +17,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   MARKS,
+  applyLink,
+  cleanLink,
+  linkAt,
   applyMark,
   clearMarks,
   isEmptyRich,
@@ -401,5 +404,22 @@ describe('richFromDom and the browser’s idea of a new line', () => {
     )
     expect(richToText(rich)).toBe('why:\none\ntwo')
     expect(rich.blocks.map((block) => block.list)).toEqual([undefined, 'bullet', 'bullet'])
+  })
+})
+
+describe('links', () => {
+  it('cleans addresses', () => {
+    expect(cleanLink('https://a.com/x')).toBe('https://a.com/x')
+    expect(cleanLink('a.com')).toBe('https://a.com/')
+    expect(cleanLink('javascript:alert(1)')).toBeNull()
+  })
+  it('links part of a run and finds it again', () => {
+    const rich = { blocks: [{ list: null, runs: [{ text: 'Adobe Target Cloud Mode Destination' }] }] }
+    const out = applyLink(rich, 6, 12, 'https://x.com')
+    expect(out.blocks[0].runs.map((r) => [r.text, r.link ?? null])).toEqual([
+      ['Adobe ', null], ['Target', 'https://x.com/'], [' Cloud Mode Destination', null],
+    ])
+    expect(linkAt(out, 8, 8).url).toBe('https://x.com/')
+    expect(applyLink(out, 6, 12, null).blocks[0].runs.some((r) => r.link)).toBe(false)
   })
 })

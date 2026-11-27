@@ -22,7 +22,7 @@
  * is broken rather than inapplicable.
  */
 
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow } from '@xyflow/react'
 import { Lock } from 'lucide-react'
 
@@ -32,6 +32,7 @@ import RichLabel from './RichLabel.jsx'
 import { LucidArt } from '../shapes/LucidArt.jsx'
 import { shapeById, shapePath } from '../shapes/geometry.js'
 import { useChrome } from '../chrome.js'
+import { useHeld } from '../flash.js'
 import { labelLayout } from '../labelStyle.js'
 import { hasFormatting } from '../richText.js'
 import { MIN_NODE_HEIGHT, MIN_NODE_WIDTH, componentSize } from '../layout.js'
@@ -54,6 +55,32 @@ function dashFor({ borderStyle, borderWidth }) {
   return undefined
 }
 
+/*
+ * How much of each side of a shape's box its outline eats, as a fraction of that side: where the text
+ * may actually go. A callout's body is the top 72% of its box and the tail is not a place for words; a
+ * circle's corners are empty; a diamond is mostly empty at the edges. Shapes not listed use the whole box.
+ */
+const TEXT_INSET = {
+  callout: { t: 0.04, r: 0.04, b: 0.3, l: 0.04 },
+  circle: { t: 0.15, r: 0.15, b: 0.15, l: 0.15 },
+  ellipse: { t: 0.14, r: 0.14, b: 0.14, l: 0.14 },
+  diamond: { t: 0.25, r: 0.25, b: 0.25, l: 0.25 },
+  triangle: { t: 0.38, r: 0.22, b: 0.04, l: 0.22 },
+  pentagon: { t: 0.14, r: 0.1, b: 0.06, l: 0.1 },
+  hexagon: { t: 0.08, r: 0.08, b: 0.08, l: 0.08 },
+  octagon: { t: 0.1, r: 0.1, b: 0.1, l: 0.1 },
+  star: { t: 0.3, r: 0.28, b: 0.2, l: 0.28 },
+  cylinder: { t: 0.22, r: 0.04, b: 0.06, l: 0.04 },
+  database: { t: 0.22, r: 0.04, b: 0.06, l: 0.04 },
+  cloud: { t: 0.2, r: 0.14, b: 0.16, l: 0.14 },
+  document: { t: 0.04, r: 0.04, b: 0.12, l: 0.04 },
+  documents: { t: 0.1, r: 0.1, b: 0.12, l: 0.04 },
+}
+const NO_INSET = { t: 0, r: 0, b: 0, l: 0 }
+/* The tightest a line may be squeezed before the shape grows instead. */
+const FIT_LINE_HEIGHTS = [null, 1.15, 1.05, 1]
+const FIT_PADDING = 8
+
 function ShapeNode({ id, data, selected }) {
   const { screenToFlowPosition } = useReactFlow()
   const { walkthroughActive, rename, setRadius, updateData } = useChrome()
@@ -62,6 +89,7 @@ function ShapeNode({ id, data, selected }) {
      answers to "what does this label say". */
   const [editing, setEditing] = useState(false)
 
+  const picked = useHeld(id)
   const locked = Boolean(data.locked)
   const chosen = componentSize(data)
   const geometry = data.shape ? shapeById(data.shape) : null
@@ -150,6 +178,58 @@ function ShapeNode({ id, data, selected }) {
 
   const label = labelLayout(data.style)
 
+  /*
+   * Keep the text inside the shape.
+   *
+   * Measured after layout: first the text as it would normally sit, then with the line height squeezed
+   * a step at a time, and if even the tightest does not fit the shape grows -- taller for more lines,
+   * wider for a word that is wider than the box. Never while editing (the box would jump under the
+   * caret) and never on a locked shape, which keeps its size and takes the squeezed lines.
+   */
+  const inset = (data.shape && TEXT_INSET[data.shape]) || NO_INSET
+  const boxRef = useRef(null)
+  const textRef = useRef(null)
+  const [squeeze, setSqueeze] = useState(null)
+  const hasText = Boolean(data.name || data.nameRich)
+  useLayoutEffect(() => {
+    const box = boxRef.current
+    const text = textRef.current
+    if (!box || !text || !hasText || editing) return
+    const inner = text.firstElementChild
+    const fits = () => {
+      const availableHeight = box.clientHeight - 2 * FIT_PADDING
+      return text.offsetHeight <= availableHeight + 0.5 && text.scrollWidth <= box.clientWidth - 2 * FIT_PADDING + 0.5
+    }
+    const original = inner ? inner.style.lineHeight : ''
+    let chosenLine = null
+    let found = false
+    for (const lineHeight of FIT_LINE_HEIGHTS) {
+      if (inner) inner.style.lineHeight = lineHeight == null ? original : String(lineHeight)
+      if (fits()) {
+        chosenLine = lineHeight
+        found = true
+        break
+      }
+    }
+    if (inner) inner.style.lineHeight = original
+    setSqueeze(chosenLine)
+    if (found || locked || !updateData) return
+
+    /* Does not fit even squeezed: grow to the size the text needs at its normal spacing. The node's own
+       size is what is being changed, so it is measured from the node and not from the inset box. */
+    const nodeWidth = box.parentElement?.offsetWidth ?? box.clientWidth
+    const nodeHeight = box.parentElement?.offsetHeight ?? box.clientHeight
+    /* Both ways at once, by the square root of how much too tall the text is: wider boxes take fewer
+       lines, so growing only one side makes a tall sliver. The effect runs again at the new size and
+       stops the first time everything fits. */
+    const tall = text.offsetHeight / Math.max(1, box.clientHeight - 2 * FIT_PADDING)
+    const wide = text.scrollWidth / Math.max(1, box.clientWidth - 2 * FIT_PADDING)
+    const factor = Math.min(2, Math.max(1.1, Math.sqrt(tall), wide))
+    updateData(id, {
+      size: { width: Math.ceil(nodeWidth * factor), height: Math.ceil(nodeHeight * factor) },
+    })
+  }, [data.name, data.nameRich, data.style?.fontSize, data.shape, chosen.width, chosen.height, editing, locked, hasText])
+
   return (
     <>
       <NodeResizer
@@ -162,7 +242,7 @@ function ShapeNode({ id, data, selected }) {
       />
 
       <div
-        className={`group relative ${aside ? 'walkthrough-aside' : ''} ${
+        className={`nokey group relative ${picked ? 'pick-glow' : ''} ${aside ? 'walkthrough-aside' : ''} ${
           here ? 'walkthrough-here' : arrived ? 'walkthrough-trail' : ''
         }`}
         style={{
@@ -222,9 +302,18 @@ function ShapeNode({ id, data, selected }) {
             two alignment settings the text toolbar writes, which is why the flex classes come from
             `labelLayout` rather than being fixed at centre. */}
         <div
-          className={`absolute inset-0 flex p-2 ${label.itemsClass} ${label.justifyClass} ${
+          ref={boxRef}
+          className={`absolute flex ${label.itemsClass} ${label.justifyClass} ${
             editing ? '' : 'pointer-events-none'
           }`}
+          style={{
+            left: `${inset.l * 100}%`,
+            right: `${inset.r * 100}%`,
+            top: `${inset.t * 100}%`,
+            bottom: `${inset.b * 100}%`,
+            padding: FIT_PADDING,
+            overflow: 'hidden',
+          }}
         >
           {editing ? (
             <RichEditor
@@ -243,8 +332,10 @@ function ShapeNode({ id, data, selected }) {
               style={{ color: text, ...label.textStyle }}
             />
           ) : (
-            (data.name || data.nameRich) && (
+            (data.name || data.nameRich) &&
+            !data.labelHidden && (
               <span
+                ref={textRef}
                 className="pointer-events-auto max-w-full"
                 onDoubleClick={(event) => {
                   if (!updateData && !rename) return
@@ -257,7 +348,11 @@ function ShapeNode({ id, data, selected }) {
                   text={data.name}
                   align={label.align}
                   className="text-[12px] font-semibold leading-tight"
-                  style={{ color: text, ...label.textStyle }}
+                  style={{
+                    color: text,
+                    ...label.textStyle,
+                    ...(squeeze ? { lineHeight: squeeze } : {}),
+                  }}
                 />
               </span>
             )

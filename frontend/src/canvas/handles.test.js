@@ -787,3 +787,13 @@ describe('resolveReleasedHandles', () => {
     })
   })
 })
+
+describe('table row and column handles', () => {
+  it('names the side and the index', async () => {
+    const { parseTableHandle, isTableHandle } = await import('./handles.js')
+    expect(parseTableHandle('row-r-2')).toEqual({ axis: 'row', side: 'right', index: 2 })
+    expect(parseTableHandle('col-b-0')).toEqual({ axis: 'col', side: 'bottom', index: 0 })
+    expect(isTableHandle('e')).toBe(false)
+    expect(isTableHandle(null)).toBe(false)
+  })
+})

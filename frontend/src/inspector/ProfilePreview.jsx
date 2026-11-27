@@ -6,12 +6,8 @@
  * Inspector column has room for, and because the Palette is not useful while looking
  * at one.
  *
- * Deliberately session-only. `data.profileSnapshot` is excluded from save and export
- * in diagram/serialize.js, the same way the walkthrough's `data.paths` is -- so
- * pasting a real customer's traits and identifiers in to look at during a working
- * session cannot end up in Postgres or an exported PDF. That is the same "no real
- * customer data in the document" rule `PROFILE_SECTIONS` in canvas/grouping.js was
- * written under; it survives a page reload, not this component's mount.
+ * `data.profileSnapshot` is part of the node's data, so it is saved with the diagram
+ * and carried into templates and exports along with everything else on the node.
  *
  * Traits are the one endpoint with no signal in the response for which of Unify's
  * categories a trait belongs to -- see profileSnapshot.js's `classifyTraits` for how
@@ -34,6 +30,7 @@ import { EmptyNote, IdRow, Row, Section } from './primitives.jsx'
 import {
   PROFILE_KIND_LABELS,
   PROFILE_KIND_TEMPLATES,
+  addField,
   classifyTraits,
   emptySnapshot,
   groupJourneys,
@@ -42,6 +39,7 @@ import {
   profileIdentity,
 } from './profileSnapshot.js'
 import { iconFor, styleFor } from '../canvas/kinds.js'
+import CopyButton from '../ui/CopyButton.jsx'
 
 export default function ProfilePreview({ node, nodes, onUpdateNode, onClose, onNotify }) {
   const data = node.data
@@ -82,6 +80,9 @@ export default function ProfilePreview({ node, nodes, onUpdateNode, onClose, onN
               : 'Nothing pasted yet'}
           </p>
         </div>
+        {hasAnything && (
+          <CopyButton text={JSON.stringify(snapshot, null, 2)} label="Copy the whole profile as JSON" size={14} />
+        )}
         <button
           type="button"
           onClick={onClose}
@@ -95,6 +96,10 @@ export default function ProfilePreview({ node, nodes, onUpdateNode, onClose, onN
       <div className="min-h-0 flex-1 overflow-y-auto">
         <PasteBox
           snapshot={snapshot}
+          onAdd={(kind, field, value) => {
+            onUpdateNode(node.id, { profileSnapshot: addField(snapshot, kind, field, value) })
+            onNotify?.({ tone: 'info', message: `Added “${field}” to ${PROFILE_KIND_LABELS[kind]}.` })
+          }}
           onImport={(kind, next) => {
             onUpdateNode(node.id, { profileSnapshot: next })
             onNotify?.({ tone: 'info', message: `Imported ${PROFILE_KIND_LABELS[kind]} from the Profile API.` })
@@ -124,8 +129,33 @@ export default function ProfilePreview({ node, nodes, onUpdateNode, onClose, onN
   )
 }
 
-function PasteBox({ snapshot, onImport }) {
+/* What the two inputs ask for, per section: [field, value]. */
+const FIELD_HINTS = {
+  traits: ['trait name', 'value'],
+  external_ids: ['id type (user_id)', 'id value'],
+  metadata: ['key', 'value'],
+  events: ['event name', 'property value or {json}'],
+  links: ['collection (accounts)', 'linked id'],
+}
+
+function PasteBox({ snapshot, onImport, onAdd }) {
   const [text, setText] = useState('')
+  /* Which section the chips are pointing at: filled by Import's templates and by the field below. */
+  const [kind, setKind] = useState('traits')
+  const [field, setField] = useState('')
+  const [fieldValue, setFieldValue] = useState('')
+  const [fieldError, setFieldError] = useState(null)
+
+  const add = () => {
+    try {
+      onAdd(kind, field, fieldValue)
+      setField('')
+      setFieldValue('')
+      setFieldError(null)
+    } catch (err) {
+      setFieldError(err.message)
+    }
+  }
   const [error, setError] = useState(null)
 
   const submit = () => {
@@ -143,22 +173,28 @@ function PasteBox({ snapshot, onImport }) {
   return (
     <Section
       title="Paste profile data"
-      note="From a Profile API call -- traits, external_ids, metadata, events, or links. Shown here only; never saved with the diagram."
+      note="From a Profile API call -- traits, external_ids, metadata, events, or links. Saved with the diagram."
     >
       {/* A starting point for whichever endpoint you're populating, so this doesn't
           require already knowing the exact envelope a real Profile API call returns.
           Replaces the textarea outright -- nothing is imported until Import is
           pressed, so there's nothing to lose by trying a different one. */}
       <div className="mb-1.5 flex flex-wrap gap-1">
-        {Object.entries(PROFILE_KIND_LABELS).map(([kind, label]) => (
+        {Object.entries(PROFILE_KIND_LABELS).map(([key, label]) => (
           <button
-            key={kind}
+            key={key}
             type="button"
+            aria-pressed={kind === key}
             onClick={() => {
-              setText(PROFILE_KIND_TEMPLATES[kind])
+              setKind(key)
+              setText(PROFILE_KIND_TEMPLATES[key])
               setError(null)
             }}
-            className="nodrag rounded border border-twilio-gray-20 px-1.5 py-0.5 text-[10px] text-twilio-slate transition-colors hover:border-twilio-blue hover:text-twilio-blue"
+            className={`nodrag rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+              kind === key
+                ? 'border-twilio-blue bg-twilio-blue-light text-twilio-blue-dark'
+                : 'border-twilio-gray-20 text-twilio-slate hover:border-twilio-blue hover:text-twilio-blue'
+            }`}
           >
             {label}
           </button>
@@ -189,6 +225,38 @@ function PasteBox({ snapshot, onImport }) {
         <ClipboardPaste size={13} aria-hidden="true" />
         Import
       </button>
+
+      {/* The quick way in: one field and its value, added to whichever section is highlighted above. */}
+      <div className="mt-3 border-t border-twilio-gray-10 pt-2">
+        <p className="mb-1 text-[11px] font-semibold text-twilio-navy">
+          Add a field to {PROFILE_KIND_LABELS[kind]}
+        </p>
+        <div className="flex gap-1">
+          <input
+            value={field}
+            onChange={(event) => setField(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && add()}
+            placeholder={FIELD_HINTS[kind][0]}
+            className="nodrag min-w-0 flex-1 rounded border border-twilio-gray-20 px-2 py-1 text-[11px] text-twilio-navy outline-none focus:border-twilio-blue"
+          />
+          <input
+            value={fieldValue}
+            onChange={(event) => setFieldValue(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && add()}
+            placeholder={FIELD_HINTS[kind][1]}
+            className="nodrag min-w-0 flex-1 rounded border border-twilio-gray-20 px-2 py-1 text-[11px] text-twilio-navy outline-none focus:border-twilio-blue"
+          />
+          <button
+            type="button"
+            onClick={add}
+            disabled={!field.trim()}
+            className="nodrag shrink-0 rounded-md border border-twilio-blue px-2 py-1 text-[11px] font-medium text-twilio-blue transition-colors hover:bg-twilio-blue-light disabled:opacity-40"
+          >
+            Add
+          </button>
+        </div>
+        {fieldError && <p className="mt-1 text-[11px] text-twilio-error">{fieldError}</p>}
+      </div>
     </Section>
   )
 }
@@ -201,7 +269,12 @@ function IdentifiersSection({ identifiers }) {
       ) : (
         identifiers.map((entry, index) => (
           <div key={entry.id ?? index} className="border-b border-twilio-gray-10 py-1 last:border-b-0">
-            <IdRow label={entry.type ?? 'id'} value={entry.id} />
+            <div className="flex items-center gap-1">
+              <div className="min-w-0 flex-1">
+                <IdRow label={entry.type ?? 'id'} value={entry.id} />
+              </div>
+              <CopyButton text={entry.type ?? 'id'} label={`Copy the key “${entry.type ?? 'id'}”`} size={12} />
+            </div>
             <Row label="Collection" value={entry.collection} />
             <Row label="Source" value={entry.source_id} mono />
             <Row label="Created" value={entry.created_at} />
@@ -311,7 +384,9 @@ function TraitList({ title, icon: TraitIcon, entries, empty, note }) {
                   <span className="min-w-0 flex-1 break-words font-mono text-[11px] text-twilio-navy">
                     {entry.key}
                   </span>
+                  <CopyButton text={entry.key} label={`Copy key “${entry.key}”`} size={11} />
                   {scalar && <TraitValue value={entry.value} />}
+                  <CopyButton text={copyText(entry.value)} label={`Copy value of “${entry.key}”`} size={11} />
                 </div>
                 {!scalar && (
                   <div className="pl-[18px]">
@@ -389,7 +464,8 @@ function EventsSection({ events }) {
               const id = event.message_id ?? index
               const isOpen = expanded.has(id)
               return (
-                <li key={id} className="border-b border-twilio-gray-10 py-1.5 last:border-b-0">
+                <li key={id} className="flex items-start gap-1 border-b border-twilio-gray-10 py-1.5 last:border-b-0">
+                  <div className="min-w-0 flex-1">
                   <button
                     type="button"
                     onClick={() => toggle(id)}
@@ -412,6 +488,9 @@ function EventsSection({ events }) {
                       {JSON.stringify(event.properties ?? {}, null, 2)}
                     </pre>
                   )}
+                  </div>
+                  <CopyButton text={event.event ?? ''} label="Copy event name" size={11} />
+                  <CopyButton text={copyText(event.properties ?? {})} label="Copy event properties as JSON" size={11} />
                 </li>
               )
             })}
@@ -473,11 +552,16 @@ function MetadataSection({ metadata }) {
   return (
     <Section title="Metadata">
       {metadata.segment_id && <IdRow label="Profile ID" value={metadata.segment_id} />}
-      <Row label="Created" value={metadata.created_at} />
-      <Row label="Updated" value={metadata.updated_at} />
+      <Row label="Created" value={metadata.created_at} copy />
+      <Row label="Updated" value={metadata.updated_at} copy />
       <Row label="First source" value={metadata.first_source_id} mono copy />
       <Row label="First message" value={metadata.first_message_id} mono copy />
       <Row label="Last message" value={metadata.last_message_id} mono copy />
     </Section>
   )
+}
+
+/* A value as text for the clipboard: scalars as they read, lists and objects as JSON. */
+function copyText(value) {
+  return value !== null && typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '')
 }

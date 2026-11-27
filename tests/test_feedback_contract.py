@@ -62,7 +62,7 @@ def test_every_field_the_form_can_send_reaches_airtable():
         }
     )
     assert serializer.is_valid(), serializer.errors
-    fields = serializer.to_fields(app_name="Segment Archistrator")
+    fields = serializer.to_fields(app_name="Archistrator")
 
     assert fields[airtable.FIELD_PROPOSED_FIX] == "Clear it when the transport stops."
     assert fields[airtable.FIELD_REPORTER] == "someone@example.com"
@@ -90,10 +90,10 @@ def test_the_derived_fields_are_not_the_reporters_to_set():
         }
     )
     assert serializer.is_valid(), serializer.errors
-    fields = serializer.to_fields(app_name="Segment Archistrator")
+    fields = serializer.to_fields(app_name="Archistrator")
 
     assert fields[airtable.FIELD_STATUS] == airtable.STATUS_NEW
-    assert fields[airtable.FIELD_APP] == "Segment Archistrator"
+    assert fields[airtable.FIELD_APP] == "Archistrator"
     assert fields[airtable.FIELD_TITLE] == "Connectors overlap badly when three"
     assert not fields[airtable.FIELD_SUBMITTED_AT].startswith("1999")
 
@@ -146,3 +146,16 @@ def test_the_single_selects_only_ever_write_a_value_the_base_has():
     values = airtable.fixed_values()
     assert values[airtable.FIELD_STATUS] == airtable.STATUS_NEW
     assert set(values) <= set(airtable.WRITTEN_FIELDS)
+
+
+def test_kind_defaults_to_bug_and_feature_is_recorded():
+    base = {"description": "Something is wrong with the connectors here"}
+    bug = FeedbackSerializer(data=base)
+    assert bug.is_valid(), bug.errors
+    assert bug.to_fields(app_name="X")[airtable.FIELD_TYPE] == airtable.TYPE_BUG
+
+    feature = FeedbackSerializer(data={**base, "kind": "feature"})
+    assert feature.is_valid(), feature.errors
+    assert feature.to_fields(app_name="X")[airtable.FIELD_TYPE] == airtable.TYPE_FEATURE
+
+    assert not FeedbackSerializer(data={**base, "kind": "other"}).is_valid()

@@ -17,6 +17,7 @@ import logging
 import secrets
 from urllib.parse import urlencode
 
+from django.conf import settings
 from django.db import transaction
 from django.http import HttpResponseRedirect
 from django.utils.decorators import method_decorator
@@ -87,6 +88,11 @@ class GoogleStartView(APIView):
                 state=login.state,
                 redirect_to=google.redirect_uri(request),
                 code_challenge=challenge,
+                hosted_domain=(
+                    settings.ALLOWED_EMAIL_DOMAINS[0]
+                    if len(settings.ALLOWED_EMAIL_DOMAINS) == 1
+                    else ""
+                ),
             )
         )
 
@@ -132,6 +138,7 @@ class GoogleCallbackView(APIView):
             email=identity["email"],
             google_sub=identity["sub"],
             email_verified=identity["email_verified"],
+            hosted_domain=identity.get("hd", ""),
         )
         if account is None:
             return _back_to_app(auth_error=refusal)
@@ -243,6 +250,13 @@ class LogoutView(APIView):
 
     def post(self, request):
         outgoing = request.user.session
+        if settings.REQUIRE_ACCOUNT:
+            # A closed app has nowhere to land someone who is signed out: drop the session
+            # and the cookie, and the SPA shows its sign-in screen.
+            outgoing.delete()
+            response = Response(session_payload(None))
+            response.delete_cookie(settings.WORKSPACE_SESSION_COOKIE, path="/")
+            return response
         with transaction.atomic():
             session = WorkspaceSession.start_anonymous()
             outgoing.delete()
@@ -277,6 +291,16 @@ class InvitationView(APIView):
         serializer = CreateInvitationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
+        if not settings.INVITATIONS_ENABLED:
+            return Response(
+                {
+                    "error": {
+                        "code": "invitations_disabled",
+                        "message": "This app is limited to approved company accounts; invitations are turned off.",
+                    }
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         existing = account.invitations_sent.filter(email=email, accepted_at__isnull=True).first()
         invitation = invite(email=email, invited_by=account)

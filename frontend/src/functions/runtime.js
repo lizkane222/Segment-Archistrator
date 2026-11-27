@@ -15,10 +15,12 @@
  * is defence in depth rather than a boundary. What makes the risk acceptable is
  * narrower and more checkable: the runner hands the code *no* network, no DOM, no
  * storage, and a step budget, so the worst a hostile function can do is throw or burn
- * a bounded amount of CPU. Diagrams are scoped per workspace and there is deliberately
- * no sharing primitive (see apps/diagrams/models.py), so this is the user's own code
- * in the user's own tab -- the same trust level as the CSV the Data tab lets them
- * paste.
+ * a bounded amount of CPU.
+ *
+ * That argument only holds for the user's own code, and a diagram can now be shared with a
+ * workspace or arrive as a file, so this runner refuses code nobody here has approved --
+ * see ./trust.js, which is checked before anything is compiled. Within trusted code the
+ * limits above are still only defence in depth.
  *
  * ## The honest gaps
  *
@@ -42,6 +44,7 @@
 
 import { HANDLER_FOR_TYPE, REQUEST_HANDLER, handlerNames } from './defaults.js'
 import { prepare } from './prepare.js'
+import { isCodeTrusted } from './trust.js'
 
 /* How the run ended. The router maps these onto its own statuses; the panel prints them. */
 export const OUTCOME = Object.freeze({
@@ -67,6 +70,8 @@ export const OUTCOME = Object.freeze({
   error: 'error',
   /** It could not be compiled at all, so it was never run. */
   notRunnable: 'not_runnable',
+  /** The code came from somewhere nobody has approved, so it was not compiled. See ./trust.js. */
+  untrusted: 'untrusted',
 })
 
 /*
@@ -483,6 +488,19 @@ export function runFunction({
 } = {}) {
   if (!code || !String(code).trim()) {
     return blank({ error: { name: 'NoCode', message: 'This component carries no code.' } })
+  }
+
+  /* Before anything is compiled, not after: `new Function` on a stranger's text is already the
+     problem. Reported as a value like every other failure here. */
+  if (!isCodeTrusted(code)) {
+    return blank({
+      outcome: OUTCOME.untrusted,
+      error: {
+        name: 'UntrustedCode',
+        message:
+          'This code came from a diagram that is not yours, so it has not been run. Read it, then allow it from the Code tab.',
+      },
+    })
   }
 
   const { prepared, factory, error: compileError } = factoryFor(String(code), kind, probes)

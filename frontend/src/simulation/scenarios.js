@@ -356,7 +356,15 @@ export function combinedFrameAt(runs, tick, { mode = PLAY_MODES.together } = {})
 
     /* index === -1 is a run that has not started yet in sequence mode. frameAtPhase
        returns an empty frame for it, so nothing below needs to know. */
-    const inFlight = new Set(frame.current.map((step) => step.nodeId))
+    /* Not the footnotes. Pass three of the walk gives the components no connector reaches -- profiles,
+       identity rules, Reverse ETL models -- a verdict "one wave past everything", and that wave is the
+       last beat of the run, so every one of them was "where the event is" at the end and glowed as if the
+       path had arrived there. They are explained, not visited: no step leads to them. */
+    const inFlight = new Set(
+      frame.current
+        .filter((step) => step.status === STATUS.origin || step.fromIndex != null || step.fromId != null)
+        .map((step) => step.nodeId),
+    )
     for (const [nodeId, status] of Object.entries(frame.nodeStatus)) {
       ;(nodes[nodeId] ??= []).push({
         scenarioId: scenario.id,
@@ -378,11 +386,17 @@ export function combinedFrameAt(runs, tick, { mode = PLAY_MODES.together } = {})
          * cannot disagree; `visited` stays as the fallback for a caller holding an older trace.
          */
         step: frame.nodeStep?.[nodeId] ?? trace?.visited?.[nodeId] ?? null,
-        arrived: hasArrived(status),
+        /*
+         * Not a component the path was told to step over. `bypassed` counts as arrived in the trace --
+         * the event did pass through it, and the results panel must not call that a fault -- but on the
+         * canvas "arrived" is what draws the glow, and a component left *out* of a path lighting up as
+         * though it were on it says the opposite of what the reader chose.
+         */
+        arrived: hasArrived(status) && status !== STATUS.bypassed,
         /* A set, because a wave can have the event at several components at once -- comparing
            against one "the current step" would light whichever arm of a fork happened to be
            recorded first and leave its sibling looking passed over. */
-        current: inFlight.has(nodeId),
+        current: inFlight.has(nodeId) && status !== STATUS.bypassed,
       })
     }
 

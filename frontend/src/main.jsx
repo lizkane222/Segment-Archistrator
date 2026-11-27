@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client'
 
 import App from './App.jsx'
 import './styles/tokens.css'
+import { applyUiScale } from './ui/uiScale.js'
+
+applyUiScale()
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

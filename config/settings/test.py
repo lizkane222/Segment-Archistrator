@@ -36,6 +36,11 @@ GOOGLE_OAUTH_REDIRECT_URI = ""
 # ALLOWED_EMAIL_DOMAINS cannot quietly admit an address a test expects to be refused.
 ALLOWED_EMAIL_DOMAINS = []
 
+# The closed-app policy has its own tests (tests/test_closed_app.py), which turn it on. The rest
+# of the suite predates it and exercises anonymous sessions.
+REQUIRE_ACCOUNT = False
+INVITATIONS_ENABLED = True
+
 # Silence the request/exception log noise that deliberate 4xx tests produce.
 LOGGING["root"]["level"] = "ERROR"  # noqa: F405
 LOGGING["loggers"]["apps"]["level"] = "ERROR"  # noqa: F405

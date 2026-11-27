@@ -426,6 +426,7 @@ def test_get_session_reports_the_account(account_client, account):
         "email": account.email,
         "name": account.name,
         "avatarUrl": "",
+        "isAdmin": False,
     }
     # Signed in but no workspace: both of these are false at once, which is exactly why
     # `hasSession` had to exist.
@@ -507,7 +508,7 @@ def test_every_session_endpoint_answers_with_the_same_shape(client, anon_client,
     without `hasSession`, which the SPA reads to decide whether to mint. It therefore
     minted again, and the sign-in button vanished because `auth` was missing too.
     """
-    expected = {"hasSession", "account", "workspace", "connected", "anonymous", "auth"}
+    expected = {"hasSession", "account", "workspace", "connected", "anonymous", "auth", "connections"}
 
     assert set(client.get("/api/session").json()) == expected
     assert set(client.post("/api/session/anonymous").json()) == expected

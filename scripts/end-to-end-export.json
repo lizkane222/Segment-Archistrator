@@ -1,41 +1,12 @@
 {
   "format": "segment-builder-diagram",
   "version": 1,
-  "exportedAt": "2026-09-22T23:34:14.340Z",
+  "exportedAt": "2026-11-16T20:45:58.521Z",
   "name": "End-to-end Connections & Unify",
   "description": "The whole pipeline in one diagram: collection upstream of Segment, Connections, Unify and Engage, and a warehouse on each end -- one that Reverse ETL reads from, one that Profiles Sync writes to. Hand-arranged rather than laid out by column, and it uses the optional sub-zones, so it is the one to start from when the point is to show somebody the shape of the whole thing.",
   "sourceTemplate": "end-to-end-full-pipeline",
   "graph": {
     "nodes": [
-      {
-        "id": "ph:profiles-sync",
-        "kind": "profile_sync",
-        "name": "Profiles Sync",
-        "zone": "segment",
-        "bound": false,
-        "style": {
-          "bg": "#ffffff",
-          "text": "#121c2d",
-          "shape": "rounded",
-          "border": "#f75a3b",
-          "borderStyle": "solid",
-          "borderWidth": 1
-        },
-        "docsUrl": "https://www.twilio.com/docs/segment/unify/profiles-sync/overview",
-        "bindable": false,
-        "position": {
-          "x": 1671,
-          "y": 483
-        },
-        "synthetic": false,
-        "showFields": {
-          "description": false
-        },
-        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. On the Segment backdrop in no single product, because it genuinely belongs to two.",
-        "linkVerified": true,
-        "workspaceUrl": null,
-        "collapsed": false
-      },
       {
         "id": "ph:source-web",
         "kind": "source",
@@ -46,6 +17,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -59,7 +31,7 @@
         "showFields": {
           "description": false
         },
-        "description": "Where events come in. The Sources box around it is a drawing choice -- a source on the bare Connections backdrop is filed just as correctly.",
+        "description": "The point where events come into Segment. A source on the bare Connections backdrop is filed just as correctly.",
         "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
@@ -88,7 +60,7 @@
         "showFields": {
           "description": false
         },
-        "description": "The trigger and the field mapping -- the last thing that touches the payload before it becomes this destination's own API call.",
+        "description": "The trigger and the field mapping, the last thing that touches the payload before it becomes this destination's own API call.",
         "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
@@ -103,6 +75,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -116,8 +89,34 @@
         "showFields": {
           "description": false
         },
-        "description": "Where events go out. An actions destination does nothing until a mapping says what to send it.",
+        "description": "The point where events go out from Segment. An actions destination does nothing until a mapping says what to send it.",
         "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:linked-event",
+        "kind": "linked_event",
+        "name": "Linked Event",
+        "zone": "linked_events",
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/data-graph/linked-events",
+        "bindable": false,
+        "position": {
+          "x": 17,
+          "y": 99
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "A warehouse entity joined onto an outbound event, so the destination receives the whole row rather than the id the event carried. Reads from a cache on a schedule, not live.",
+        "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
       },
@@ -148,21 +147,25 @@
             "externalId": "anonymous_id"
           }
         ],
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
         "docsUrl": "https://www.twilio.com/docs/segment/unify/identity-resolution/identity-resolution-settings",
         "bindable": false,
         "position": {
           "x": 413,
-          "y": 74
+          "y": 57
         },
         "synthetic": false,
         "showFields": {
           "description": false
         },
-        "description": "One identity resolution rule -- which identifiers may collapse two events into one profile. Maintained by hand; Segment publishes no API for these.",
+        "description": "One identity resolution rule, which identifiers may collapse two events into one profile. Maintained by hand; Segment publishes no API for these.",
         "linkVerified": true,
         "workspaceUrl": null,
-        "collapsed": false,
-        "style": null
+        "collapsed": false
       },
       {
         "id": "ph:profile-source",
@@ -174,6 +177,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -202,6 +206,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -215,7 +220,7 @@
         "showFields": {
           "description": false
         },
-        "description": "The Segment Profiles destination: how a source's events reach the space. Drawn in Unify rather than Connections because what it does belongs to Unify, which is exactly the placement the canvas advises on rather than refuses.",
+        "description": "The Segment Profiles destination: how a source's events reach a Unify Space.",
         "linkVerified": false,
         "workspaceUrl": null,
         "collapsed": false
@@ -227,6 +232,7 @@
         "zone": "profiles",
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -240,7 +246,7 @@
         "showFields": {
           "description": false
         },
-        "description": "A shape, not a person: identifiers, traits and events per profile. Never a real one, so exporting this diagram cannot put customer data in a slide deck.",
+        "description": "A unified user profile, aggregated from the Unify Space's collective sources to add identifiers, traits and events per profile.",
         "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
@@ -255,6 +261,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -268,7 +275,7 @@
         "showFields": {
           "description": false
         },
-        "description": "Computed from profiles, and what most journeys are keyed on.",
+        "description": "Computed from profiles, and what many journeys are keyed on.",
         "linkVerified": false,
         "workspaceUrl": null,
         "collapsed": false
@@ -280,6 +287,7 @@
         "zone": "engage",
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -308,6 +316,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -321,7 +330,7 @@
         "showFields": {
           "description": false
         },
-        "description": "Configured in Unify, drawn in Engage -- this is where the recomputation is actually felt. Another placement the canvas advises on rather than refuses.",
+        "description": "Configured in Unify & Engaged from Track or Page events.",
         "linkVerified": false,
         "workspaceUrl": null,
         "collapsed": false
@@ -336,6 +345,7 @@
         },
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -349,18 +359,19 @@
         "showFields": {
           "description": false
         },
-        "description": "The source whose events the debugger is showing. Populated by playing a walkthrough, not by binding.",
+        "description": "The source which generates the data from audiences, computed traits, journeys and linked audiences and sends it to their connected destinations. Debugger sources should never be modified by the customer.",
         "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
       },
       {
-        "id": "manual:linked_audience:7a4178d7",
+        "id": "ph:linked-audience",
         "kind": "linked_audience",
         "name": "Linked Audience",
         "zone": "linked_audiences",
         "bound": false,
         "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
@@ -368,104 +379,184 @@
         "bindable": false,
         "position": {
           "x": 26,
-          "y": 82
+          "y": 81
         },
         "synthetic": false,
-        "description": "",
+        "showFields": {
+          "description": false
+        },
+        "description": "Membership decided by walking warehouse entities through a Data Graph, not by matching event history -- so it is recomputed on its own schedule.",
         "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
       },
       {
-        "id": "manual:destination:9fd17656",
+        "id": "ph:engage-destination",
         "kind": "destination",
+        "name": "Destination",
         "zone": "destinations~2",
-        "name": "Destination",
-        "description": "",
-        "bound": false,
-        "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
+        "binds": {
+          "kind": "destination"
         },
-        "collapsed": false,
-        "position": {
-          "x": 38,
-          "y": 79
-        }
-      },
-      {
-        "id": "manual:reverse_etl_model:842013e2",
-        "kind": "reverse_etl_model",
-        "zone": "warehouses~2",
-        "name": "Reverse ETL Model",
-        "description": "",
         "bound": false,
         "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
-        },
-        "collapsed": false,
-        "position": {
-          "x": 16,
-          "y": 65
-        }
-      },
-      {
-        "id": "manual:warehouse:62748910",
-        "kind": "warehouse",
-        "zone": "warehouses",
-        "name": "Warehouse",
-        "description": "",
-        "bound": false,
-        "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
-        },
-        "collapsed": false,
-        "position": {
-          "x": 37,
-          "y": 84
-        }
-      },
-      {
-        "id": "manual:warehouse:89e8083c",
-        "kind": "warehouse",
-        "zone": "warehouses~3",
-        "name": "Warehouse",
-        "description": "",
-        "bound": false,
-        "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
-        },
-        "collapsed": false,
-        "position": {
-          "x": 33,
-          "y": 68
-        }
-      },
-      {
-        "id": "manual:destination:10d140e1",
-        "kind": "destination",
-        "name": "Destination",
-        "zone": "custom:zone:a31670c9",
-        "bound": false,
-        "style": {
+          "shape": "rounded",
           "borderStyle": "solid",
           "borderWidth": 1
         },
         "docsUrl": "https://www.twilio.com/docs/segment/connections/destinations/catalog",
+        "bindable": true,
+        "position": {
+          "x": 48,
+          "y": 81
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Where an audience is activated. Connected directly to the audience or computed trait, with its own mapping; the source behind it is abstracted and never configured.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:profiles-sync",
+        "kind": "profile_sync",
+        "name": "Profiles Sync",
+        "zone": "warehouses~2",
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/profiles-sync/overview",
         "bindable": false,
+        "position": {
+          "x": 1643,
+          "y": 57
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "Takes profiles and traits from Unify and audience membership from Engage and lands both in one warehouse. Drawn in the warehouse it writes to, which is the half of its job a diagram can show.",
+        "linkVerified": true,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:reverse-etl-model",
+        "kind": "reverse_etl_model",
+        "name": "Reverse ETL Model",
+        "zone": "warehouses~2",
+        "binds": {
+          "kind": "reverse_etl_model"
+        },
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/reverse-etl/setup",
+        "bindable": true,
+        "position": {
+          "x": 16,
+          "y": 57
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "A query against the customer's own warehouse, on a schedule. The way data that was never an event gets into Segment.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:warehouse-upstream",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "zone": "warehouses",
+        "binds": {
+          "kind": "warehouse"
+        },
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/storage",
+        "bindable": true,
+        "position": {
+          "x": 37,
+          "y": 64
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "A warehouse the customer already had. Reverse ETL reads from it; Segment does not own it.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:warehouse-sync-target",
+        "kind": "warehouse",
+        "name": "Warehouse",
+        "zone": "warehouses~3",
+        "binds": {
+          "kind": "warehouse"
+        },
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/storage",
+        "bindable": true,
+        "position": {
+          "x": 33,
+          "y": 64
+        },
+        "synthetic": false,
+        "showFields": {
+          "description": false
+        },
+        "description": "The warehouse Profiles Sync writes into, and Linked Audiences reads back from.",
+        "linkVerified": false,
+        "workspaceUrl": null,
+        "collapsed": false
+      },
+      {
+        "id": "ph:downstream-destination",
+        "kind": "destination",
+        "name": "Destination",
+        "zone": "custom:zone:a31670c9",
+        "binds": {
+          "kind": "destination"
+        },
+        "bound": false,
+        "style": {
+          "shape": "rounded",
+          "borderStyle": "solid",
+          "borderWidth": 1
+        },
+        "docsUrl": "https://www.twilio.com/docs/segment/connections/destinations/catalog",
+        "bindable": true,
         "position": {
           "x": 36,
           "y": 71
         },
         "synthetic": false,
-        "description": "",
+        "showFields": {
+          "description": false
+        },
+        "description": "A destination outside Segment: the tool that finally receives the event.",
         "linkVerified": false,
         "workspaceUrl": null,
         "collapsed": false
@@ -491,101 +582,165 @@
         "showFields": {
           "description": false
         },
-        "description": "Whatever the customer runs that Segment does not -- their own service, a job, a queue. Deliberately rule-free: it has no zone of its own and no adjacency table, because Segment's rules have nothing to say about it.",
+        "description": "Whatever the customer runs that Segment does not -- their own service, a job, a queue.",
         "linkVerified": true,
         "workspaceUrl": null,
         "collapsed": false
-      },
-      {
-        "id": "manual:custom:925c8cad",
-        "kind": "custom",
-        "zone": "linked_audiences~2",
-        "name": "Linked Event",
-        "description": "",
-        "bound": true,
-        "style": {
-          "borderStyle": "solid",
-          "borderWidth": 1,
-          "shape": "rounded"
-        },
-        "bindable": false,
-        "details": [],
-        "collapsed": false,
-        "showFields": {
-          "type": false
-        },
-        "segmentName": "Custom component",
-        "position": {
-          "x": 17,
-          "y": 99
-        }
       }
     ],
     "edges": [
       {
-        "id": "xy-edge__ph:journeye-ph:debugger-sourcew",
+        "id": "ph:journey->ph:debugger-source",
         "source": "ph:journey",
         "target": "ph:debugger-source",
-        "sourceHandle": "n",
+        "sourceHandle": "e",
         "targetHandle": "w",
+        "sourceAnchor": "free:right:0.58",
         "targetAnchor": "free:left:0.60",
+        "waypoints": [
+          {
+            "x": 1206,
+            "y": 1028
+          },
+          {
+            "x": 1206,
+            "y": 782
+          },
+          {
+            "x": 1228,
+            "y": 782
+          }
+        ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:computed-traite-ph:debugger-sourcew",
+        "id": "ph:computed-trait->ph:debugger-source",
         "source": "ph:computed-trait",
         "target": "ph:debugger-source",
         "sourceHandle": "e",
         "targetHandle": "w",
         "targetAnchor": "free:left:0.60",
+        "waypoints": [
+          {
+            "x": 1165,
+            "y": 991
+          },
+          {
+            "x": 1205,
+            "y": 991
+          },
+          {
+            "x": 1205,
+            "y": 782
+          },
+          {
+            "x": 1228,
+            "y": 782
+          }
+        ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:audiencee-ph:debugger-sourcew",
+        "id": "ph:audience->ph:debugger-source",
         "source": "ph:audience",
         "target": "ph:debugger-source",
         "sourceHandle": "e",
         "targetHandle": "w",
         "targetAnchor": "free:left:0.61",
+        "waypoints": [
+          {
+            "x": 1165,
+            "y": 901
+          },
+          {
+            "x": 1206,
+            "y": 901
+          },
+          {
+            "x": 1206,
+            "y": 783
+          },
+          {
+            "x": 1228,
+            "y": 783
+          }
+        ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:profilee-ph:journeyw",
+        "id": "ph:profile->ph:journey",
         "source": "ph:profile",
         "target": "ph:journey",
         "sourceHandle": "e",
         "targetHandle": "w",
+        "sourceAnchor": "free:right:0.62",
         "targetAnchor": "free:left:0.55",
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:profilee-ph:computed-traitw",
+        "id": "ph:profile->ph:computed-trait",
         "source": "ph:profile",
         "target": "ph:computed-trait",
         "sourceHandle": "e",
         "targetHandle": "w",
         "sourceAnchor": "free:right:0.53",
         "targetAnchor": "free:left:0.41",
+        "waypoints": [
+          {
+            "x": 772,
+            "y": 1065
+          },
+          {
+            "x": 859,
+            "y": 1065
+          },
+          {
+            "x": 859,
+            "y": 986
+          },
+          {
+            "x": 922,
+            "y": 986
+          }
+        ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:profilee-ph:audiencew",
+        "id": "ph:profile->ph:audience",
         "source": "ph:profile",
         "target": "ph:audience",
         "sourceHandle": "e",
         "targetHandle": "w",
         "sourceAnchor": "free:right:0.42",
         "targetAnchor": "free:left:0.50",
+        "waypoints": [
+          {
+            "x": 772,
+            "y": 1057
+          },
+          {
+            "x": 847,
+            "y": 1057
+          },
+          {
+            "x": 847,
+            "y": 901
+          },
+          {
+            "x": 922,
+            "y": 901
+          }
+        ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:profile-sourcee-ph:profilew",
+        "id": "ph:profile-source->ph:profile",
         "source": "ph:profile-source",
         "target": "ph:profile",
         "sourceHandle": "e",
@@ -595,7 +750,7 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:custom-appe-ph:source-webw",
+        "id": "ph:custom-app->ph:source-web",
         "source": "ph:custom-app",
         "target": "ph:source-web",
         "sourceHandle": "e",
@@ -605,7 +760,7 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:source-webe-ph:destinationw",
+        "id": "ph:source-web->ph:destination",
         "source": "ph:source-web",
         "target": "ph:destination",
         "sourceHandle": "e",
@@ -615,7 +770,7 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:destinatione-ph:mappingw",
+        "id": "ph:destination->ph:mapping",
         "source": "ph:destination",
         "target": "ph:mapping",
         "sourceHandle": "e",
@@ -625,7 +780,7 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:segment-profilese-ph:profilew",
+        "id": "ph:segment-profiles->ph:profile",
         "source": "ph:segment-profiles",
         "target": "ph:profile",
         "sourceHandle": "e",
@@ -635,58 +790,85 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:debugger-sourcee-ph:profiles-syncw",
+        "id": "ph:debugger-source->ph:profiles-sync",
         "source": "ph:debugger-source",
         "target": "ph:profiles-sync",
         "sourceHandle": "e",
         "targetHandle": "w",
-        "sourceAnchor": "free:right:0.53",
+        "sourceAnchor": "free:right:0.30",
         "targetAnchor": "free:left:0.52",
-        "phase": null,
-        "discovered": false
-      },
-      {
-        "id": "xy-edge__ph:source-webs-ph:profile-sourcen",
-        "source": "ph:source-web",
-        "target": "ph:profile-source",
-        "sourceHandle": "s",
-        "targetHandle": "n",
-        "targetAnchor": "free:top:0.48",
         "waypoints": [
           {
-            "x": 211,
-            "y": 244
+            "x": 1468,
+            "y": 764
           },
           {
-            "x": 268,
-            "y": 244
+            "x": 1500,
+            "y": 764
           },
           {
-            "x": 268,
-            "y": 666
+            "x": 1500,
+            "y": 529
           },
           {
-            "x": 204,
-            "y": 666
+            "x": 1672,
+            "y": 529
           }
         ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__manual:linked_audience:7a4178d7e-ph:debugger-sourcew",
-        "source": "manual:linked_audience:7a4178d7",
+        "id": "ph:source-web->ph:profile-source",
+        "source": "ph:source-web",
+        "target": "ph:profile-source",
+        "sourceHandle": "s",
+        "targetHandle": "w",
+        "targetAnchor": "free:left:0.39",
+        "waypoints": [
+          {
+            "x": 197,
+            "y": 256
+          },
+          {
+            "x": 282,
+            "y": 256
+          },
+          {
+            "x": 282,
+            "y": 604
+          },
+          {
+            "x": 38,
+            "y": 604
+          },
+          {
+            "x": 38,
+            "y": 891
+          },
+          {
+            "x": 92,
+            "y": 891
+          }
+        ],
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "ph:linked-audience->ph:debugger-source",
+        "source": "ph:linked-audience",
         "target": "ph:debugger-source",
         "sourceHandle": "e",
         "targetHandle": "w",
+        "sourceAnchor": "free:right:0.49",
         "targetAnchor": "free:left:0.49",
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:mappinge-manual:destination:10d140e1w",
+        "id": "ph:mapping->ph:downstream-destination",
         "source": "ph:mapping",
-        "target": "manual:destination:10d140e1",
+        "target": "ph:downstream-destination",
         "sourceHandle": "e",
         "targetHandle": "w",
         "targetAnchor": "free:left:0.54",
@@ -694,9 +876,9 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:profiles-synce-manual:warehouse:89e8083cw",
+        "id": "ph:profiles-sync->ph:warehouse-sync-target",
         "source": "ph:profiles-sync",
-        "target": "manual:warehouse:89e8083c",
+        "target": "ph:warehouse-sync-target",
         "sourceHandle": "e",
         "targetHandle": "w",
         "targetAnchor": "free:left:0.44",
@@ -704,8 +886,8 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__manual:reverse_etl_model:842013e2s-ph:segment-profilesw",
-        "source": "manual:reverse_etl_model:842013e2",
+        "id": "ph:reverse-etl-model->ph:segment-profiles",
+        "source": "ph:reverse-etl-model",
         "target": "ph:segment-profiles",
         "sourceHandle": "s",
         "targetHandle": "w",
@@ -713,31 +895,56 @@
         "waypoints": [
           {
             "x": 165,
-            "y": 871
+            "y": 589
           },
           {
-            "x": 113,
-            "y": 871
+            "x": 33,
+            "y": 589
+          },
+          {
+            "x": 33,
+            "y": 1044
+          },
+          {
+            "x": 92,
+            "y": 1044
           }
         ],
-        "routed": "auto",
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__manual:warehouse:62748910e-manual:reverse_etl_model:842013e2w",
-        "source": "manual:warehouse:62748910",
-        "target": "manual:reverse_etl_model:842013e2",
+        "id": "ph:warehouse-upstream->ph:reverse-etl-model",
+        "source": "ph:warehouse-upstream",
+        "target": "ph:reverse-etl-model",
         "sourceHandle": "e",
         "targetHandle": "w",
         "targetAnchor": "free:left:0.59",
+        "waypoints": [
+          {
+            "x": -18,
+            "y": 528
+          },
+          {
+            "x": 13,
+            "y": 528
+          },
+          {
+            "x": 13,
+            "y": 534
+          },
+          {
+            "x": 45,
+            "y": 534
+          }
+        ],
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__manual:warehouse:89e8083cn-manual:warehouse:62748910n",
-        "source": "manual:warehouse:89e8083c",
-        "target": "manual:warehouse:62748910",
+        "id": "ph:warehouse-sync-target->ph:warehouse-upstream",
+        "source": "ph:warehouse-sync-target",
+        "target": "ph:warehouse-upstream",
         "sourceHandle": "n",
         "targetHandle": "n",
         "sourceAnchor": "free:top:0.92",
@@ -746,33 +953,69 @@
         "discovered": false
       },
       {
-        "id": "xy-edge__zone-debuggerw-zone-profiless",
-        "source": "zone-debugger",
-        "target": "zone-profiles",
-        "sourceHandle": "w",
+        "id": "ph:debugger-source->ph:profile",
+        "source": "ph:debugger-source",
+        "target": "ph:profile",
+        "sourceHandle": "s",
         "targetHandle": "s",
-        "targetAnchor": "free:bottom:0.51",
-        "waypoints": [
-          {
-            "x": 1154,
-            "y": 889
-          },
-          {
-            "x": 1154,
-            "y": 1214
-          }
-        ],
-        "routed": "auto",
+        "strokeStyle": "dashed",
         "phase": null,
         "discovered": false
       },
       {
-        "id": "xy-edge__ph:debugger-sourcee-manual:destination:9fd17656w",
+        "id": "ph:debugger-source->ph:engage-destination",
         "source": "ph:debugger-source",
-        "target": "manual:destination:9fd17656",
+        "target": "ph:engage-destination",
+        "sourceHandle": "e",
+        "targetHandle": "w",
+        "sourceAnchor": "free:right:0.45",
+        "targetAnchor": "free:left:0.46",
+        "waypoints": [
+          {
+            "x": 1468,
+            "y": 773
+          },
+          {
+            "x": 1501,
+            "y": 773
+          },
+          {
+            "x": 1534,
+            "y": 773
+          },
+          {
+            "x": 1534,
+            "y": 774
+          }
+        ],
+        "phase": null,
+        "discovered": false
+      },
+      {
+        "id": "xy-edge__ph:reverse-etl-modele-ph:linked-audiencew",
+        "source": "ph:reverse-etl-model",
+        "target": "ph:linked-audience",
         "sourceHandle": "e",
         "targetHandle": "w",
         "targetAnchor": "free:left:0.46",
+        "waypoints": [
+          {
+            "x": 288,
+            "y": 536
+          },
+          {
+            "x": 892,
+            "y": 536
+          },
+          {
+            "x": 892,
+            "y": 774
+          },
+          {
+            "x": 929,
+            "y": 774
+          }
+        ],
         "phase": null,
         "discovered": false
       }
@@ -812,7 +1055,6 @@
         "order": 1,
         "docsUrl": null,
         "description": "Where data comes in, when the diagram wants them boxed off.",
-        "color": "#0263e0",
         "parent": "connections",
         "position": {
           "x": 27,
@@ -827,7 +1069,6 @@
         "order": 2,
         "docsUrl": null,
         "description": "Where data goes out, when the diagram wants them boxed off.",
-        "color": "#0263e0",
         "parent": "connections",
         "position": {
           "x": 1278,
@@ -837,12 +1078,11 @@
         "height": 265
       },
       {
-        "order": 2,
-        "id": "linked_audiences~2",
+        "id": "linked_events",
         "label": "Linked Events",
-        "description": "Audiences built by traversing warehouse entities, not event history.",
-        "docsUrl": null,
-        "color": "#e67e22",
+        "order": 4,
+        "docsUrl": "https://www.twilio.com/docs/segment/unify/data-graph/linked-events",
+        "description": "Warehouse entities joined onto a live event on its way out, so a destination sees more than the event carried.",
         "parent": "connections",
         "position": {
           "x": 843,
@@ -871,14 +1111,13 @@
         "order": 0,
         "docsUrl": null,
         "description": "The sources feeding profiles, and how identities are resolved.",
-        "color": "#6f42c1",
         "parent": "unify",
         "position": {
           "x": 33,
-          "y": 74
+          "y": 57
         },
         "width": 342,
-        "height": 541
+        "height": 562
       },
       {
         "id": "profiles",
@@ -886,13 +1125,12 @@
         "order": 1,
         "docsUrl": null,
         "description": "Identifiers, traits, and events per profile.",
-        "color": "#6f42c1",
         "parent": "unify",
         "position": {
           "x": 403,
-          "y": 287
+          "y": 301
         },
-        "width": 409,
+        "width": 382,
         "height": 321
       },
       {
@@ -915,22 +1153,21 @@
         "order": 1,
         "docsUrl": null,
         "description": "Events as they arrive. Populated by a walkthrough.",
-        "color": "#db131a",
         "parent": "engage",
         "position": {
           "x": 315,
-          "y": 61
+          "y": 53
         },
         "width": 280,
-        "height": 436
+        "height": 556
       },
       {
         "id": "linked_audiences",
+        "color": "#e67e22",
         "label": "Linked Audiences",
         "order": 2,
         "docsUrl": null,
         "description": "Audiences built by traversing warehouse entities, not event history.",
-        "color": "#e67e22",
         "parent": "engage",
         "position": {
           "x": 24,
@@ -940,27 +1177,27 @@
         "height": 174
       },
       {
-        "order": 2,
         "id": "destinations~2",
-        "label": "Destinations (2)",
-        "description": "Where data goes out, when the diagram wants them boxed off.",
-        "docsUrl": null,
         "color": "#db131a",
+        "label": "Destinations (2)",
+        "order": 2,
+        "docsUrl": null,
+        "description": "Where data goes out, when the diagram wants them boxed off.",
         "parent": "engage",
         "position": {
           "x": 607,
-          "y": 60
+          "y": 53
         },
         "width": 280,
         "height": 558
       },
       {
-        "order": 3,
         "id": "warehouses~2",
-        "label": "Warehouse",
-        "description": "The warehouses Segment loads into, and the models read back out.",
-        "docsUrl": null,
         "color": "#e67e22",
+        "label": "Warehouse",
+        "order": 3,
+        "docsUrl": null,
+        "description": "The warehouses Segment loads into, and the models read back out.",
         "parent": "segment",
         "position": {
           "x": 26,
@@ -970,12 +1207,12 @@
         "height": 157
       },
       {
-        "order": 3,
         "id": "warehouses",
-        "label": "Warehouse",
-        "description": "The warehouses Segment loads into, and the models read back out.",
-        "docsUrl": null,
         "color": "#e67e22",
+        "label": "Warehouse",
+        "order": 3,
+        "docsUrl": null,
+        "description": "The warehouses Segment loads into, and the models read back out.",
         "position": {
           "x": -278,
           "y": 434
@@ -984,12 +1221,12 @@
         "height": 176
       },
       {
-        "order": 3,
         "id": "warehouses~3",
-        "label": "Warehouse (3)",
-        "description": "The warehouses Segment loads into, and the models read back out.",
-        "docsUrl": null,
         "color": "#e67e22",
+        "label": "Warehouse (3)",
+        "order": 3,
+        "docsUrl": null,
+        "description": "The warehouses Segment loads into, and the models read back out.",
         "position": {
           "x": 2080,
           "y": 434
@@ -1000,7 +1237,7 @@
       {
         "id": "custom:zone:a31670c9",
         "label": "Destinations",
-        "order": 14,
+        "order": 20,
         "custom": true,
         "docsUrl": null,
         "description": "Outside Segment",
@@ -1014,7 +1251,7 @@
       {
         "id": "custom:upstream",
         "label": "App / Mobile / Server / Warehouse",
-        "order": 15,
+        "order": 21,
         "custom": true,
         "docsUrl": null,
         "description": "Outside Segment",
@@ -1062,12 +1299,48 @@
         "fallback": {},
         "sourceId": "ph:source-web",
         "functionBehaviour": {}
+      },
+      {
+        "id": "path:3fcc2e8c",
+        "name": "Path 2",
+        "color": "#6f42c1",
+        "sourceId": "ph:custom-app",
+        "event": {
+          "type": "track",
+          "event": "Order Completed",
+          "userId": "user_1234",
+          "properties": {
+            "order_id": "ord_9876",
+            "revenue": 42.5,
+            "currency": "USD",
+            "quantity": 2
+          },
+          "anonymousId": "anon_abcdef123456",
+          "timestamp": "2026-01-15T10:30:00.000Z",
+          "context": {
+            "ip": "198.51.100.24",
+            "locale": "en-US",
+            "page": {
+              "path": "/pricing",
+              "referrer": "https://www.google.com",
+              "title": "Pricing",
+              "url": "https://example.com/pricing"
+            },
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+          }
+        },
+        "functionBehaviour": {},
+        "disabled": [],
+        "excluded": [],
+        "branches": {},
+        "revisit": [],
+        "fallback": {}
       }
     ],
     "viewport": {
-      "x": 203,
-      "y": 50,
-      "zoom": 0.677
+      "x": 401,
+      "y": 101,
+      "zoom": 0.768
     }
   }
 }

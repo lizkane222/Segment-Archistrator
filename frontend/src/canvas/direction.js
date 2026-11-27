@@ -63,7 +63,7 @@
  * report is one code path and one undo entry.
  */
 
-import { LEGACY_SOURCE, LEGACY_TARGET, SIDES, parseFreeHandle } from './handles.js'
+import { LEGACY_SOURCE, LEGACY_TARGET, SIDES, parseFreeHandle, parseTableHandle } from './handles.js'
 
 /** Side id (`'e'`) to the label a free anchor and `Position` both use (`'right'`). */
 const LABEL_BY_ID = new Map(SIDES.map((side) => [side.id, side.label]))
@@ -144,7 +144,8 @@ export function sideOf(edge, nodeId) {
   const handle = isSource ? edge.sourceHandle : edge.targetHandle
   const fallback = isSource ? LEGACY_SOURCE : LEGACY_TARGET
   const free = parseFreeHandle(handle)
-  const side = free ? free.side : (LABEL_BY_ID.get(handle) ?? LABEL_BY_ID.get(fallback))
+  const table = parseTableHandle(handle)
+  const side = table ? table.side : free ? free.side : (LABEL_BY_ID.get(handle) ?? LABEL_BY_ID.get(fallback))
 
   return { side, flow: isSource ? 'out' : 'in', edgeId: edge.id }
 }

@@ -28,6 +28,8 @@ class FeedbackSerializer(serializers.Serializer):
         max_length=10_000,
         help_text="What went wrong.",
     )
+    # Optional so older clients keep working; absent means a bug, which is what the form was for.
+    kind = serializers.ChoiceField(choices=["bug", "feature"], required=False, default="bug")
     proposed_fix = serializers.CharField(
         required=False, allow_blank=True, trim_whitespace=True, max_length=10_000
     )
@@ -64,6 +66,9 @@ class FeedbackSerializer(serializers.Serializer):
                 # the base's own timezone, so omitting the offset would silently shift every record by
                 # however many hours the base is configured for.
                 datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            ),
+            airtable.FIELD_TYPE: (
+                airtable.TYPE_FEATURE if data["kind"] == "feature" else airtable.TYPE_BUG
             ),
             airtable.FIELD_STATUS: airtable.STATUS_NEW,
             airtable.FIELD_APP: app_name,

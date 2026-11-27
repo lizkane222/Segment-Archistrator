@@ -22,6 +22,7 @@ import { useEffect, useMemo, useReducer, useState } from 'react'
 
 import EventsTab from './EventsTab.jsx'
 import ShapesTab from './ShapesTab.jsx'
+import { ConvertContext, GLOW_CLASS, GLOW_PENDING_CLASS, useConvert } from './convertContext.js'
 import {
   Box,
   Boxes,
@@ -39,7 +40,7 @@ import {
 
 import { catalog as catalogApi } from '../services/api.js'
 import { DRAG_MIME } from '../canvas/Canvas.jsx'
-import { groupSections } from '../canvas/grouping.js'
+import { groupTree } from '../canvas/grouping.js'
 import { boundSegmentIds } from '../binding/bindMatch.js'
 import { KIND_STYLES, iconFor, zoneStyleFor } from '../canvas/kinds.js'
 import {
@@ -49,6 +50,7 @@ import {
   TABS,
   activeFilterCount,
   applyWorkspaceFilters,
+  relatedNodeIds,
   catalogQuery,
   filtersReducer,
   initialFilters,
@@ -75,15 +77,54 @@ export default function Palette({
   workspaceStatus = 'idle',
   workspaceError = null,
   onRetryWorkspace,
-  onVisualizeAll,
+  /* Builds a diagram from the workspace components ticked in the Workspace tab: `(nodes) => void`. */
+  onBuildSelected,
+  /* Bumped by the shell to bring the Workspace tab forward (e.g. from "Visualize the workspace"). */
+  workspaceSignal = 0,
   onConnect,
+  /* Just connected: the Workspace tab glows until it is clicked, to say where binding starts. */
+  guideWorkspaceTab = false,
+  onGuideDone,
   onStartSimulation,
+  /* Graph ids of the workspace components selected on the canvas, for "connected to selection". */
+  selectedIds = [],
+  /* While a component is being converted: `{ name, pending, onPick, onConfirm, onCancel }`. */
+  convert = null,
 }) {
   const [filters, dispatch] = useReducer(filtersReducer, initialFilters)
   const activeCount = activeFilterCount(filters)
+  const converting = Boolean(convert)
+  /* Workspace components ticked for "Build diagram": by graph id, kept here because the footer button
+     and the list both need it. */
+  const [picked, setPicked] = useState(() => new Set())
+  const togglePicked = (ids, on) =>
+    setPicked((current) => {
+      const next = new Set(current)
+      for (const id of ids) {
+        if (on) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
+
+  useEffect(() => {
+    if (workspaceSignal) dispatch({ type: 'setTab', tab: TABS.workspace })
+  }, [workspaceSignal])
+
+  /* Conversion picks from Segment components and Shapes, which both live under Components. */
+  useEffect(() => {
+    if (converting) dispatch({ type: 'setTab', tab: TABS.components })
+  }, [converting])
+
+  const convertValue = useMemo(
+    () => (convert ? { onPick: convert.onPick, pending: convert.pending } : null),
+    [convert],
+  )
 
   return (
+    <ConvertContext.Provider value={convertValue}>
     <div className="flex h-full flex-col">
+      {convert && <ConvertBar convert={convert} />}
       <div className="shrink-0 border-b border-twilio-gray-20 px-3 pt-3">
         {/* Four uppercase labels do not fit the 320px sidebar, so the strip
             scrolls rather than clipping the last tab mid-word. */}
@@ -99,8 +140,18 @@ export default function Palette({
               type="button"
               role="tab"
               aria-selected={filters.tab === tab}
-              onClick={() => dispatch({ type: 'setTab', tab })}
+              onClick={() => {
+                dispatch({ type: 'setTab', tab })
+                if (tab === TABS.workspace) onGuideDone?.()
+              }}
+              title={
+                tab === TABS.workspace && guideWorkspaceTab
+                  ? 'Open this, click a component on the canvas, then pick the workspace resources to bind it to.'
+                  : undefined
+              }
               className={`shrink-0 whitespace-nowrap rounded-t-md px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide transition-colors ${
+                tab === TABS.workspace && guideWorkspaceTab ? 'guide-glow ' : ''
+              }${
                 filters.tab === tab
                   ? 'bg-twilio-gray-10 text-twilio-navy'
                   : 'text-twilio-gray-60 hover:text-twilio-navy'
@@ -151,7 +202,10 @@ export default function Palette({
             error={workspaceError}
             onRetry={onRetryWorkspace}
             workspaceReason={workspaceReason}
+            selectedIds={selectedIds}
             onConnect={onConnect}
+            picked={picked}
+            onPick={togglePicked}
             filters={filters}
             dispatch={dispatch}
           />
@@ -165,17 +219,53 @@ export default function Palette({
         <div className="shrink-0 border-t border-twilio-gray-20 p-3">
           <button
             type="button"
-            onClick={onVisualizeAll}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-twilio-blue px-3 py-2 text-xs font-medium text-white hover:bg-twilio-blue-dark"
+            disabled={picked.size === 0}
+            onClick={() => {
+              onBuildSelected?.((graph.nodes ?? []).filter((node) => picked.has(node.id)))
+              setPicked(new Set())
+            }}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-twilio-blue px-3 py-2 text-xs font-medium text-white hover:bg-twilio-blue-dark disabled:opacity-50"
           >
             <LayoutGrid size={13} aria-hidden="true" />
-            Visualize all
+            Build diagram from {picked.size} selected
           </button>
           <p className="mt-1.5 text-center text-[10px] text-twilio-gray-60">
-            Opens all {graph.nodes?.length ?? 0} components in a new tab.
+            Each component is placed in its own zone, in a new tab.
           </p>
         </div>
       )}
+    </div>
+    </ConvertContext.Provider>
+  )
+}
+
+/* The confirmation step: nothing is final until Confirm, so the reader can click through options. */
+function ConvertBar({ convert }) {
+  return (
+    <div className="shrink-0 space-y-2 border-b border-twilio-blue bg-twilio-blue-light px-3 py-2.5 text-[11px] text-twilio-navy">
+      <p className="font-semibold">Converting “{convert.name}”</p>
+      <p className="text-twilio-gray-60">
+        {convert.pending
+          ? `Previewing ${convert.pending}. Pick another to compare, or confirm.`
+          : 'Click a glowing component or shape to preview it on the canvas.'}
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={convert.onConfirm}
+          disabled={!convert.pending}
+          className="rounded bg-twilio-blue px-2.5 py-1 font-medium text-white hover:bg-twilio-blue-dark disabled:opacity-40"
+        >
+          Confirm
+        </button>
+        <button
+          type="button"
+          onClick={convert.onCancel}
+          className="rounded border border-twilio-gray-20 bg-white px-2.5 py-1 text-twilio-gray-60 hover:text-twilio-navy"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   )
 }
@@ -464,7 +554,10 @@ function WorkspaceTab({
   error,
   onRetry,
   workspaceReason,
+  selectedIds = [],
   onConnect,
+  picked,
+  onPick,
   filters,
   dispatch,
 }) {
@@ -508,12 +601,40 @@ function WorkspaceTab({
     )
   }
 
-  const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters)
+  const selectedNodes = (graph.nodes ?? []).filter((node) => selectedIds.includes(node.id))
+  const following = filters.followSelection && selectedNodes.length > 0
+  const related = following ? relatedNodeIds(graph.edges, selectedIds) : null
+  const nodes = applyWorkspaceFilters(graph.nodes ?? [], filters, topology, related)
   const onCanvas = boundSegmentIds(diagram?.nodes)
   const spaces = (graph.nodes ?? []).filter((node) => node.kind === 'space')
 
   return (
     <div className="space-y-3">
+      {selectedNodes.length > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-twilio-blue/30 bg-twilio-blue/5 px-2 py-1.5 text-[11px] text-twilio-navy">
+          <p className="min-w-0 flex-1">
+            {following ? 'Showing what is connected to ' : 'Connected components hidden for '}
+            <strong className="font-semibold">
+              {selectedNodes.length === 1 ? selectedNodes[0].name : `${selectedNodes.length} selected components`}
+            </strong>
+            {following && related.size === 0 && (
+              <span className="text-twilio-gray-60">
+                {' '}— the Public API reports no connections for {selectedNodes.length === 1 ? 'it' : 'them'}.
+                {selectedNodes.some((node) => node.kind === 'audience') &&
+                  ' It does not list an audience’s destinations; an audience relates to its space.'}
+              </span>
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'setFollowSelection', follow: !filters.followSelection })}
+            className="shrink-0 rounded border border-twilio-gray-20 bg-white px-1.5 py-0.5 text-[10px] text-twilio-gray-60 hover:text-twilio-navy"
+          >
+            {following ? 'Show all' : 'Show connected'}
+          </button>
+        </div>
+      )}
+
       <FacetChips
         label="Pipeline"
         options={(topology?.zones ?? []).map((zone) => zone.id)}
@@ -542,24 +663,44 @@ function WorkspaceTab({
         />
       )}
 
-      <p className="text-[11px] text-twilio-gray-60">
-        {nodes.length} of {graph.nodes?.length ?? 0} components
-      </p>
+      <div className="flex items-center justify-between gap-2 text-[11px] text-twilio-gray-60">
+        <span>
+          {nodes.length} of {graph.nodes?.length ?? 0} components
+        </span>
+        <span className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onPick(nodes.map((node) => node.id), true)}
+            className="hover:text-twilio-navy hover:underline"
+          >
+            Select shown
+          </button>
+          <button
+            type="button"
+            onClick={() => onPick([...picked], false)}
+            disabled={picked.size === 0}
+            className="hover:text-twilio-navy hover:underline disabled:opacity-40"
+          >
+            Clear
+          </button>
+        </span>
+      </div>
 
       <Hint>
-        Drag a component onto a card of the same kind to bind it, or onto empty canvas to add it.
+        Tick the components you want, then build a diagram from them. Or drag one onto a card of the
+        same kind to bind it, or onto empty canvas to add it.
       </Hint>
 
-      <WorkspaceSections nodes={nodes} topology={topology} onCanvas={onCanvas} />
+      <WorkspaceSections
+        nodes={nodes}
+        topology={topology}
+        onCanvas={onCanvas}
+        picked={picked}
+        onPick={onPick}
+      />
     </div>
   )
 }
-
-/* Above this many components, the sections arrive folded.
-   Below it, folding costs a click and saves no scrolling: a dozen sources fit in the
-   sidebar with every header open, and closing them would hide the tab's contents to
-   solve a problem that tab does not have. */
-const FOLD_ABOVE = 20
 
 /*
  * The workspace list, ordered by type with a header per type -- the same grouping the
@@ -569,16 +710,13 @@ const FOLD_ABOVE = 20
  * Its own component because WorkspaceTab returns early for a missing token, and a hook
  * behind an early return is a hook that is sometimes called.
  */
-function WorkspaceSections({ nodes, topology, onCanvas }) {
-  const sections = useMemo(() => groupSections(nodes, topology), [nodes, topology])
+function WorkspaceSections({ nodes, topology, onCanvas, picked, onPick }) {
+  const tree = useMemo(() => groupTree(nodes, topology), [nodes, topology])
   const [closed, setClosed] = useState(null)
 
-  /* Which sections are shut is the reader's, once they have touched one -- so the
-     length-based default only applies until then, and does not reassert itself when a
-     filter change makes the list short again. */
-  const folded =
-    closed ??
-    new Set(nodes.length > FOLD_ABOVE ? sections.map((section) => section.key) : [])
+  /* Everything arrives folded, so the tab opens as a short list of type headers with their counts
+     rather than hundreds of rows. Which are open is the reader's from the first click. */
+  const folded = closed ?? new Set(tree.flatMap((entry) => [entry.key, ...entry.subs.map((sub) => sub.key)]))
 
   const toggle = (key) => {
     const next = new Set(folded)
@@ -587,48 +725,74 @@ function WorkspaceSections({ nodes, topology, onCanvas }) {
     setClosed(next)
   }
 
-  return (
-    <div className="space-y-2">
-      {sections.map((section) => {
-        const shut = folded.has(section.key)
-        return (
-          <div key={section.key}>
-            <button
-              type="button"
-              onClick={() => toggle(section.key)}
-              aria-expanded={!shut}
-              className="flex w-full items-center gap-1 rounded px-0.5 py-1 text-left text-[10px] font-semibold uppercase tracking-wide text-twilio-gray-60 hover:text-twilio-navy"
-            >
-              {shut ? (
-                <ChevronRight size={11} aria-hidden="true" />
-              ) : (
-                <ChevronDown size={11} aria-hidden="true" />
-              )}
-              <span className="min-w-0 flex-1 truncate" title={section.label}>
-                {section.label}
-              </span>
-              <span className="shrink-0 tabular-nums normal-case tracking-normal">
-                {section.items.length}
-              </span>
-            </button>
+  const items = (list) => (
+    <div className="space-y-1">
+      {list.map((node) => (
+        <div key={node.id} className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={picked.has(node.id)}
+            onChange={(event) => onPick([node.id], event.target.checked)}
+            aria-label={`Include ${node.name} in the new diagram`}
+            className="h-3.5 w-3.5 shrink-0 accent-twilio-blue"
+          />
+          <div className="min-w-0 flex-1">
+            <DraggableItem
+              kind={node.kind}
+              label={node.name}
+              hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
+              placed={onCanvas?.has(node.segmentId)}
+              /* Dragging a real workspace component onto the canvas carries its
+                 ids and links with it, so it lands already bound. */
+              payload={{ name: node.name, bound: true, data: node }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 
+  const header = (key, label, count, shut, level) => (
+    <button
+      type="button"
+      onClick={() => toggle(key)}
+      aria-expanded={!shut}
+      className={
+        level === 0
+          ? 'flex w-full items-center gap-1 border-b border-twilio-gray-20 px-0.5 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-twilio-navy'
+          : 'flex w-full items-center gap-1 rounded px-0.5 py-1 pl-3 text-left text-[10px] font-semibold text-twilio-gray-60 hover:text-twilio-navy'
+      }
+    >
+      {shut ? <ChevronRight size={11} aria-hidden="true" /> : <ChevronDown size={11} aria-hidden="true" />}
+      <span className="min-w-0 flex-1 truncate" title={label}>
+        {label}
+      </span>
+      <span className="shrink-0 font-normal tabular-nums normal-case tracking-normal">{count}</span>
+    </button>
+  )
+
+  return (
+    <div className="space-y-3">
+      {tree.map((entry) => {
+        const shut = folded.has(entry.key)
+        return (
+          <section key={entry.key} aria-label={entry.label}>
+            {header(entry.key, entry.label, entry.count, shut, 0)}
             {!shut && (
-              <div className="space-y-1">
-                {section.items.map((node) => (
-                  <DraggableItem
-                    key={node.id}
-                    kind={node.kind}
-                    label={node.name}
-                    hint={node.sourceType ?? topology?.kinds?.[node.kind]?.label}
-                    placed={onCanvas?.has(node.segmentId)}
-                    /* Dragging a real workspace component onto the canvas carries its
-                       ids and links with it, so it lands already bound. */
-                    payload={{ name: node.name, bound: true, data: node }}
-                  />
-                ))}
+              <div className="mt-1 space-y-1">
+                {entry.items.length > 0 && items(entry.items)}
+                {entry.subs.map((sub) => {
+                  const subShut = folded.has(sub.key)
+                  return (
+                    <div key={sub.key}>
+                      {header(sub.key, sub.label, sub.items.length, subShut, 1)}
+                      {!subShut && <div className="pl-3">{items(sub.items)}</div>}
+                    </div>
+                  )
+                })}
               </div>
             )}
-          </div>
+          </section>
         )
       })}
     </div>
@@ -639,16 +803,27 @@ function WorkspaceSections({ nodes, topology, onCanvas }) {
 
 function DraggableItem({ kind, label, hint, logo, icon, payload, disabled = false, placed = false }) {
   const Icon = icon ?? iconFor(kind)
+  const convert = useConvert()
+  /* A zone is a region, not a component, so it cannot be what a component becomes. */
+  const pickable = Boolean(convert) && !disabled && kind !== 'zone'
+  const pending = convert?.pending === label
 
   return (
     <div
-      draggable={!disabled}
+      draggable={!disabled && !convert}
+      onClick={pickable ? () => convert.onPick({ kind, ...payload }, label) : undefined}
       onDragStart={(event) => {
         event.dataTransfer.setData(DRAG_MIME, JSON.stringify({ kind, ...payload }))
         event.dataTransfer.effectAllowed = 'copy'
       }}
       className={
-        disabled
+        convert
+          ? `flex items-center gap-2 rounded-md border bg-white px-2.5 py-1.5 transition-colors ${
+              pickable
+                ? `cursor-pointer ${pending ? GLOW_PENDING_CLASS : GLOW_CLASS}`
+                : 'border-twilio-gray-20 opacity-40'
+            }`
+          : disabled
           ? 'flex items-center gap-2 rounded-md border border-dashed border-twilio-gray-20 bg-twilio-gray-10 px-2.5 py-1.5 opacity-60'
           : 'flex cursor-grab items-center gap-2 rounded-md border border-twilio-gray-20 bg-white px-2.5 py-1.5 transition-colors hover:border-twilio-blue hover:bg-twilio-blue-light active:cursor-grabbing'
       }

@@ -50,7 +50,7 @@ export default function PalettePicker({ onApply, onPick, height = 'max-h-72' }) 
                   key={color}
                   type="button"
                   onClick={() => onPick(color)}
-                  title={`${color} — use this colour`}
+                  title={`${color} — use this color`}
                   style={{ background: color, color: readableText(color) }}
                   className="nodrag h-5 w-6 text-[9px] leading-none transition-transform hover:scale-110"
                 >

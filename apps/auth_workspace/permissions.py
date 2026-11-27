@@ -89,4 +89,26 @@ class HasSession(permissions.BasePermission):
 
 
 class AllowAny(permissions.AllowAny):
-    """Re-exported so views can opt out without importing from DRF directly."""
+    """
+    Open to everyone, signed in or not. Only for sign-in itself and the health check:
+    anything that serves data uses `SignedIn`.
+    """
+
+
+class SignedIn(permissions.BasePermission):
+    """
+    Reference data (templates, catalog, topology): open in dev, closed behind sign-in in a
+    closed app.
+
+    Nothing in it is customer data, which is why it used to be open -- but "not secret" is
+    not the same as "for anyone who finds the URL", and this app is for one company.
+    """
+
+    message = "Sign in to use this app."
+
+    def has_permission(self, request, view):
+        from django.conf import settings
+
+        if not settings.REQUIRE_ACCOUNT:
+            return True
+        return isinstance(request.user, WorkspacePrincipal)

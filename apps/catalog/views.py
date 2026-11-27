@@ -20,7 +20,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.auth_workspace.models import WriteKeyRevealAudit
-from apps.auth_workspace.permissions import HasAnyWorkspaceCredential, AllowAny
+from apps.auth_workspace.permissions import HasAnyWorkspaceCredential, AllowAny, SignedIn
 from apps.segmentapi import endpoints as ep
 from apps.segmentapi import topology
 from apps.segmentapi.client import SegmentClient
@@ -40,7 +40,7 @@ def _wants_refresh(request) -> bool:
 class TopologyView(APIView):
     """The zone and connection rules, so the canvas and the server cannot drift."""
 
-    permission_classes = [AllowAny]
+    permission_classes = [SignedIn]
 
     def get(self, request):
         return Response(topology.as_payload())
@@ -55,7 +55,7 @@ class CatalogListView(APIView):
     # Open for the same reason as the topology: this is Segment's public catalog,
     # not anybody's workspace. CatalogComponent has no workspace_id at all, so
     # there is nothing here a token could scope.
-    permission_classes = [AllowAny]
+    permission_classes = [SignedIn]
 
     kind: str = ""
 

@@ -24,6 +24,8 @@
  * reported in `warnings`, so a diagram with one unusual line still imports rather than failing whole.
  */
 
+import { isSequenceDiagram, sequenceToFlowchart } from './sequence.js'
+
 /* Shape delimiters, longest opener first: `((` has to be tried before `(`, or every circle would read
    as a round node whose label starts with a parenthesis. */
 const SHAPES = [
@@ -190,7 +192,16 @@ function unwrap(text) {
  * itself numbers links in -- and the order `linkStyle 3` refers to.
  */
 export function parseMermaid(text) {
-  const { body, title } = unwrap(text)
+  const unwrapped = unwrap(text)
+  let { body, title } = unwrapped
+  /* A sequence diagram is rewritten as a flowchart of who talks to whom; see sequence.js. */
+  let sequenceWarnings = []
+  if (isSequenceDiagram(body.replace(/^(\s*%%.*\n)*/, ''))) {
+    const converted = sequenceToFlowchart(body.slice(body.search(/sequenceDiagram/i)))
+    body = converted.text
+    title = title ?? converted.title
+    sequenceWarnings = converted.warnings
+  }
   const result = {
     direction: 'TB',
     title,
@@ -201,7 +212,7 @@ export function parseMermaid(text) {
     styles: new Map(),
     linkStyles: new Map(),
     comments: [],
-    warnings: [],
+    warnings: [...sequenceWarnings],
   }
 
   const stack = []
@@ -222,7 +233,7 @@ export function parseMermaid(text) {
       if (!head) {
         const kind = line.split(/\s/)[0]
         throw new Error(
-          `That is a Mermaid ${kind} diagram. Only flowcharts (\`flowchart\` or \`graph\`) can be imported.`,
+          `That is a Mermaid ${kind} diagram. Only flowcharts (\`flowchart\` or \`graph\`) and sequence diagrams can be imported.`,
         )
       }
       header = true
